@@ -1,0 +1,45 @@
+/* Theme CSS Custom Properties
+ * Dark theme (default): neutral-900 background, neutral-100 text, orange-500 accent
+ * Light theme: neutral-100 background, neutral-900 text, orange-600 accent
+ * Activate light theme by adding class `.theme-light` to body
+ */
+
+:root {
+  /* Dark theme (default) */
+  --bg-primary: #171717;      /* neutral-900 */
+  --bg-secondary: #262626;    /* neutral-800 */
+  --bg-card: #1f1f1f;         /* between neutral-900 and neutral-800 */
+  --text-primary: #f5f5f5;    /* neutral-100 */
+  --text-secondary: #d4d4d4;  /* neutral-300 */
+  --text-muted: #737373;      /* neutral-500 */
+  --accent: #f97316;          /* orange-500 */
+  --accent-hover: #ea580c;    /* orange-600 */
+  --accent-muted: #c2410c;    /* orange-700 */
+  --border: #404040;          /* neutral-700 */
+  --success: #22c55e;         /* green-500 */
+  --success-bg: #14532d;      /* green-900 */
+  --error: #ef4444;           /* red-500 */
+  --error-bg: #7f1d1d;        /* red-900 */
+  --warning: #eab308;         /* yellow-500 */
+  --warning-bg: #713f12;      /* yellow-900 */
+}
+
+/* Light theme */
+.theme-light {
+  --bg-primary: #f5f5f5;      /* neutral-100 */
+  --bg-secondary: #e5e5e5;    /* neutral-200 */
+  --bg-card: #ffffff;         /* white */
+  --text-primary: #171717;    /* neutral-900 */
+  --text-secondary: #404040;  /* neutral-700 */
+  --text-muted: #737373;      /* neutral-500 */
+  --accent: #ea580c;          /* orange-600 */
+  --accent-hover: #c2410c;    /* orange-700 */
+  --accent-muted: #9a3412;    /* orange-800 */
+  --border: #d4d4d4;          /* neutral-300 */
+  --success: #16a34a;         /* green-600 */
+  --success-bg: #dcfce7;      /* green-100 */
+  --error: #dc2626;           /* red-600 */
+  --error-bg: #fee2e2;        /* red-100 */
+  --warning: #ca8a04;         /* yellow-600 */
+  --warning-bg: #fef9c3;      /* yellow-100 */
+}

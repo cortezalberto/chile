@@ -1,0 +1,49 @@
+{
+  "id": "uuid",
+  "nombre": "string",
+  "categoria": "entrada | plato_principal | postre | bebida",
+  "descripcion": {
+    "corta": "string",
+    "menu": "string"
+  },
+  "ingredientes": [
+    {
+      "nombre": "string",
+      "grupo": "proteina | vegetal | lacteo | cereal | otro",
+      "es_procesado": true,
+      "sub_ingredientes": ["string"]
+    }
+  ],
+  "alergenos": {
+    "contiene": ["gluten", "leche", "huevo", "pescado", "frutos_secos", "soja"],
+    "puede_contener_trazas_de": [],
+    "libre_de": [],
+    "apto_celiaco": false,
+    "notas": "string"
+  },
+  "perfil_alimentario": {
+    "vegetariano": false,
+    "vegano": false,
+    "sin_gluten": false,
+    "sin_lacteos": false
+  },
+  "coccion": {
+    "metodos": ["horneado", "frito", "grillado", "crudo"],
+    "usa_aceite": true
+  },
+  "sensorial": {
+    "sabor": ["suave", "intenso", "dulce", "salado"],
+    "textura": ["crocante", "cremoso", "tierno"]
+  },
+  "modificaciones": [
+    {
+      "accion": "retirar | sustituir",
+      "item": "string",
+      "permitido": true
+    }
+  ],
+  "advertencias": ["string"],
+  "rag": {
+    "nivel_riesgo_base": "bajo | medio | alto"
+  }
+}

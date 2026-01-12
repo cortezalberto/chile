@@ -1,0 +1,87 @@
+# Docker Compose for Integrador Backend
+# Services: PostgreSQL with pgvector, Redis, Ollama (optional)
+#
+# Quick Start:
+#   docker compose up -d              # Start PostgreSQL + Redis
+#   docker compose logs -f            # View logs
+#   docker compose down               # Stop services
+#   docker compose down -v            # Stop and remove volumes (reset data)
+#
+# Health Check:
+#   docker compose ps                 # Check service status
+#   curl http://localhost:8000/api/health/detailed  # Check all dependencies
+#
+# Connection Info:
+#   PostgreSQL: localhost:5432 (user: postgres, password: postgres, db: menu_ops)
+#   Redis: localhost:6380 (no auth)
+#
+# Note: Redis is exposed on port 6380 to avoid conflicts with local Redis installations
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: integrador_db
+    environment:
+      POSTGRES_DB: menu_ops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # Performance tuning for development
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d menu_ops"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: integrador_redis
+    # Redis exposed on 6380 to avoid conflicts with local Redis
+    # Application .env should have: REDIS_URL=redis://localhost:6380
+    ports:
+      - "6380:6379"
+    volumes:
+      - redisdata:/data
+    # Enable append-only file for data persistence
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Ollama is optional for RAG functionality
+  # On Windows, you may prefer to run Ollama natively for better performance
+  # Uncomment the following service if you want to run Ollama in Docker
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: integrador_ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama:/root/.ollama
+  #   restart: unless-stopped
+  #   # For GPU support on Linux, add:
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: 1
+  #   #           capabilities: [gpu]
+
+volumes:
+  pgdata:
+    name: integrador_pgdata
+  redisdata:
+    name: integrador_redisdata
+  # ollama:
+  #   name: integrador_ollama

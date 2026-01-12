@@ -1,0 +1,85 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.local.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+nul
+desktop.ini
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+.nyc_output/
+
+# Cache
+.cache/
+*.cache
+.parcel-cache/
+
+# Temporary files
+*.tmp
+*.temp
+.temp/
+tmp/
+
+# Docker (keep docker-compose.yml but ignore volumes)
+docker-volumes/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets (never commit these)
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Frontend specific
+.vite/
+*.tsbuildinfo
+
+# Backend specific
+*.pyc
+.mypy_cache/
+.ruff_cache/
+
+# Claude settings (local only)
+.claude/settings.local.json

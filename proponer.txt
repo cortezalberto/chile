@@ -1,0 +1,1433 @@
+Qué estás diciendo realmente en ese texto (en prosa, con sentido operativo)
+Tu punto de partida es correcto: un menú QR textual (platos + precio) no responde el tipo de preguntas que un comensal necesita para decidir. La decisión real pasa por cosas que el texto del menú suele omitir o expresar mal: qué es el plato en términos simples, qué tiene, si pica, si tiene alérgenos, si se puede adaptar, si es liviano, si es para compartir, etc.
+Ahí aparece una necesidad concreta: un “intérprete” de la carta. Ese intérprete no es un mozo humano (porque está ocupado), sino un chatbot diseñado para la carta.
+Pero enseguida tu texto pone la condición más importante de todas: ese chatbot no puede ser “libre”. Si lo dejás libre, el modelo responde “por intuición” (por patrones de entrenamiento) y puede inventar ingredientes o alérgenos, lo cual en gastronomía es un riesgo real. Por eso tu texto afirma que el chatbot debe ser confiable, y que la forma correcta de lograrlo es RAG.
+RAG, en tu texto, no es un concepto teórico: es un mecanismo de seguridad y precisión. En lugar de “responder con lo que cree”, el sistema primero busca evidencia en tu propia base de conocimiento (carta, fichas técnicas, alérgenos, notas del chef) y recién después genera la respuesta, apoyándose en esa evidencia. Esto está alineado con la definición de RAG y su flujo de trabajo típico: ingesta → chunks → embeddings → recuperación semántica → construcción del prompt → generación → referencia y trazabilidad. 
+Informe-RAG-Retrieval-Augmented…
+En otras palabras: tu chatbot no “sabe cocina”: lee tu carta y tus fichas a demanda, y responde usando lo que encuentra.
+________________________________________
+Por qué el flujo “ingesta → chunks → embeddings…” es esencial (y no decorativo)
+Tu texto menciona el pipeline como una flecha “técnica”, pero el significado real es:
+1.	Ingesta y preprocesamiento: tomás documentos (PDF, texto, fichas) y los convertís en texto usable. Luego los partís en pedazos manejables (chunks). 
+Informe-RAG-Retrieval-Augmented…
+2.	Vectorización y almacenamiento: cada chunk se transforma en un embedding (vector numérico) y se guarda en una base vectorial. 
+Informe-RAG-Retrieval-Augmented…
+3.	Recuperación semántica: la pregunta del usuario también se vectoriza y se buscan los chunks más parecidos (aunque no coincidan palabras exactas). 
+Informe-RAG-Retrieval-Augmented…
+4.	Construcción del prompt: armás un prompt que incluye pregunta + evidencia recuperada. 
+Informe-RAG-Retrieval-Augmented…
+5.	Generación: el LLM redacta la respuesta con esa evidencia. 
+Informe-RAG-Retrieval-Augmented…
+6.	Referencia y trazabilidad: guardás “qué pedazos se usaron” para poder auditar y mejorar. 
+Informe-RAG-Retrieval-Augmented…
+Lo importante: este flujo no es “para que ande”, es para que ande sin mentir y para que vos puedas ver por qué contestó lo que contestó.
+________________________________________
+Qué debe contestar el chatbot: no es una lista, es un contrato de UX
+Cuando tu texto lista “lo mínimo viable” (explicación, ingredientes/alérgenos, restricciones, recomendaciones, comparaciones), eso en realidad es un contrato funcional: define qué tipo de valor reemplaza al mozo.
+Pero hay una jerarquía implícita:
+•	Nivel 1 (seguridad): ingredientes y alérgenos (lo más delicado).
+•	Nivel 2 (comprensión): explicar el plato “en criollo” (traducción gastronómica).
+•	Nivel 3 (decisión): recomendaciones, comparaciones, “algo liviano”, etc.
+Para un MVP de prueba, lo crítico es que el bot haga Nivel 1 y 2 bien, aunque lo demás sea básico.
+________________________________________
+“El chatbot NO debe ser libre”: qué significa técnicamente
+En tu texto, esto significa tres reglas de producto:
+1.	Acotado a la carta: responde solo con tu conocimiento.
+2.	Si no hay evidencia, no inventa: responde con transparencia.
+3.	Fallback: si RAG no encuentra nada útil, hay un plan B.
+Esto coincide con las estrategias recomendadas cuando RAG falla:
+•	fallback a búsqueda tradicional por palabras clave,
+•	escalado a humano,
+•	respuesta parcial con disclaimer,
+y un principio fuerte: la transparencia genera más confianza que forzar respuestas incorrectas. 
+Informe-RAG-Retrieval-Augmented…
+En gastronomía, ese principio es todavía más importante porque “equivocarse” puede ser grave.
+________________________________________
+“Fuente de verdad”: qué significa para tu MVP
+Cuando vos decís “modelar la info”, estás describiendo la diferencia entre:
+•	Datos estructurados (campos claros: alérgenos, tags, si es sin TACC)
+vs
+•	Documentos (texto libre: ficha técnica, notas del chef, glosario).
+Para un MVP web de prueba, podés arrancar con solo documentos (un PDF o un texto) y meter tags después.
+Lo único que no podés “dejar para después” es: alérgenos deben estar explícitos en la fuente, porque el bot solo puede ser tan seguro como tus documentos.
+________________________________________
+Reglas imprescindibles: por qué aparecen (y qué te obligan a construir)
+Tu texto menciona:
+•	no inventar ingredientes/alérgenos
+•	no mezclar sucursales
+•	logging/auditoría
+•	monitoreo (latencia/costo/feedback)
+Eso, en prosa, significa:
+1.	Necesitás una política de respuesta: “si no encuentro evidencia, digo que no puedo confirmarlo”.
+2.	Necesitás filtros por sucursal (aunque sea un MVP).
+3.	Necesitás registro mínimo: pregunta, chunks usados, score/confianza, respuesta (para corregir y mejorar).
+4.	Necesitás observar costos y latencia, aunque sea con logs simples.
+El informe lo plantea fuerte: la observabilidad en RAG es esencial para calidad, rendimiento y seguridad; sin eso operás “a ciegas”, y recomienda métricas como latencia end-to-end, costo por consulta, recall/precisión de recuperación y feedback de usuario. 
+Informe-RAG-Retrieval-Augmented…
+
+Y también propone como enfoque: comenzar simple e iterar con un pipeline básico pero robusto. 
+Informe-RAG-Retrieval-Augmented…
+
+
+
+
+Para tu escenario —un restaurante con múltiples sucursales, dos PWAs operativas (comensal y mozo), un dashboard para administración, cocina en tiempo real y un chatbot de carta con RAG— la arquitectura tiene que nacer de principios claros. No alcanza con “que funcione”: debe sostener operación diaria, crecer en sucursales, usuarios simultáneos, y eventualmente abrirse a más restaurantes sin reescrituras. Lo que sigue es la misma propuesta que listaste, pero explicada en prosa, con justificación arquitectónica y conectada directamente con tu realidad operativa.
+________________________________________
+Principios de diseño para tu caso
+El primer principio es asumir desde el inicio un multi-tenant real. En tu dominio, “restaurante” no es una etiqueta: es un límite organizacional y de datos. Un tenant representa un restaurante (o marca), y cada branch representa una sucursal con reglas propias: mesas, personal, precios, disponibilidad de productos, cocina y flujo de atención. Por eso todo lo operativo —mesas, sesiones, rondas, tickets, cuenta, pagos— debe estar acotado por sucursal (branch-scoped). Esta decisión evita el error más común en sistemas gastronómicos multi-sucursal: mezclar órdenes, saldos o disponibilidad entre sedes. Además, te habilita a escalar agregando sucursales sin duplicar sistemas ni “clonar bases de datos” por desesperación.
+El segundo principio es que la autorización no puede basarse solo en roles. Un mozo “es mozo”, sí, pero no lo es en abstracto: lo es en una sucursal concreta y en un turno concreto. Lo mismo aplica al gerente y al cocinero. Por eso la autorización debe ser RBAC con contexto: el backend no decide solo “tiene rol WAITER”, sino “tiene rol WAITER y está habilitado en branch X”. Este matiz es el que te permite decir, con precisión: “este mozo ve solo sus mesas”, “este gerente administra solo su sucursal”, “esta cocina recibe solo rondas de su sede”. En sistemas de operación real, esto reduce incidentes, fraudes internos y errores de coordinación.
+El tercer principio es incorporar una capa de borde (Nginx) no como una formalidad, sino como el punto de control que te permite operar con seguridad y performance. Nginx delante de las PWAs y del backend te da: terminación TLS (una única entrada segura), ruteo consistente, compresión y cache de estáticos, control de rate limiting para frenar abuso o bots, y soporte “limpio” para pasar conexiones WebSocket hacia el backend. En otras palabras, Nginx funciona como el “portero” del sistema: reduce carga, filtra tráfico nocivo y estandariza el acceso.
+El cuarto principio es que mozos y cocina requieren tiempo real. Tu operación lo demanda: rondas que entran, rondas listas, llamados de mesa, pedido de cuenta, confirmación de pago. Si resolvés eso con consultas cada pocos segundos (polling), vas a consumir recursos, generar latencias perceptibles y complicarte cuando tengas varias sucursales o muchos mozos conectados. Por eso la estrategia correcta es WebSockets (o SSE) para el canal en vivo, más un mecanismo de pub/sub (como Redis) para poder escalar horizontalmente. Redis no es “por moda”: es el puente que permite que, aunque tengas varias instancias de FastAPI, todas puedan publicar eventos y que el mozo reciba la notificación correcta sin importar qué instancia procesó el cambio.
+El quinto principio es separar el RAG del núcleo transaccional. El chatbot del menú es fundamental para la experiencia del comensal, pero no debe poner en riesgo lo más delicado: pedidos, pagos y estado de mesas. El RAG consume CPU, puede tener latencias variables, y requiere rate limiting estricto. Por eso se integra como un “servicio interno” o módulo aislado: comparte infraestructura, pero no contamina el flujo transaccional. Así, si el chatbot tiene un pico, no se cae la toma de pedidos ni el cobro.
+________________________________________
+Arquitectura propuesta a alto nivel
+La arquitectura se organiza naturalmente en tres capas: Edge, App Layer e Infra.
+En el Edge, Nginx actúa como reverse proxy y firewall básico de aplicación. Desde ahí servís los archivos estáticos del dashboard y de las dos PWAs (o simplemente los redirigís a donde los hostees), y proxyás el tráfico del negocio hacia FastAPI. Separar rutas como /api para REST y /ws para WebSocket te da claridad operativa: se monitorea distinto, se limita distinto, se escala distinto. En esa capa también aplicás rate limit por IP o por token para endpoints sensibles, especialmente autenticación y chatbot, y establecés headers de seguridad y políticas de CORS consistentes.
+En la App Layer, la mejor estrategia para tu etapa actual es un “monolito modular” en FastAPI: un único backend desplegable, pero organizado por dominios, con límites explícitos. Esto te da lo mejor de ambos mundos: simplicidad de despliegue y separación conceptual que permite escalar sin reescrituras.
+•	Identity & Access cubre login del personal, JWT access/refresh, RBAC por sucursal y auditoría. Esto no es un módulo opcional: es el corazón de la seguridad y la gobernanza.
+•	Catalog gestiona productos globales, disponibilidad por sucursal y precios por sucursal. En tu caso es crítico porque el mismo producto puede no existir en una sucursal o variar su precio.
+•	Floor & Service gestiona mesas, sesiones de mesa, rondas múltiples y llamados de mesa. Acá vive la lógica “operativa del salón”.
+•	Kitchen es el flujo de producción: cola de rondas y cambio de estados (IN_KITCHEN, READY, SERVED).
+•	Billing & Payments controla cuenta por sesión, pagos parciales (MP o efectivo) y la regla de negocio que pediste: una mesa solo se libera si la cuenta está completamente pagada.
+•	RAG / Chat Menu indexa y consulta conocimiento (pgvector) y conversa con Ollama (qwen2.5:7b) bajo políticas anti-alucinación para evitar inventar ingredientes o alérgenos.
+Finalmente, en la capa de Infra el núcleo es PostgreSQL con pgvector: sirve tanto para transacciones como para embeddings sin duplicar tecnologías. Redis aparece como recomendación fuerte porque habilita pub/sub para tiempo real, cache de lectura (menú por sucursal, features flags) y mecanismos de rate limiting más finos si lo necesitás. Si vas a cargar PDFs o fichas de platos, MinIO es el complemento lógico para almacenamiento de objetos sin depender de proveedores externos. Y una capa de observabilidad mínima (logs estructurados, métricas y trazas) es lo que te permite operar el sistema en serio: ver latencias, errores, caídas por sucursal y problemas de rendimiento antes de que te exploten en el servicio.
+________________________________________
+Multi-tenant y aislamiento: lo que realmente escala
+Para escalar sin complicarte, el modelo recomendado es pooling con scoping por fila. Es decir: una sola base de datos compartida, pero con tenant_id y branch_id en todas las tablas donde corresponda. Esto te da eficiencia y simplicidad operativa: un solo clúster, backups centralizados, migraciones únicas.
+La regla de oro es que ninguna consulta operativa exista sin filtro por tenant y sucursal. Y esto no debe depender de que el programador “se acuerde”: se vuelve obligatorio en el código mediante una dependencia central en FastAPI, algo como current_context() que inyecta tenant_id, branch_id y permisos y que es usada por repositorios/servicios para construir queries seguras.
+¿Cuándo pasás a “silo por tenant”? Cuando tu producto deja de ser interno y lo vendés a terceros y aparece un cliente grande que exige aislamiento fuerte por compliance o riesgo. Mientras no sea el caso, el pooling escala muy bien y te mantiene veloz.
+________________________________________
+Seguridad y autorización: personal y comensales son mundos distintos
+Para el personal (mozos, gerentes, cocineros) lo correcto es login con usuario/clave o SSO si la organización lo requiere. A partir de ahí emitís JWT con sub (user_id), tenant_id, branch_ids permitidos y roles. Esto habilita RBAC fino: por ejemplo, cocina puede cambiar estados de rondas, pero el mozo no; el gerente puede administrar catálogo y personal de su sucursal, pero no tocar otras.
+Para los comensales, el objetivo es no complicar. En un restaurante real, pedir login al cliente destruye conversión. Por eso la estrategia recomendada es token de mesa vía QR: un token firmado (HMAC) con expiración que representa tenant_id, branch_id, table_id y, idealmente, table_session_id para no mezclar grupos distintos en el tiempo. Ese token permite ver el menú de esa sucursal, crear rondas, pedir la cuenta e iniciar pagos. Así mantenés el sistema simple sin crear cuentas “fantasma” de clientes.
+________________________________________
+Tiempo real: el punto donde los sistemas se rompen si no lo pensás bien
+El tablero del mozo y la cocina dependen de estado vivo. La forma escalable de resolverlo es: guardar primero en DB (fuente de verdad), publicar evento en Redis, y que un gateway WebSocket en FastAPI empuje ese evento a quienes correspondan. Lo crítico es que el canal de eventos esté particionado por sucursal (branch_id) y/o mozo (waiter_id). Con eso, aunque tengas múltiples instancias del backend, no perdés notificaciones y no dependés de que “justo pegue” en la misma instancia donde vive el socket.
+Los eventos mínimos que describiste son claros y suficientes para empezar: ronda enviada, ronda lista, llamado de mesa, cuenta solicitada, pago aprobado, cuenta pagada y mesa liberada. Con eso el mozo y la cocina trabajan con precisión y sin confusiones.
+________________________________________
+Productos con precio por sucursal: tu modelo debe soportar variabilidad
+Tu caso “producto no se vende en sucursal A” y “producto tiene precios distintos en sucursales” se resuelve con una estructura muy estable: product global del tenant y branch_product para disponibilidad y precio por sucursal. Ese diseño te permite agregar promociones y precios históricos sin romper nada, y mantiene el catálogo consistente.
+________________________________________
+RAG integrado sin romper el core
+El chatbot debe operar con límites claros: rate limit, retrieval filtrado por branch_id para no mezclar cartas, y evidencia obligatoria para declarar alérgenos. Además, debe loguear pregunta, chunks usados, scores, respuesta y decisión. Esto no es “por curiosidad”: es lo que te permite auditar, mejorar calidad y evitar riesgos. Y si mañana crece mucho, lo podés extraer como servicio independiente sin tocar pedidos ni pagos, porque ya lo diseñaste desacoplado.
+________________________________________
+Routing recomendado en Nginx
+Separar rutas por función te ordena el sistema: /dashboard para administración, /waiter para PWA mozo, /menu para PWA comensal, /api para REST y /ws para sockets. Sumás TLS, compresión, cache de estáticos y rate limiting para /api/auth y /api/chat. Eso te deja una entrada robusta y previsible.
+________________________________________
+Escalabilidad por etapas (sin rehacer)
+La arquitectura te deja crecer por capas:
+•	Etapa 1 (MVP sólido): una instancia FastAPI, Postgres+pgvector, Ollama local; incluso podés usar polling breve si querés simplificar el inicio.
+•	Etapa 2 (operación real): Redis + WebSockets, auditoría y métricas, MinIO para documentos, y 2+ instancias FastAPI detrás de Nginx.
+•	Etapa 3 (alta demanda o multi-cliente): separar RAG, agregar colas para indexación y tareas pesadas, replicación/read replicas en DB y, si aparece el requerimiento, aislamiento fuerte por tenant.
+Perfecto: sí, prefiero REST y WS separados para tu caso (dos procesos/puertos). Es la opción que mejor escala y te evita dolores típicos en producción cuando el tiempo real empieza a crecer.
+A continuación te dejo el entregable “cerrado” para esa decisión: topología, responsabilidades, contratos de evento, Redis pub/sub, Nginx, y un esqueleto de código (REST + WS) listo para completar.
+________________________________________
+1) Por qué separar REST y WS en tu sistema
+Separarlos te da 5 ventajas concretas:
+1.	Escalado independiente: si los mozos/cocina generan muchas conexiones, escalás WS sin tocar REST.
+2.	Aislamiento de fallos: si WS se cae por conexiones o timeouts, REST sigue cobrando/pidiendo rondas.
+3.	Operación más clara: métricas, logs y alertas separadas (picos de latencia, reconexiones, etc.).
+4.	Deploy seguro: cambios en endpoints REST no impactan sesiones WebSocket vivas.
+5.	Nginx simple y robusto: rutas /api a REST y /ws a WS sin mezclar comportamientos.
+________________________________________
+2) Topología recomendada (puertos, procesos y flujo)
+•	Nginx (443)
+o	/api/* → rest-api (FastAPI) :8000
+o	/ws/* → ws-gateway (FastAPI) :8001
+•	PostgreSQL + pgvector: transaccional + RAG
+•	Redis: pub/sub de eventos + cache + rate limit opcional
+•	Ollama: embeddings + chat (solo lo llama REST; WS no debería llamar LLM)
+Flujo de eventos (operación real)
+1.	Comensal hace POST /api/rounds/{id}/submit
+2.	REST:
+o	guarda en DB
+o	publica evento en Redis (ROUND_SUBMITTED)
+3.	WS:
+o	está suscrito a Redis
+o	empuja el evento al mozo/cocina conectados
+4.	Cocina marca READY en REST → REST publica ROUND_READY → WS notifica al mozo
+Regla: WS no escribe DB (salvo si querés ACKs muy específicos). WS es “transport layer” de eventos.
+________________________________________
+3) Contrato de evento único (estándar de todo el sistema)
+Usá un payload uniforme para no volverte loco:
+{
+  "type": "ROUND_READY",
+  "tenant_id": 1,
+  "branch_id": 3,
+  "table_id": 12,
+  "session_id": 88,
+  "entity": {"round_id": 501, "check_id": null, "call_id": null},
+  "actor": {"user_id": 20, "role": "KITCHEN"},
+  "ts": "2026-01-08T22:10:00Z",
+  "v": 1
+}
+Eventos mínimos (los que ya definimos)
+•	ROUND_SUBMITTED
+•	ROUND_IN_KITCHEN
+•	ROUND_READY
+•	ROUND_SERVED
+•	SERVICE_CALL_CREATED
+•	SERVICE_CALL_ACKED
+•	CHECK_REQUESTED
+•	PAYMENT_APPROVED
+•	CHECK_PAID
+•	TABLE_CLEARED
+________________________________________
+4) Canales Redis (simple y escalable)
+Tres niveles, de menor a mayor granularidad:
+•	branch:{branch_id}:waiters (eventos sucursal)
+•	branch:{branch_id}:kitchen
+•	user:{user_id} (eventos directos a un mozo específico)
+Estrategia práctica:
+•	Eventos de mesa van al canal de sucursal y opcionalmente al canal del mozo asignado.
+•	Cocina escucha solo su sucursal.
+________________________________________
+5) Seguridad de WS (igual de estricta que REST)
+WS se autentica con JWT (del personal), igual que REST.
+En el handshake:
+•	GET /ws/waiter?token=<JWT>
+•	GET /ws/kitchen?token=<JWT>
+El WS gateway:
+1.	valida JWT
+2.	extrae tenant_id, branch_ids, roles
+3.	se suscribe a canales Redis correspondientes
+4.	solo re-emite eventos permitidos por rol/sucursal
+________________________________________
+6) Nginx (config actualizada para 2 upstreams)
+upstream rest_api_upstream {
+  server 127.0.0.1:8000;
+}
+
+upstream ws_gateway_upstream {
+  server 127.0.0.1:8001;
+}
+
+limit_req_zone $binary_remote_addr zone=auth_zone:10m rate=10r/s;
+limit_req_zone $binary_remote_addr zone=chat_zone:10m rate=3r/s;
+
+server {
+  listen 443 ssl http2;
+  server_name your-domain.com;
+
+  # TLS (certs) ...
+  # Security headers ...
+  # Static /menu /waiter /dashboard ...
+
+  location /api/ {
+    proxy_pass http://rest_api_upstream;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+    if ($request_uri ~* "^/api/auth/") { limit_req zone=auth_zone burst=20 nodelay; }
+    if ($request_uri ~* "^/api/chat/") { limit_req zone=chat_zone burst=10 nodelay; }
+  }
+
+  location /ws/ {
+    proxy_pass http://ws_gateway_upstream;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+
+    proxy_read_timeout 3600;
+  }
+}
+________________________________________
+7) Estructura de repos (ordenada) para tu backend
+backend/
+  shared/
+    auth.py              # JWT verify, current_user, RBAC helpers
+    events.py            # event schema + publish() a Redis
+    settings.py          # env vars (DB, Redis, Ollama)
+    schemas.py           # Pydantic comunes
+  rest_api/
+    main.py              # FastAPI REST app
+    db.py                # SQLAlchemy session
+    models.py            # SQLAlchemy models multi-tenant
+    routers/
+      auth.py
+      catalog.py
+      tables.py
+      rounds.py
+      kitchen.py
+      billing.py
+      rag.py
+  ws_gateway/
+    main.py              # FastAPI WS app
+    redis_subscriber.py  # subscribe + dispatch
+    connection_manager.py# conexiones por user/branch/role
+________________________________________
+8) Esqueleto de código (MVP funcional) — REST publica, WS consume
+8.1 shared/events.py (publicación Redis)
+import json
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+import redis.asyncio as redis
+
+@dataclass
+class Event:
+    type: str
+    tenant_id: int
+    branch_id: int
+    table_id: Optional[int] = None
+    session_id: Optional[int] = None
+    entity: Dict[str, Any] = None
+    actor: Dict[str, Any] = None
+    ts: str = None
+    v: int = 1
+
+    def to_json(self) -> str:
+        d = asdict(self)
+        d["entity"] = d["entity"] or {}
+        d["actor"] = d["actor"] or {}
+        d["ts"] = d["ts"] or datetime.now(timezone.utc).isoformat()
+        return json.dumps(d, ensure_ascii=False)
+
+async def publish_event(r: redis.Redis, channel: str, event: Event) -> None:
+    await r.publish(channel, event.to_json())
+
+def channel_branch_waiters(branch_id: int) -> str:
+    return f"branch:{branch_id}:waiters"
+
+def channel_branch_kitchen(branch_id: int) -> str:
+    return f"branch:{branch_id}:kitchen"
+
+def channel_user(user_id: int) -> str:
+    return f"user:{user_id}"
+8.2 REST: ejemplo de endpoint que publica evento (round submit)
+# rest_api/routers/rounds.py
+from fastapi import APIRouter, Depends
+import redis.asyncio as redis
+
+from shared.events import Event, publish_event, channel_branch_waiters, channel_branch_kitchen
+
+router = APIRouter()
+
+def get_redis() -> redis.Redis:
+    return redis.Redis(host="localhost", port=6379, decode_responses=True)
+
+@router.post("/rounds/{round_id}/submit")
+async def submit_round(round_id: int, r=Depends(get_redis)):
+    # 1) validar permisos (tenant/branch) + persistir estado en Postgres
+    tenant_id = 1
+    branch_id = 3
+    table_id = 12
+    session_id = 88
+
+    # 2) publicar eventos para mozos y cocina
+    ev = Event(
+        type="ROUND_SUBMITTED",
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        table_id=table_id,
+        session_id=session_id,
+        entity={"round_id": round_id},
+        actor={"role": "DINER"}
+    )
+    await publish_event(r, channel_branch_waiters(branch_id), ev)
+    await publish_event(r, channel_branch_kitchen(branch_id), ev)
+
+    return {"ok": True, "round_id": round_id}
+8.3 WS Gateway: subscribe Redis y empujar a conexiones
+# ws_gateway/redis_subscriber.py
+import asyncio
+import json
+from typing import Callable, Awaitable
+
+import redis.asyncio as redis
+
+async def run_subscriber(
+    redis_url: str,
+    channels: list[str],
+    on_message: Callable[[dict], Awaitable[None]]
+):
+    r = redis.from_url(redis_url, decode_responses=True)
+    pubsub = r.pubsub()
+    await pubsub.subscribe(*channels)
+
+    async for msg in pubsub.listen():
+        if msg is None or msg.get("type") != "message":
+            continue
+        data = json.loads(msg["data"])
+        await on_message(data)
+# ws_gateway/connection_manager.py
+from collections import defaultdict
+from typing import Dict, Set
+from fastapi import WebSocket
+
+class ConnectionManager:
+    def __init__(self):
+        self.by_user: Dict[int, Set[WebSocket]] = defaultdict(set)
+        self.by_branch: Dict[int, Set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, ws: WebSocket, user_id: int, branch_ids: list[int]):
+        await ws.accept()
+        self.by_user[user_id].add(ws)
+        for b in branch_ids:
+            self.by_branch[b].add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        for s in self.by_user.values():
+            s.discard(ws)
+        for s in self.by_branch.values():
+            s.discard(ws)
+
+    async def send_to_user(self, user_id: int, payload: dict):
+        for ws in list(self.by_user.get(user_id, [])):
+            await ws.send_json(payload)
+
+    async def send_to_branch(self, branch_id: int, payload: dict):
+        for ws in list(self.by_branch.get(branch_id, [])):
+            await ws.send_json(payload)
+# ws_gateway/main.py
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+
+from ws_gateway.connection_manager import ConnectionManager
+from ws_gateway.redis_subscriber import run_subscriber
+
+app = FastAPI(title="WS Gateway")
+mgr = ConnectionManager()
+
+REDIS_URL = "redis://localhost:6379"
+
+# MVP: parse JWT (en serio luego), devolver user_id/branch_ids/roles
+def decode_token(token: str):
+    # TODO: validar JWT real
+    return {"user_id": 20, "branch_ids": [3], "roles": ["WAITER"]}
+
+@app.on_event("startup")
+async def startup():
+    async def on_event(ev: dict):
+        # routing simple: por branch_id y/o user_id si viene
+        branch_id = ev.get("branch_id")
+        await mgr.send_to_branch(branch_id, ev)
+
+    # Suscribir a canales (en prod: por tenant/branch dinámico, acá MVP)
+    asyncio.create_task(run_subscriber(
+        redis_url=REDIS_URL,
+        channels=[
+            "branch:3:waiters",
+            "branch:3:kitchen"
+        ],
+        on_message=on_event
+    ))
+
+@app.websocket("/ws/waiter")
+async def waiter_ws(ws: WebSocket, token: str = Query(...)):
+    ctx = decode_token(token)
+    await mgr.connect(ws, ctx["user_id"], ctx["branch_ids"])
+    try:
+        while True:
+            # Mantener viva la conexión; podés recibir ACKs del cliente si querés
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        mgr.disconnect(ws)
+________________________________________
+9) Cómo encaja esto con tu producto (roles y permisos)
+•	Gerente/Admin: entra por REST, administra catálogo, personal, mesas, RAG docs.
+•	Mozo: se autentica (REST), abre WS, recibe eventos:
+o	rondas nuevas
+o	ronda READY
+o	mesa llama
+o	mesa pide cuenta
+o	pagos aprobados
+•	Cocina: se autentica, abre WS, recibe rondas SUBMITTED; actualiza estados por REST.
+•	Comensal: usa token QR (sin login), hace pedidos por REST; los eventos los reciben mozo/cocina por WS.
+________________________________________
+10) Próximo paso que te conviene (ya en código “real”)
+Ahora que elegimos separación REST/WS, lo que sigue (sin preguntas adicionales) es:
+1.	REST (FastAPI)
+o	modelos SQLAlchemy multi-tenant completos
+o	endpoints base: tables/sessions/rounds/check/payments/service_calls
+o	publicación Redis en cada cambio de estado
+2.	WS Gateway
+o	JWT real (verificación de firma + expiración)
+o	suscripción dinámica a canales según branch_ids del usuario
+o	routing por branch_id y opcional user_id
+3.	Nginx
+o	config final para /api y /ws, más estáticos /menu, /waiter, /dashboard
+Si querés, en el próximo mensaje te lo bajo como un “starter kit” completo con:
+•	docker-compose.yml (postgres+pgvector, redis, ollama opcional)
+•	REST service + WS service (dos uvicorn)
+•	estructura de carpetas ya armada
+•	endpoints “mínimos pero completos” para mesa/rondas/pagos/liberar mesa
+•	eventos ya disparando y viéndose en el WS (sin front todavía)
+Y después de eso hacemos PWA Mozo mínima (tablero + notificaciones), y PWA Comensal mínima (crear rondas + pedir cuenta + chatbot).
+si
+Genial. Acá tenés un Starter Kit completo (REST + WS separados, Postgres+pgvector, Redis, Ollama opcional) con estructura de proyecto, docker-compose, modelos SQLAlchemy multi-tenant mínimos, endpoints operativos clave y WS Gateway que re-emite eventos publicados por REST.
+Objetivo: que en 15–30 min tengas flujo real: comensal envía ronda → cocina marca READY → mozo recibe notificación en WS, + piden cuenta → mozo recibe → mozo confirma efectivo → libera mesa.
+________________________________________
+0) Estructura de carpetas
+Creá esto:
+backend/
+  docker-compose.yml
+  .env.example
+  requirements.txt
+  shared/
+    settings.py
+    auth.py
+    events.py
+    schemas.py
+  rest_api/
+    main.py
+    db.py
+    models.py
+    seed.py
+    routers/
+      auth.py
+      waiter.py
+      kitchen.py
+      diner.py
+      billing.py
+  ws_gateway/
+    main.py
+    connection_manager.py
+    redis_subscriber.py
+________________________________________
+1) docker-compose.yml (Postgres+pgvector, Redis, Ollama)
+backend/docker-compose.yml
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: menu_ops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+    # Si estás en Windows y querés usar Ollama local fuera de Docker, podés apagar este servicio.
+
+volumes:
+  pgdata:
+  ollama:
+________________________________________
+2) .env.example
+backend/.env.example
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/menu_ops
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=dev-secret-change-me
+JWT_ISSUER=menu-ops
+JWT_AUDIENCE=menu-ops-users
+
+OLLAMA_URL=http://localhost:11434
+EMBED_MODEL=nomic-embed-text
+CHAT_MODEL=qwen2.5:7b
+________________________________________
+3) requirements.txt
+backend/requirements.txt
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
+httpx==0.27.2
+redis==5.2.1
+PyJWT==2.10.1
+pgvector==0.3.6
+pydantic==2.10.4
+________________________________________
+4) Shared (settings/auth/events/schemas)
+4.1 settings.py
+backend/shared/settings.py
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/menu_ops")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ISSUER = os.getenv("JWT_ISSUER", "menu-ops")
+JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "menu-ops-users")
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "qwen2.5:7b")
+4.2 auth.py (JWT simple + RBAC por sucursal)
+backend/shared/auth.py
+from __future__ import annotations
+import time
+from typing import Any, Dict, List, Optional
+
+import jwt
+from fastapi import HTTPException, Header
+
+from shared.settings import JWT_SECRET, JWT_ISSUER, JWT_AUDIENCE
+
+def sign_jwt(payload: Dict[str, Any], ttl_seconds: int = 60 * 60) -> str:
+    now = int(time.time())
+    data = {
+        **payload,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "iat": now,
+        "exp": now + ttl_seconds,
+    }
+    return jwt.encode(data, JWT_SECRET, algorithm="HS256")
+
+def verify_jwt(token: str) -> Dict[str, Any]:
+    try:
+        return jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER
+        )
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+def get_bearer_token(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    return authorization.split(" ", 1)[1].strip()
+
+def current_user_context(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    token = get_bearer_token(authorization)
+    claims = verify_jwt(token)
+    # claims: sub, tenant_id, branch_ids, roles
+    return claims
+
+def require_roles(ctx: Dict[str, Any], allowed: List[str]) -> None:
+    roles = set(ctx.get("roles", []))
+    if not roles.intersection(set(allowed)):
+        raise HTTPException(status_code=403, detail=f"Insufficient role. Need one of: {allowed}")
+
+def require_branch(ctx: Dict[str, Any], branch_id: int) -> None:
+    if branch_id not in set(ctx.get("branch_ids", [])):
+        raise HTTPException(status_code=403, detail="No access to this branch")
+4.3 events.py (Redis pub/sub + canales)
+backend/shared/events.py
+from __future__ import annotations
+import json
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+import redis.asyncio as redis
+
+@dataclass
+class Event:
+    type: str
+    tenant_id: int
+    branch_id: int
+    table_id: Optional[int] = None
+    session_id: Optional[int] = None
+    entity: Dict[str, Any] = None
+    actor: Dict[str, Any] = None
+    ts: str = None
+    v: int = 1
+
+    def to_json(self) -> str:
+        d = asdict(self)
+        d["entity"] = d["entity"] or {}
+        d["actor"] = d["actor"] or {}
+        d["ts"] = d["ts"] or datetime.now(timezone.utc).isoformat()
+        return json.dumps(d, ensure_ascii=False)
+
+def ch_branch_waiters(branch_id: int) -> str:
+    return f"branch:{branch_id}:waiters"
+
+def ch_branch_kitchen(branch_id: int) -> str:
+    return f"branch:{branch_id}:kitchen"
+
+def ch_user(user_id: int) -> str:
+    return f"user:{user_id}"
+
+async def publish(r: redis.Redis, channel: str, ev: Event) -> None:
+    await r.publish(channel, ev.to_json())
+4.4 schemas.py (Pydantic)
+backend/shared/schemas.py
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
+
+Role = Literal["WAITER", "MANAGER", "KITCHEN", "ADMIN"]
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+class LoginOut(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+
+class TableCard(BaseModel):
+    table_id: int
+    code: str
+    status: str
+    session_id: Optional[int] = None
+    open_rounds: int = 0
+    pending_calls: int = 0
+    check_status: Optional[str] = None
+
+class DinerSubmitRoundIn(BaseModel):
+    table_id: int
+    items: List[dict] = Field(default_factory=list)  # MVP: [{product_id, qty, notes?}]
+
+class KitchenSetRoundStatusIn(BaseModel):
+    status: Literal["IN_KITCHEN", "READY", "SERVED"]
+
+class CheckRequestIn(BaseModel):
+    table_id: int
+
+class CashPayIn(BaseModel):
+    check_id: int
+    amount_cents: int = Field(gt=0)
+
+class ClearTableIn(BaseModel):
+    table_id: int
+________________________________________
+5) REST API (FastAPI) — modelos + DB + routers
+5.1 db.py
+backend/rest_api/db.py
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from shared.settings import DATABASE_URL
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+5.2 models.py (multi-tenant mínimo, operativo)
+backend/rest_api/models.py
+from __future__ import annotations
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import (
+    BigInteger, Integer, Text, Boolean, DateTime, ForeignKey, JSON, ARRAY
+)
+
+class Base(DeclarativeBase):
+    pass
+
+class Tenant(Base):
+    __tablename__ = "tenant"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+
+class Branch(Base):
+    __tablename__ = "branch"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    timezone: Mapped[str] = mapped_column(Text, default="America/Argentina/Mendoza")
+
+class User(Base):
+    __tablename__ = "app_user"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(Text, nullable=False)  # MVP: plaintext
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+class UserBranchRole(Base):
+    __tablename__ = "user_branch_role"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("app_user.id"), nullable=False)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)  # WAITER/MANAGER/KITCHEN/ADMIN
+
+class Product(Base):
+    __tablename__ = "product"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+class BranchProduct(Base):
+    __tablename__ = "branch_product"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("product.id"), nullable=False)
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True)
+    price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+
+class Table(Base):
+    __tablename__ = "table"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)  # "m-07"
+    status: Mapped[str] = mapped_column(Text, default="FREE")  # FREE|ACTIVE|PAYING|OUT_OF_SERVICE
+
+class TableSession(Base):
+    __tablename__ = "table_session"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    table_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("table.id"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="OPEN")  # OPEN|PAYING|CLOSED
+    assigned_waiter_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("app_user.id"))
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+class Round(Base):
+    __tablename__ = "round"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    table_session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("table_session.id"), nullable=False)
+    round_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="DRAFT")  # DRAFT|SUBMITTED|IN_KITCHEN|READY|SERVED|CANCELED
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+class RoundItem(Base):
+    __tablename__ = "round_item"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    round_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("round.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("product.id"), nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+
+class ServiceCall(Base):
+    __tablename__ = "service_call"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    table_session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("table_session.id"), nullable=False)
+    type: Mapped[str] = mapped_column(Text, default="WAITER_CALL")  # WAITER_CALL|PAYMENT_HELP|OTHER
+    status: Mapped[str] = mapped_column(Text, default="OPEN")       # OPEN|ACKED|CLOSED
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    acked_by_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("app_user.id"))
+
+class Check(Base):
+    __tablename__ = "check"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    table_session_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("table_session.id"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="OPEN")  # OPEN|REQUESTED|IN_PAYMENT|PAID|FAILED
+    total_cents: Mapped[int] = mapped_column(Integer, default=0)
+    paid_cents: Mapped[int] = mapped_column(Integer, default=0)
+
+class Payment(Base):
+    __tablename__ = "payment"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"), nullable=False)
+    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"), nullable=False)
+    check_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("check.id"), nullable=False)
+    provider: Mapped[str] = mapped_column(Text, default="CASH")     # CASH|MERCADO_PAGO
+    status: Mapped[str] = mapped_column(Text, default="PENDING")    # PENDING|APPROVED|REJECTED
+    amount_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+5.3 seed.py (datos para probar ya)
+backend/rest_api/seed.py
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+
+from rest_api.models import Tenant, Branch, User, UserBranchRole, Table, Product, BranchProduct
+
+def seed(db: Session):
+    if db.scalar(select(Tenant.id).limit(1)):
+        return
+
+    t = Tenant(name="Demo Restaurant", slug="demo")
+    db.add(t); db.flush()
+
+    b = Branch(tenant_id=t.id, name="Sucursal Centro", slug="centro")
+    db.add(b); db.flush()
+
+    # Users (MVP: pass plaintext)
+    waiter = User(tenant_id=t.id, email="waiter@demo.com", password="waiter", is_active=True)
+    kitchen = User(tenant_id=t.id, email="kitchen@demo.com", password="kitchen", is_active=True)
+    manager = User(tenant_id=t.id, email="manager@demo.com", password="manager", is_active=True)
+    db.add_all([waiter, kitchen, manager]); db.flush()
+
+    db.add_all([
+        UserBranchRole(user_id=waiter.id, tenant_id=t.id, branch_id=b.id, role="WAITER"),
+        UserBranchRole(user_id=kitchen.id, tenant_id=t.id, branch_id=b.id, role="KITCHEN"),
+        UserBranchRole(user_id=manager.id, tenant_id=t.id, branch_id=b.id, role="MANAGER"),
+    ])
+
+    # Tables
+    tables = [Table(tenant_id=t.id, branch_id=b.id, code=f"m-{i:02d}", status="FREE") for i in range(1, 6)]
+    db.add_all(tables)
+
+    # Products + branch pricing
+    p1 = Product(tenant_id=t.id, name="Burrata + chutney de algas", description="Entrada")
+    p2 = Product(tenant_id=t.id, name="Trucha cítrica", description="Principal")
+    p3 = Product(tenant_id=t.id, name="Brownie con helado", description="Postre")
+    db.add_all([p1, p2, p3]); db.flush()
+
+    db.add_all([
+        BranchProduct(tenant_id=t.id, branch_id=b.id, product_id=p1.id, is_available=True, price_cents=1250000),
+        BranchProduct(tenant_id=t.id, branch_id=b.id, product_id=p2.id, is_available=True, price_cents=1780000),
+        BranchProduct(tenant_id=t.id, branch_id=b.id, product_id=p3.id, is_available=True, price_cents=980000),
+    ])
+
+    db.commit()
+________________________________________
+5.4 Routers REST
+auth.py
+backend/rest_api/routers/auth.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+
+from rest_api.db import get_db
+from rest_api.models import User, UserBranchRole
+from shared.schemas import LoginIn, LoginOut
+from shared.auth import sign_jwt
+
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+@router.post("/login", response_model=LoginOut)
+def login(body: LoginIn, db: Session = Depends(get_db)):
+    u = db.scalar(select(User).where(User.email == body.email, User.is_active == True))
+    if not u or u.password != body.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    roles = db.execute(select(UserBranchRole).where(UserBranchRole.user_id == u.id)).scalars().all()
+    branch_ids = sorted({r.branch_id for r in roles})
+    role_codes = sorted({r.role for r in roles})
+
+    token = sign_jwt({
+        "sub": str(u.id),
+        "tenant_id": u.tenant_id,
+        "branch_ids": branch_ids,
+        "roles": role_codes,
+        "email": u.email
+    })
+
+    return LoginOut(access_token=token)
+diner.py (simula comensal: abre sesión y envía ronda)
+backend/rest_api/routers/diner.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+
+import redis.asyncio as redis
+
+from rest_api.db import get_db
+from rest_api.models import Table, TableSession, Round, RoundItem, BranchProduct
+from shared.schemas import DinerSubmitRoundIn, CheckRequestIn
+from shared.settings import REDIS_URL
+from shared.events import Event, publish, ch_branch_waiters, ch_branch_kitchen
+
+router = APIRouter(prefix="/api/diner", tags=["diner"])
+
+def get_redis():
+    return redis.from_url(REDIS_URL, decode_responses=True)
+
+@router.post("/rounds/submit")
+async def submit_round(body: DinerSubmitRoundIn, db: Session = Depends(get_db)):
+    # MVP: resuelve tenant/branch desde la mesa (en prod viene de table_token)
+    table = db.scalar(select(Table).where(Table.id == body.table_id))
+    if not table:
+        raise HTTPException(404, "Table not found")
+
+    # asegurar sesión OPEN
+    session = db.scalar(select(TableSession).where(
+        TableSession.table_id == table.id,
+        TableSession.status == "OPEN"
+    ).order_by(TableSession.id.desc()))
+
+    if not session:
+        session = TableSession(
+            tenant_id=table.tenant_id, branch_id=table.branch_id,
+            table_id=table.id, status="OPEN"
+        )
+        db.add(session)
+        table.status = "ACTIVE"
+        db.flush()
+
+    # numero de ronda
+    rn = (db.scalar(select(func.count()).select_from(Round).where(Round.table_session_id == session.id)) or 0) + 1
+    rnd = Round(
+        tenant_id=table.tenant_id, branch_id=table.branch_id,
+        table_session_id=session.id, round_number=rn, status="SUBMITTED"
+    )
+    db.add(rnd)
+    db.flush()
+
+    # items: usa precio por sucursal
+    for it in body.items:
+        bp = db.scalar(select(BranchProduct).where(
+            BranchProduct.branch_id == table.branch_id,
+            BranchProduct.product_id == it["product_id"],
+            BranchProduct.is_available == True
+        ))
+        if not bp:
+            raise HTTPException(400, f"Product {it['product_id']} not available in this branch")
+
+        db.add(RoundItem(
+            tenant_id=table.tenant_id, branch_id=table.branch_id,
+            round_id=rnd.id, product_id=it["product_id"],
+            qty=int(it.get("qty", 1)),
+            unit_price_cents=bp.price_cents,
+            notes=it.get("notes")
+        ))
+
+    db.commit()
+
+    # publish event
+    r = get_redis()
+    ev = Event(
+        type="ROUND_SUBMITTED",
+        tenant_id=table.tenant_id,
+        branch_id=table.branch_id,
+        table_id=table.id,
+        session_id=session.id,
+        entity={"round_id": rnd.id, "round_number": rn},
+        actor={"role": "DINER"}
+    )
+    await publish(r, ch_branch_waiters(table.branch_id), ev)
+    await publish(r, ch_branch_kitchen(table.branch_id), ev)
+
+    return {"ok": True, "session_id": session.id, "round_id": rnd.id, "round_number": rn}
+kitchen.py (cambia estado y notifica)
+backend/rest_api/routers/kitchen.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+
+import redis.asyncio as redis
+
+from rest_api.db import get_db
+from rest_api.models import Round, TableSession, Table
+from shared.schemas import KitchenSetRoundStatusIn
+from shared.auth import current_user_context, require_roles
+from shared.settings import REDIS_URL
+from shared.events import Event, publish, ch_branch_waiters
+
+router = APIRouter(prefix="/api/kitchen", tags=["kitchen"])
+
+def get_redis():
+    return redis.from_url(REDIS_URL, decode_responses=True)
+
+@router.post("/rounds/{round_id}/status")
+async def set_round_status(round_id: int, body: KitchenSetRoundStatusIn, db: Session = Depends(get_db), ctx=Depends(current_user_context)):
+    require_roles(ctx, ["KITCHEN", "MANAGER", "ADMIN"])
+
+    rnd = db.scalar(select(Round).where(Round.id == round_id))
+    if not rnd:
+        raise HTTPException(404, "Round not found")
+
+    rnd.status = body.status
+    db.commit()
+
+    # obtener mesa via session
+    sess = db.scalar(select(TableSession).where(TableSession.id == rnd.table_session_id))
+    table = db.scalar(select(Table).where(Table.id == sess.table_id))
+
+    # notificar mozos (cuando READY o SERVED)
+    if body.status in ["READY", "SERVED"]:
+        r = get_redis()
+        ev = Event(
+            type=f"ROUND_{body.status}",
+            tenant_id=rnd.tenant_id,
+            branch_id=rnd.branch_id,
+            table_id=table.id,
+            session_id=sess.id,
+            entity={"round_id": rnd.id, "round_number": rnd.round_number},
+            actor={"user_id": int(ctx["sub"]), "role": "KITCHEN"}
+        )
+        await publish(r, ch_branch_waiters(rnd.branch_id), ev)
+
+    return {"ok": True, "round_id": rnd.id, "status": rnd.status}
+waiter.py (tablero + ACK de llamados)
+backend/rest_api/routers/waiter.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+
+from rest_api.db import get_db
+from rest_api.models import Table, TableSession, Round, ServiceCall, Check
+from shared.auth import current_user_context, require_roles
+from shared.schemas import TableCard
+
+router = APIRouter(prefix="/api/waiter", tags=["waiter"])
+
+@router.get("/tables", response_model=list[TableCard])
+def my_tables(db: Session = Depends(get_db), ctx=Depends(current_user_context)):
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    # MVP: devuelve todas las mesas de la primera sucursal del usuario
+    branch_id = ctx["branch_ids"][0]
+
+    tables = db.execute(select(Table).where(Table.branch_id == branch_id).order_by(Table.id)).scalars().all()
+    cards: list[TableCard] = []
+
+    for t in tables:
+        sess = db.scalar(select(TableSession).where(
+            TableSession.table_id == t.id,
+            TableSession.status.in_(["OPEN", "PAYING"])
+        ).order_by(TableSession.id.desc()))
+
+        session_id = sess.id if sess else None
+
+        open_rounds = 0
+        pending_calls = 0
+        check_status = None
+
+        if sess:
+            open_rounds = db.scalar(select(func.count()).select_from(Round).where(
+                Round.table_session_id == sess.id,
+                Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"])
+            )) or 0
+
+            pending_calls = db.scalar(select(func.count()).select_from(ServiceCall).where(
+                ServiceCall.table_session_id == sess.id,
+                ServiceCall.status == "OPEN"
+            )) or 0
+
+            chk = db.scalar(select(Check).where(Check.table_session_id == sess.id).order_by(Check.id.desc()))
+            check_status = chk.status if chk else None
+
+        cards.append(TableCard(
+            table_id=t.id,
+            code=t.code,
+            status=t.status,
+            session_id=session_id,
+            open_rounds=open_rounds,
+            pending_calls=pending_calls,
+            check_status=check_status
+        ))
+
+    return cards
+billing.py (pedir cuenta, pago efectivo, liberar mesa)
+backend/rest_api/routers/billing.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+
+import redis.asyncio as redis
+
+from rest_api.db import get_db
+from rest_api.models import Table, TableSession, Check, Payment, Round, Table as TableModel
+from shared.schemas import CheckRequestIn, CashPayIn, ClearTableIn
+from shared.auth import current_user_context, require_roles
+from shared.settings import REDIS_URL
+from shared.events import Event, publish, ch_branch_waiters
+
+router = APIRouter(prefix="/api/billing", tags=["billing"])
+
+def get_redis():
+    return redis.from_url(REDIS_URL, decode_responses=True)
+
+@router.post("/check/request")
+async def request_check(body: CheckRequestIn, db: Session = Depends(get_db)):
+    table = db.scalar(select(Table).where(Table.id == body.table_id))
+    if not table:
+        raise HTTPException(404, "Table not found")
+
+    sess = db.scalar(select(TableSession).where(TableSession.table_id == table.id, TableSession.status == "OPEN").order_by(TableSession.id.desc()))
+    if not sess:
+        raise HTTPException(400, "No open session")
+
+    # total simple: suma de items (qty*price) en todas las rondas del session
+    total = db.scalar(select(func.coalesce(func.sum(RoundItem.qty * RoundItem.unit_price_cents), 0)).select_from(RoundItem).join(Round, Round.id == RoundItem.round_id).where(Round.table_session_id == sess.id)) if False else 0
+    # MVP: total fijo para probar flujo (cambiá por suma real cuando metas RoundItem aquí)
+    if total == 0:
+        total = 2500000
+
+    chk = Check(tenant_id=table.tenant_id, branch_id=table.branch_id, table_session_id=sess.id, status="REQUESTED", total_cents=total, paid_cents=0)
+    db.add(chk)
+    table.status = "PAYING"
+    sess.status = "PAYING"
+    db.commit()
+
+    r = get_redis()
+    ev = Event(type="CHECK_REQUESTED", tenant_id=table.tenant_id, branch_id=table.branch_id, table_id=table.id, session_id=sess.id, entity={"check_id": chk.id}, actor={"role":"DINER"})
+    await publish(r, ch_branch_waiters(table.branch_id), ev)
+
+    return {"ok": True, "check_id": chk.id, "total_cents": total}
+
+@router.post("/cash/pay")
+async def cash_pay(body: CashPayIn, db: Session = Depends(get_db), ctx=Depends(current_user_context)):
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    chk = db.scalar(select(Check).where(Check.id == body.check_id))
+    if not chk:
+        raise HTTPException(404, "Check not found")
+
+    pay = Payment(tenant_id=chk.tenant_id, branch_id=chk.branch_id, check_id=chk.id, provider="CASH", status="APPROVED", amount_cents=body.amount_cents)
+    db.add(pay)
+
+    chk.paid_cents += body.amount_cents
+    if chk.paid_cents >= chk.total_cents:
+        chk.status = "PAID"
+
+    db.commit()
+
+    r = get_redis()
+    if chk.status == "PAID":
+        ev = Event(type="CHECK_PAID", tenant_id=chk.tenant_id, branch_id=chk.branch_id, entity={"check_id": chk.id}, actor={"user_id": int(ctx["sub"]), "role":"WAITER"})
+        await publish(r, ch_branch_waiters(chk.branch_id), ev)
+
+    return {"ok": True, "check_id": chk.id, "status": chk.status, "paid_cents": chk.paid_cents, "total_cents": chk.total_cents}
+
+@router.post("/tables/clear")
+async def clear_table(body: ClearTableIn, db: Session = Depends(get_db), ctx=Depends(current_user_context)):
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    table = db.scalar(select(TableModel).where(TableModel.id == body.table_id))
+    if not table:
+        raise HTTPException(404, "Table not found")
+
+    sess = db.scalar(select(TableSession).where(TableSession.table_id == table.id, TableSession.status.in_(["OPEN", "PAYING"])).order_by(TableSession.id.desc()))
+    if not sess:
+        raise HTTPException(400, "No active session")
+
+    chk = db.scalar(select(Check).where(Check.table_session_id == sess.id).order_by(Check.id.desc()))
+    if not chk or chk.status != "PAID":
+        raise HTTPException(400, "Cannot clear table: check not fully paid")
+
+    # (opcional) exigir que no haya rondas READY/IN_KITCHEN etc.
+    open_rounds = db.scalar(select(func.count()).select_from(Round).where(
+        Round.table_session_id == sess.id,
+        Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"])
+    )) or 0
+    if open_rounds > 0:
+        raise HTTPException(400, "Cannot clear table: there are pending rounds")
+
+    sess.status = "CLOSED"
+    table.status = "FREE"
+    db.commit()
+
+    r = get_redis()
+    ev = Event(type="TABLE_CLEARED", tenant_id=table.tenant_id, branch_id=table.branch_id, table_id=table.id, session_id=sess.id, actor={"user_id": int(ctx["sub"]), "role":"WAITER"})
+    await publish(r, ch_branch_waiters(table.branch_id), ev)
+
+    return {"ok": True, "table_id": table.id, "status": table.status}
+Nota: en request_check dejé el total “mock” para simplificar el kit; cuando quieras lo hacemos suma real de RoundItem.
+________________________________________
+5.5 REST main.py
+backend/rest_api/main.py
+from fastapi import FastAPI
+from sqlalchemy import text
+from rest_api.db import engine, SessionLocal
+from rest_api.models import Base
+from rest_api.seed import seed
+
+from rest_api.routers.auth import router as auth_router
+from rest_api.routers.diner import router as diner_router
+from rest_api.routers.kitchen import router as kitchen_router
+from rest_api.routers.waiter import router as waiter_router
+from rest_api.routers.billing import router as billing_router
+
+app = FastAPI(title="REST API (Menu Ops)")
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+    with SessionLocal() as db:
+        seed(db)
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+app.include_router(auth_router)
+app.include_router(diner_router)
+app.include_router(kitchen_router)
+app.include_router(waiter_router)
+app.include_router(billing_router)
+________________________________________
+6) WS Gateway (FastAPI) — conexiones + Redis subscribe
+6.1 connection_manager.py
+backend/ws_gateway/connection_manager.py
+from collections import defaultdict
+from typing import Dict, Set
+from fastapi import WebSocket
+
+class ConnectionManager:
+    def __init__(self):
+        self.by_user: Dict[int, Set[WebSocket]] = defaultdict(set)
+        self.by_branch: Dict[int, Set[WebSocket]] = defaultdict(set)
+
+    async def connect(self, ws: WebSocket, user_id: int, branch_ids: list[int]):
+        await ws.accept()
+        self.by_user[user_id].add(ws)
+        for b in branch_ids:
+            self.by_branch[b].add(ws)
+
+    def disconnect(self, ws: WebSocket):
+        for s in self.by_user.values():
+            s.discard(ws)
+        for s in self.by_branch.values():
+            s.discard(ws)
+
+    async def send_to_branch(self, branch_id: int, payload: dict):
+        for ws in list(self.by_branch.get(branch_id, [])):
+            await ws.send_json(payload)
+6.2 redis_subscriber.py
+backend/ws_gateway/redis_subscriber.py
+import json
+from typing import Callable, Awaitable
+import redis.asyncio as redis
+
+async def run_subscriber(redis_url: str, channels: list[str], on_message: Callable[[dict], Awaitable[None]]):
+    r = redis.from_url(redis_url, decode_responses=True)
+    pubsub = r.pubsub()
+    await pubsub.subscribe(*channels)
+
+    async for msg in pubsub.listen():
+        if msg is None or msg.get("type") != "message":
+            continue
+        data = json.loads(msg["data"])
+        await on_message(data)
+6.3 ws main.py
+backend/ws_gateway/main.py
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+
+from shared.settings import REDIS_URL
+from shared.auth import verify_jwt
+from ws_gateway.connection_manager import ConnectionManager
+from ws_gateway.redis_subscriber import run_subscriber
+
+app = FastAPI(title="WS Gateway (Menu Ops)")
+mgr = ConnectionManager()
+
+@app.on_event("startup")
+async def startup():
+    async def on_event(ev: dict):
+        branch_id = ev.get("branch_id")
+        if branch_id is not None:
+            await mgr.send_to_branch(int(branch_id), ev)
+
+    # MVP: suscribimos a TODOS los canales de sucursales conocidas.
+    # En prod, lo hacemos dinámico por tenant/branch (se puede).
+    channels = [
+        "branch:1:waiters",
+        "branch:1:kitchen",
+        "branch:2:waiters",
+        "branch:2:kitchen",
+        "branch:3:waiters",
+        "branch:3:kitchen",
+    ]
+    asyncio.create_task(run_subscriber(REDIS_URL, channels, on_event))
+
+@app.get("/ws/health")
+def health():
+    return {"ok": True}
+
+@app.websocket("/ws/waiter")
+async def waiter_ws(ws: WebSocket, token: str = Query(...)):
+    claims = verify_jwt(token)
+    user_id = int(claims["sub"])
+    branch_ids = list(claims.get("branch_ids", []))
+
+    await mgr.connect(ws, user_id, branch_ids)
+    try:
+        while True:
+            # keep alive / ignore payload
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        mgr.disconnect(ws)
+
+@app.websocket("/ws/kitchen")
+async def kitchen_ws(ws: WebSocket, token: str = Query(...)):
+    claims = verify_jwt(token)
+    user_id = int(claims["sub"])
+    branch_ids = list(claims.get("branch_ids", []))
+
+    await mgr.connect(ws, user_id, branch_ids)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        mgr.disconnect(ws)
+MVP: el subscriber está suscrito a varios canales “por si acaso”. En el siguiente paso lo hacemos dinámico: el WS gateway se suscribe solo a los branch_ids que realmente existen / están activos.
+________________________________________
+7) Cómo correr todo (dos procesos)
+7.1 Infra
+Desde backend/:
+docker compose up -d
+(Opcional) si usás Ollama del contenedor:
+curl http://localhost:11434/api/tags
+Bajá modelos (una vez):
+# si Ollama está en tu host:
+ollama pull nomic-embed-text
+ollama pull qwen2.5:7b
+# si Ollama está en docker, podés entrar al contenedor o usar host Ollama; para MVP, lo usual es host.
+7.2 Python
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
+REST (puerto 8000)
+uvicorn rest_api.main:app --reload --port 8000
+WS (puerto 8001)
+En otra terminal:
+uvicorn ws_gateway.main:app --reload --port 8001
+________________________________________
+8) Prueba rápida de extremo a extremo (sin front todavía)
+8.1 Login mozo y cocina
+# Mozo
+curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"waiter@demo.com","password":"waiter"}'
+Guardá access_token.
+# Cocina
+curl -s -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"kitchen@demo.com","password":"kitchen"}'
+8.2 Conectarte a WS
+Con wscat (Node):
+npm i -g wscat
+wscat -c "ws://localhost:8001/ws/waiter?token=TU_TOKEN_DEL_MOZO"
+En otra terminal:
+wscat -c "ws://localhost:8001/ws/kitchen?token=TU_TOKEN_DE_COCINA"
+8.3 Simular comensal enviando una ronda
+curl -s -X POST http://localhost:8000/api/diner/rounds/submit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "table_id": 1,
+    "items": [{"product_id": 1, "qty": 1, "notes": "sin cebolla"}]
+  }'
+Deberías ver en WS (mozo y cocina) un evento ROUND_SUBMITTED.
+8.4 Cocina marca READY
+curl -s -X POST http://localhost:8000/api/kitchen/rounds/1/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer TU_TOKEN_DE_COCINA" \
+  -d '{"status":"READY"}'
+En WS del mozo aparece ROUND_READY.
+8.5 Comensal pide la cuenta
+curl -s -X POST http://localhost:8000/api/billing/check/request \
+  -H "Content-Type: application/json" \
+  -d '{"table_id": 1}'
+En WS del mozo aparece CHECK_REQUESTED.
+8.6 Mozo marca pago efectivo total + libera mesa
+curl -s -X POST http://localhost:8000/api/billing/cash/pay \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer TU_TOKEN_DEL_MOZO" \
+  -d '{"check_id": 1, "amount_cents": 2500000}'
+Luego:
+curl -s -X POST http://localhost:8000/api/billing/tables/clear \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer TU_TOKEN_DEL_MOZO" \
+  -d '{"table_id": 1}'
+
