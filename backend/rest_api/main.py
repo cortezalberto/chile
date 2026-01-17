@@ -26,10 +26,14 @@ from rest_api.routers.waiter import router as waiter_router
 from rest_api.routers.promotions import router as promotions_router
 from rest_api.routers.recipes import router as recipes_router
 from rest_api.routers.ingredients import router as ingredients_router
+from rest_api.routers.catalogs import router as catalogs_router
+from rest_api.routers.kitchen_tickets import router as kitchen_tickets_router
 from shared.settings import settings
 from shared.logging import setup_logging, rest_api_logger as logger
 from shared.rate_limit import limiter, rate_limit_exceeded_handler
 from shared.events import close_redis_pool
+from rest_api.services.webhook_retry import webhook_retry_queue, start_retry_processor
+from rest_api.services.circuit_breaker import get_all_breaker_stats
 
 
 @asynccontextmanager
@@ -40,6 +44,21 @@ async def lifespan(app: FastAPI):
     """
     # Initialize logging
     setup_logging()
+
+    # SHARED-CRIT-03 FIX: Validate production secrets before startup
+    secret_errors = settings.validate_production_secrets()
+    if secret_errors:
+        for error in secret_errors:
+            logger.error("Configuration error: %s", error)
+        if settings.environment == "production":
+            raise RuntimeError(
+                f"Production configuration errors: {'; '.join(secret_errors)}. "
+                "Server will not start with insecure configuration."
+            )
+        else:
+            logger.warning(
+                "Running with insecure defaults (acceptable for development only)"
+            )
 
     # Startup
     logger.info("Starting REST API", port=settings.rest_api_port, env=settings.environment)
@@ -56,6 +75,16 @@ async def lifespan(app: FastAPI):
     # Seed initial data
     with SessionLocal() as db:
         seed(db)
+
+    # REC-02 FIX: Register webhook retry handlers and start processor
+    from rest_api.services.mp_webhook_handler import register_mp_webhook_handler
+    register_mp_webhook_handler()
+    logger.info("Webhook retry handlers registered")
+
+    # Start background retry processor (non-blocking)
+    import asyncio
+    asyncio.create_task(start_retry_processor(interval_seconds=30.0))
+    logger.info("Webhook retry processor started")
 
     yield
 
@@ -124,8 +153,8 @@ async def detailed_health_check():
     Detailed health check that verifies connectivity to dependencies.
     Returns status of PostgreSQL and Redis connections.
     """
-    import redis.asyncio as aioredis
     from rest_api.db import SessionLocal
+    from shared.events import get_redis_pool
 
     checks = {
         "service": "rest-api",
@@ -144,14 +173,19 @@ async def detailed_health_check():
         all_healthy = False
 
     # Check Redis
+    # REDIS-01 FIX: Use pooled connection instead of creating temporary one
     try:
-        redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await redis_client.ping()
-        await redis_client.close()
+        redis = await get_redis_pool()
+        await redis.ping()
+        # Note: Don't close pooled connection - pool manages lifecycle
         checks["dependencies"]["redis"] = {"status": "healthy"}
     except Exception as e:
         checks["dependencies"]["redis"] = {"status": "unhealthy", "error": str(e)}
         all_healthy = False
+
+    # REC-01/REC-02 FIX: Include circuit breaker and webhook retry stats
+    checks["circuit_breakers"] = get_all_breaker_stats()
+    checks["webhook_retry"] = await webhook_retry_queue.get_stats()
 
     checks["status"] = "healthy" if all_healthy else "degraded"
 
@@ -179,6 +213,8 @@ app.include_router(waiter_router)
 app.include_router(promotions_router)
 app.include_router(recipes_router)
 app.include_router(ingredients_router)
+app.include_router(catalogs_router)
+app.include_router(kitchen_tickets_router)
 
 
 # =============================================================================

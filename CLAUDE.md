@@ -2,6 +2,48 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+---
+
+## Table of Contents
+
+1. [Project Overview](#project-overview)
+2. [Quick Start Commands](#quick-start-commands)
+3. [Architecture](#architecture)
+   - [Data Model](#data-model)
+   - [Backend API Structure](#backend-api-structure)
+   - [WebSocket Events](#websocket-events-port-8001)
+   - [Real-time Order Updates](#real-time-order-updates-pwamenu)
+   - [WebSocket Heartbeat](#websocket-heartbeat-phase-10)
+4. [Core Patterns](#core-patterns)
+   - [Critical Zustand Pattern (React 19)](#critical-zustand-pattern-react-19)
+   - [Dashboard Store API Pattern](#dashboard-store-api-pattern-phase-6)
+5. [Test Users (Backend)](#test-users-backend)
+6. [Conventions](#conventions)
+7. [Documentation](#documentation)
+8. [Migration Status](#migration-status)
+   - [Payment Allocation](#payment-allocation-phase-10)
+   - [Payment Flow (Mercado Pago)](#payment-flow-mercado-pago)
+9. [Infrastructure](#infrastructure)
+   - [Docker Configuration](#docker-configuration)
+   - [CORS Configuration](#cors-configuration)
+   - [Backend Server Notes](#backend-server-notes)
+10. [January 2026 Updates](#january-2026-updates)
+    - [Audit Status](#audit-status)
+    - [QA Status](#qa-status)
+    - [Architecture Patterns](#architecture-patterns)
+    - [Soft Delete Pattern](#soft-delete-pattern)
+    - [Role-Based Access Control](#role-based-access-control)
+    - [Branch Management Features](#branch-management-features)
+    - [Recipe Module](#recipe-module)
+      - [Recipe-Product Relationship](#recipe-product-relationship-propuesta1md)
+      - [Recipe Frontend Types](#recipe-frontend-types-dashboard)
+    - [Canonical Product Model](#canonical-product-model)
+      - [Dashboard Ingredients Page](#dashboard-ingredients-page)
+    - [pwaMenu Advanced Filters](#pwamenu-advanced-filters)
+    - [Enhanced Allergen Model](#enhanced-allergen-model)
+
+---
+
 ## Project Overview
 
 **Integrador** is a restaurant management system monorepo with four main components:
@@ -16,6 +58,8 @@ Each project has its own `CLAUDE.md` with detailed implementation guidance:
 - [pwaMenu/CLAUDE.md](pwaMenu/CLAUDE.md): Modular tableStore, React 19 patterns (useActionState, useOptimistic), PWA caching, multi-tab sync
 - [pwaWaiter/CLAUDE.md](pwaWaiter/CLAUDE.md): JWT auth with WAITER role, WebSocket events, TableCard summary pattern
 - [backend/README.md](backend/README.md): API endpoints, WebSocket events, test users
+
+---
 
 ## Quick Start Commands
 
@@ -55,6 +99,8 @@ cd pwaWaiter && npm run lint     # ESLint
 npx tsc --noEmit
 ```
 
+---
+
 ## Architecture
 
 ### Data Model
@@ -75,16 +121,21 @@ User ←→ UserBranchRole (M:N with Branch, roles: WAITER/KITCHEN/MANAGER/ADMIN
        └── phone, dni, hire_date (staff profile fields)
 User ←→ WaiterSectorAssignment (daily sector assignments for WAITER role)
 Product ←→ BranchProduct (per-branch pricing in cents)
-Product ←→ Allergen (M:N)
+Product ←→ ProductAllergen (M:N with presence_type + risk_level)
+Recipe ←→ RecipeAllergen (M:N with risk_level)
+Allergen ←→ AllergenCrossReaction (self-referential M:N for cross-reactions)
+         └── is_mandatory, severity (EU 1169/2011 compliance)
 Promotion ←→ PromotionBranch (M:N with Branch)
           └── PromotionItem (products + quantities)
 Branch ←→ BranchCategoryExclusion (M:N with Category - marks categories NOT sold at branch)
 Branch ←→ BranchSubcategoryExclusion (M:N with Subcategory - marks subcategories NOT sold at branch)
 BranchSector: Global (branch_id=NULL) or per-branch, with prefix for auto-generated table codes
 Diner → RoundItem (tracks who ordered what)
-Recipe: Kitchen technical sheets (fichas técnicas) linked to Branch, optionally to Product
-       └── RecipeIngredient, RecipePreparationStep (structured steps with time estimates)
-       └── Can be ingested into RAG chatbot via /api/admin/recipes/{id}/ingest
+Recipe: Kitchen technical sheets (fichas técnicas) linked to Branch
+       └── RecipeAllergen (M:N with Allergen)
+       └── products[] (1:N) - Products derived from this recipe (propuesta1.md)
+       └── Can be ingested into RAG chatbot via /api/recipes/{id}/ingest
+Product ←→ Recipe (optional, via recipe_id + inherits_from_recipe for allergen sync)
 ```
 
 ### Backend API Structure
@@ -99,15 +150,21 @@ Recipe: Kitchen technical sheets (fichas técnicas) linked to Branch, optionally
 
 /api/kitchen/*                 # Kitchen operations (JWT + KITCHEN role)
   /rounds, /rounds/{id}/status
+  /tickets                       # List pending kitchen tickets by station
+  /tickets/{id}                  # Get ticket details
+  /tickets/{id}/status           # Update ticket status (PATCH)
+  /rounds/{id}/tickets           # Generate tickets from round (POST)
 
-/api/admin/recipes/*           # Recipe CRUD (JWT + KITCHEN/MANAGER/ADMIN role)
+/api/recipes/*                 # Recipe CRUD (JWT + KITCHEN/MANAGER/ADMIN role)
   GET /                        # List recipes (filter by branch_id, category)
   POST /                       # Create recipe
   GET /{id}                    # Get recipe details
-  PUT /{id}                    # Update recipe
+  PATCH /{id}                  # Update recipe
   DELETE /{id}                 # Soft-delete recipe
   POST /{id}/ingest            # Ingest into RAG chatbot
-  GET /categories              # List unique recipe categories
+  GET /categories/list         # List unique recipe categories
+  POST /{id}/derive-product    # Create Product from Recipe (propuesta1.md)
+  GET /{id}/products           # List products derived from recipe
 
 /api/billing/*                 # Payment operations
   /check/request, /check/{id}/balances, /cash/pay, /mercadopago/*
@@ -121,7 +178,7 @@ Recipe: Kitchen technical sheets (fichas técnicas) linked to Branch, optionally
 
 /api/admin/*                   # Dashboard CRUD (JWT + role-based)
   /tenant, /branches, /categories, /subcategories
-  /products, /allergens, /tables, /staff, /promotions
+  /products, /allergens, /tables/{id}, /staff, /promotions
   /exclusions                    # Branch exclusion management (ADMIN only)
   /sectors                       # Sector management (GET, POST, DELETE)
   /tables/batch                  # Bulk table creation by sector
@@ -165,19 +222,16 @@ useOrderUpdates()
 // 4. useOrderUpdates receives event and calls updateOrderStatus()
 ```
 
-### WebSocket Heartbeat (Phase 10)
+### WebSocket Heartbeat (Phase 10 + auditoria31.md)
 
-All WebSocket connections include heartbeat mechanism for connection reliability:
+All WebSocket connections include heartbeat mechanism with timeout detection:
 
 ```typescript
-// Frontend sends ping every 30s, expects pong within 10s
+// All 3 apps: Send ping every 30s, expect pong within 10s
 // Auto-reconnects on heartbeat timeout with exponential backoff
 
-// Dashboard (JSON format):
+// All apps use JSON format:
 ws.send('{"type":"ping"}')  // Server responds with '{"type":"pong"}'
-
-// pwaMenu/pwaWaiter (plain text):
-ws.send('ping')  // Server responds with 'pong'
 ```
 
 **Backend WebSocket endpoints accept BOTH formats** (`ws_gateway/main.py`):
@@ -189,7 +243,34 @@ elif data == '{"type":"ping"}':
     await websocket.send_text('{"type":"pong"}')
 ```
 
-## Critical Zustand Pattern (React 19)
+**Heartbeat Timeout Detection** (WS-31-HIGH-01):
+```typescript
+// All 3 apps now have timeout detection (pwaWaiter was missing, now fixed)
+private sendPing(): void {
+  this.ws.send(JSON.stringify({ type: 'ping' }))
+  this.heartbeatTimeout = setTimeout(() => {
+    this.ws?.close(4000, 'Heartbeat timeout')  // Triggers reconnect
+  }, 10000)  // 10s timeout
+}
+
+// On pong received:
+if (data.type === 'pong') {
+  this.clearHeartbeatTimeout()
+  return
+}
+```
+
+**Visibility Change Handlers** (WS-31-MED-02):
+All 3 apps reconnect automatically when tab becomes visible after sleep:
+- Dashboard: `useWebSocketConnection.ts`
+- pwaMenu: `websocket.ts`
+- pwaWaiter: `websocket.ts`
+
+---
+
+## Core Patterns
+
+### Critical Zustand Pattern (React 19)
 
 All frontends enforce this pattern to avoid infinite re-renders:
 
@@ -222,9 +303,33 @@ const EMPTY_ARRAY: number[] = []
 export const selectBranchIds = (state: State) => state.user?.branch_ids ?? EMPTY_ARRAY
 ```
 
-## Dashboard Store API Pattern (Phase 6)
+**CRITICAL: Memoize filtered selectors (auditoria36 WAITER-STORE-CRIT-01)**
 
-Dashboard stores now support both local and async API operations:
+Filtered selectors that return `.filter()` results must use manual memoization:
+
+```typescript
+// WRONG: Creates new array on EVERY call, causes infinite re-renders
+export const selectTablesWithPendingRounds = (state: TablesState) =>
+  state.tables.filter((t) => t.open_rounds > 0)  // NEW ARRAY EVERY CALL!
+
+// CORRECT: Manual memoization with cache
+const EMPTY_TABLES: TableCard[] = []
+const pendingRoundsCache = { tables: null as TableCard[] | null, result: EMPTY_TABLES }
+
+export const selectTablesWithPendingRounds = (state: TablesState): TableCard[] => {
+  if (state.tables === pendingRoundsCache.tables) {
+    return pendingRoundsCache.result  // Return cached result
+  }
+  const filtered = state.tables.filter((t) => t.open_rounds > 0)
+  pendingRoundsCache.tables = state.tables
+  pendingRoundsCache.result = filtered.length > 0 ? filtered : EMPTY_TABLES
+  return pendingRoundsCache.result
+}
+```
+
+### Dashboard Store API Pattern (Phase 6)
+
+Dashboard stores support both local and async API operations. **Pages should always use the async functions** for backend integration:
 
 ```typescript
 // Each store has async actions for backend integration
@@ -232,15 +337,30 @@ interface StoreState {
   items: Item[]
   isLoading: boolean
   error: string | null
-  // Sync local actions (existing)
+  // Sync local actions (deprecated - for backwards compatibility only)
   addItem: (data: FormData) => Item
   updateItem: (id: string, data: Partial<FormData>) => void
   deleteItem: (id: string) => void
-  // Async API actions (new)
+  // Async API actions (USE THESE in pages)
   fetchItems: () => Promise<void>
   createItemAsync: (data: FormData) => Promise<Item>
   updateItemAsync: (id: string, data: Partial<FormData>) => Promise<void>
   deleteItemAsync: (id: string) => Promise<void>
+}
+
+// CORRECT: Page component using async functions
+function ItemsPage() {
+  const fetchItems = useItemStore((s) => s.fetchItems)
+  const createItemAsync = useItemStore((s) => s.createItemAsync)
+
+  useEffect(() => {
+    fetchItems()  // Fetch from backend on mount
+  }, [fetchItems])
+
+  const handleSubmit = async (data) => {
+    await createItemAsync(data)  // Use async function
+    toast.success('Item created')
+  }
 }
 
 // Helper to convert API response to frontend format
@@ -281,6 +401,8 @@ user_email = user.get("email", "")
 user_id = user["user_id"]  # ❌ Key doesn't exist
 ```
 
+---
+
 ## Test Users (Backend)
 
 | Email | Password | Role |
@@ -289,6 +411,8 @@ user_id = user["user_id"]  # ❌ Key doesn't exist
 | manager@demo.com | manager123 | MANAGER |
 | kitchen@demo.com | kitchen123 | KITCHEN |
 | waiter@demo.com | waiter123 | WAITER |
+
+---
 
 ## Conventions
 
@@ -301,6 +425,8 @@ user_id = user["user_id"]  # ❌ Key doesn't exist
 - **Logging**: Use centralized `utils/logger.ts`, never direct console.*
 - **Naming**: Frontend uses camelCase (`backendSessionId`), backend uses snake_case (`backend_session_id`)
 
+---
+
 ## Documentation
 
 - [gradual.md](gradual.md): Complete migration plan with phases 0-10
@@ -310,7 +436,23 @@ user_id = user["user_id"]  # ❌ Key doesn't exist
 - [auditoriapwa1.md](auditoriapwa1.md): Full audit report
 - [pwaWaiter/bot/planteo.md](pwaWaiter/bot/planteo.md): Canonical dish database model (19 normalized tables for allergens, ingredients, dietary profiles, sensory profiles) - serves as data source for pwaMenu filters and RAG chatbot ingestion
 - [pwaWaiter/bot/producto1.md](pwaWaiter/bot/producto1.md): Analysis of current product model (9 tables) with limitations for nutritional queries - comparison with planteo.md canonical model
+- [pwaWaiter/bot/producto2.md](pwaWaiter/bot/producto2.md): Technical report comparing producto1.md requirements with actual implementation - identifies completed features (65%) and remaining gaps
+- [pwaWaiter/bot/producto3.md](pwaWaiter/bot/producto3.md): Final audit confirming 100% completion of canonical model - all 6 gaps from producto2.md closed, comprehensive implementation verification
+- [pwaWaiter/bot/propuesta1.md](pwaWaiter/bot/propuesta1.md): Architectural proposal for Recipe-Product relationship - recommends optional linking instead of mandatory "Recipe First" approach
 - [pwaWaiter/bot/canonico.txt](pwaWaiter/bot/canonico.txt): JSON schema for canonical dish structure (original format before normalization)
+- [REPORTE_TRAZABILIDAD.md](REPORTE_TRAZABILIDAD.md): Complete traceability report (January 2026) with test traces for all frontend pages, Redis anomaly fix, and performance analysis
+- [ARQUITECTURA_AUDIT_2026.md](ARQUITECTURA_AUDIT_2026.md): Comprehensive architectural audit (47 defects: 3 critical, 20 high, 19 medium, 5 low) with fixes for N+1 queries, WebSocket patterns, SSRF protection, race conditions
+- [auditoria27.md](auditoria27.md): Complete architectural audit (76 defects: 14 critical, 23 high, 31 medium, 8 low) - **ALL FIXED** - Redis connection management, memory leaks, N+1 queries, safe_commit pattern, unused imports cleanup
+- [auditoria28.md](auditoria28.md): Complete architectural audit (95 defects: 18 critical, 27 high, 31 medium, 19 low) - **ALL FIXED** - Race conditions, N+1 queries, memory leaks, event publishing, token synchronization, component memoization
+- [auditoria29.md](auditoria29.md): Exhaustive architectural audit (65 defects: 7 critical, 20 high, 22 medium, 16 low) - **ALL FIXED** - Race conditions, memory leaks, Zustand anti-patterns, BroadcastChannel sync, token refresh concurrency
+- [auditoria30.md](auditoria30.md): Redis and WebSocket architectural audit (20 defects: 2 critical, 5 high, 8 medium, 5 low) - **15/20 FIXED, 5 ACCEPTED** - Token refresh race conditions, simultaneous connections, exponential backoff, ref patterns for WebSocket subscriptions
+- [auditoria31.md](auditoria31.md): WebSocket architectural analysis (11 improvements: 0 critical, 2 high, 5 medium, 4 low) - **10/11 FIXED, 1 DEFERRED** - Heartbeat timeout detection, soft/hard disconnect, visibility handlers, HMR cleanup guards, connectionPromise cleanup
+- [auditoria32.md](auditoria32.md): End-to-end test traces and defect analysis (82 defects: 20 critical, 25 high, 23 medium, 14 low) - **ALL FIXED** - Token blacklist verification, email-based rate limiting, bcrypt-only passwords, tenant isolation, race conditions fixed, audit trail with proper user_id extraction, N+1 queries resolved
+- [auditoria35.md](auditoria35.md): Exhaustive code audit (121 defects: 31 critical, 37 high, 31 medium, 22 low) - **ALL FIXED** - Dashboard stores/hooks, Backend routers/services, WebSocket Gateway - comprehensive audit with verified fixes (CRIT-XX FIX, HIGH-XX FIX, WS-CRIT-XX FIX patterns)
+- [auditoria36.md](auditoria36.md): Exhaustive pwaMenu/pwaWaiter audit (135 defects: 8 critical, 29 high, 61 medium, 37 low) - **ALL FIXED** - Stores, hooks, services, components, pages - React 19 selector patterns, IndexedDB timeouts, focus trap modals, isMounted guards
+- [auditoria34.md](auditoria34.md): Execution traces audit (4 main traces) - **APPROVED** - Circuit breaker for Mercado Pago, webhook retry queue, batch inserts for round items
+
+---
 
 ## Migration Status
 
@@ -396,7 +538,11 @@ window.location.href = isTestMode() ? preference.sandbox_init_point : preference
 - `VITE_MP_PUBLIC_KEY`: Test credentials start with `TEST-`, production with `APP_USR-`
 - Backend `MP_ACCESS_TOKEN`: Never expose in frontend
 
-## Docker Configuration
+---
+
+## Infrastructure
+
+### Docker Configuration
 
 The backend uses Docker for PostgreSQL and Redis. Configuration details:
 
@@ -460,13 +606,13 @@ cd backend && python seed_modelo.py
 # - 4 Branches: Centro, Godoy Cruz, Guaymallén, Las Heras
 # - 4 Users with roles in all branches (admin, manager, kitchen, waiter)
 # - 32 Tables (8 per branch: 5 in main area, 3 in terrace)
-# - 8 Allergens
+# - 20 Allergens (14 mandatory EU + 6 optional) with cross-reactions
 # - 5 Categories: Entradas, Platos Principales, Pizzas y Empanadas, Postres, Bebidas
 # - 15 Subcategories (3 per category)
 # - 75 Products (5 per subcategory) with pricing in all branches
 ```
 
-## CORS Configuration
+### CORS Configuration
 
 When adding new frontend apps, add the origin to `backend/rest_api/main.py`:
 
@@ -476,7 +622,8 @@ allow_origins=[
     "http://localhost:5176",  # pwaMenu
     "http://localhost:5177",  # Dashboard
     "http://localhost:5178",  # pwaWaiter
-    # Add new origins here
+    "http://localhost:5179",  # Dashboard alternate port
+    "http://localhost:5180",  # Future use
 ],
 allow_credentials=True,
 allow_methods=["*"],
@@ -496,7 +643,7 @@ const response = await fetch(url, {
 
 After modifying CORS, restart the backend server (changes require full restart, not just reload).
 
-## Backend Server Notes
+### Backend Server Notes
 
 After modifying backend routers, restart the uvicorn server to load new routes:
 
@@ -511,25 +658,289 @@ Verify routes are loaded:
 curl http://localhost:8000/openapi.json | grep "/api/admin"
 ```
 
-## Audit Status (January 2026)
+---
 
-See [auditoriapwa1.md](auditoriapwa1.md) for full audit report. All critical and high priority issues have been resolved:
+## January 2026 Updates
 
-### Resolved Issues
+This section consolidates all features and fixes implemented in January 2026.
+
+### Audit Status
+
+See [auditoriapwa1.md](auditoriapwa1.md) for full audit report. All critical and high priority issues have been resolved, including the 82 defects identified in auditoria32.md.
+
+#### Exhaustive Code Audit (auditoria35.md) - COMPLETED
+
+See [auditoria35.md](auditoria35.md) for the exhaustive code audit covering Dashboard stores/hooks, Backend routers/services, and WebSocket Gateway. **121 defects identified and ALL 121 fixed:**
+
+#### Exhaustive pwaMenu/pwaWaiter Audit (auditoria36.md) - COMPLETED
+
+See [auditoria36.md](auditoria36.md) for the exhaustive audit of pwaMenu and pwaWaiter applications. **135 defects identified and ALL 135 fixed:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 8 | ✅ Fixed |
+| HIGH | 29 | ✅ Fixed |
+| MEDIUM | 61 | ✅ Fixed |
+| LOW | 37 | ✅ Fixed |
+
+**Key Fixes:**
+- **WAITER-STORE-CRIT-01**: React 19 selector memoization for stable array references
+- **WAITER-SVC-CRIT-03**: Memory leak prevention in recentNotifications Set (100 item limit)
+- **MENU-HOOK-CRIT-01**: isMounted guard for async fetch in useAllergenFilter
+- **WAITER-SVC-MED-02**: IndexedDB timeout wrapper (30s) for all operations
+- **WAITER-COMP-CRIT-01/02**: Focus trap and focus restoration in ConfirmDialog
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 31 | ✅ Fixed |
+| HIGH | 37 | ✅ Fixed |
+| MEDIUM | 31 | ✅ Fixed |
+| LOW | 22 | ✅ Fixed |
+
+**Components Audited:**
+- Dashboard Stores (37 defects): branchStore, tableStore, authStore, productStore, promotionStore, allergenStore, categoryStore, subcategoryStore, ingredientStore, restaurantStore
+- Dashboard Hooks (13 defects): usePagination, useWebSocketConnection, useAdminWebSocket
+- Backend Routers (21 defects): admin/ (modular), catalog.py, tables.py, billing.py, diner.py
+- Backend Services (26 defects): allocation.py, rag_service.py, product_view.py, circuit_breaker.py, webhook_retry.py
+- WebSocket Gateway (24 defects): connection_manager.py, main.py, redis_subscriber.py
+
+**Key Fixes Verified:**
+- `CRIT-XX FIX:` comments in all affected files
+- `HIGH-XX FIX:` for high priority defects
+- `WS-CRIT-XX FIX:` / `WS-HIGH-XX FIX:` for WebSocket issues
+- `SVC-CRIT-XX FIX:` for service layer issues
+- `MED-XX FIX:` for medium priority improvements
+
+#### Comprehensive Audit (auditoria27.md) - COMPLETED
+
+See [auditoria27.md](auditoria27.md) for the comprehensive architectural audit. **76 defects identified and ALL 76 fixed:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 14 | ✅ Fixed |
+| HIGH | 23 | ✅ Fixed |
+| MEDIUM | 31 | ✅ Fixed |
+| LOW | 8 | ✅ Fixed |
+
+#### Additional Audit (auditoria29.md) - COMPLETED
+
+See [auditoria29.md](auditoria29.md) for exhaustive audit. **65 defects identified and ALL 65 fixed:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 7 | ✅ Fixed |
+| HIGH | 20 | ✅ Fixed |
+| MEDIUM | 22 | ✅ Fixed |
+| LOW | 16 | ✅ Fixed |
+
+**Key Fixes:**
+- **CRIT-29-01**: Race condition in diner.py - Added SELECT FOR UPDATE for round submission
+- **CRIT-29-02**: Memory leak in retryQueueStore - Added listener registration guard
+- **CRIT-29-03**: Memory leak in offline.ts - Added listener registration guard
+- **CRIT-29-04**: Race condition in historyStore - Synchronous BroadcastChannel init
+- **CRIT-29-05**: Cyclic dependencies in useAdvancedFilters - Extracted stable references
+- **CRIT-29-06**: Redis string handling in token_blacklist - Removed unnecessary decode
+- **CRIT-29-07**: Async context handling in blacklist_token_sync - Used ensure_future
+- **HIGH-29-18**: Token refresh race condition - Added isRefreshing flag
+- **HIGH-29-19**: WebSocket reconnect race - Reset isIntentionalClose before connect
+
+#### Redis & WebSocket Audit (auditoria30.md) - COMPLETED
+
+See [auditoria30.md](auditoria30.md) for exhaustive Redis and WebSocket analysis. **20 defects identified, 15 fixed, 5 accepted:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 2 | ✅ Fixed |
+| HIGH | 5 | ✅ Fixed |
+| MEDIUM | 8 | ✅ Fixed |
+| LOW | 5 | ⚠️ Accepted |
+
+**Backend Redis Architecture: ✅ PRODUCTION-READY**
+- Singleton pool pattern with proper lifecycle
+- 4-channel pub/sub system (waiters, kitchen, admin, diners)
+- Cache with TTL auto-cleanup
+- Token blacklist with automatic expiration
+
+**Frontend WebSocket: ✅ PRODUCTION-READY**
+- **WS-CRIT-01**: Token refresh race condition in pwaWaiter - Added delay before reconnect
+- **WS-CRIT-02**: Simultaneous connections in Dashboard - Changed ref to useState
+- **WS-HIGH-02**: Exponential backoff now in all 3 apps (was linear in pwaWaiter)
+- **WS-HIGH-05**: TableDetail re-subscription - Applied ref pattern
+- **WS-MED-01**: useTableWebSocket re-renders - Applied ref pattern for stable callbacks
+- **WS-MED-02**: Wildcard listener duplicates in pwaMenu - Added event type filter
+- **WS-MED-03**: WSEvent types incomplete - Made branch_id/table_id optional
+- **WS-MED-04**: Visibility listener memory leak - Cleanup before setup
+
+#### WebSocket Architectural Analysis (auditoria31.md) - COMPLETED
+
+See [auditoria31.md](auditoria31.md) for comprehensive WebSocket analysis. **11 improvements identified, 10 implemented:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 0 | N/A |
+| HIGH | 2 | ✅ Fixed |
+| MEDIUM | 5 | ✅ Fixed |
+| LOW | 4 | ✅ 3 Fixed, 1 Deferred |
+
+**WebSocket Architecture: ✅ PRODUCTION-READY AND FULLY OPTIMIZED**
+
+**Key Fixes:**
+- **WS-31-HIGH-01**: pwaWaiter heartbeat timeout detection - Added sendPing with 10s timeout
+- **WS-31-HIGH-02**: Dashboard soft/hard disconnect - Added softDisconnect() preserving listeners
+- **WS-31-MED-01**: Consistent pong handling - pwaWaiter now handles pong like other apps
+- **WS-31-MED-02**: pwaWaiter visibility handler - Reconnects after sleep/background
+- **WS-31-MED-03**: connectionPromise cleanup - Clear on error/close for proper reconnect
+- **WS-31-MED-04**: Backend logs unknown messages - All 4 endpoints log with debug level
+- **WS-31-MED-05**: HMR cleanup guards - All WebSocket hooks clean up on hot reload
+- **WS-31-LOW-01**: Synchronized constants - All apps use same reconnect/heartbeat values
+- **WS-31-LOW-02**: getLastPongAge() - Debugging helper for connection health
+- **WS-31-LOW-03**: Metrics/observability - DEFERRED (future production enhancement)
+
+#### End-to-End Test Traces (auditoria32.md) - ✅ COMPLETED
+
+See [auditoria32.md](auditoria32.md) for comprehensive end-to-end test traces. **82 defects identified and ALL FIXED:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 20 | ✅ Fixed |
+| HIGH | 25 | ✅ Fixed |
+| MEDIUM | 23 | ✅ Fixed |
+| LOW | 14 | ✅ Fixed |
+
+**Key Security Fixes (CRITICAL):**
+
+| ID | Fix Applied | File |
+|----|-------------|------|
+| CRIT-AUTH-01 | `verify_jwt()` now checks token blacklist via `is_token_revoked(jti)` | `shared/auth.py` |
+| CRIT-AUTH-02 | Added email-based rate limiting (`@email_limiter.limit("5/minute")`) | `routers/auth.py` |
+| CRIT-AUTH-03 | Removed plaintext password support, bcrypt-only | `shared/password.py` |
+| CRIT-AUTH-04 | JWT now includes "jti" claim for individual token revocation | `shared/auth.py` |
+| CRIT-AUTH-05 | Tenant isolation validation - all branches must belong to user's tenant | `routers/auth.py` |
+| CRIT-ADMIN-01 | Fixed audit trail with `get_user_id(ctx)` helper using `int(ctx["sub"])` | `routers/admin_base.py` |
+| CRIT-RACE-01 | Added `SELECT FOR UPDATE` in session creation | `routers/tables.py` |
+| CRIT-IDEMP-01 | Idempotency keys stored in Redis with configurable TTL | `routers/diner.py` |
+| CRIT-DB-01/02/03 | Made tenant_id NOT NULL in all M:N tables | `models.py` |
+| CRIT-WS-07/10/11 | Events with sector_id now dispatch to both sector AND branch channels | `shared/events.py` |
+| CRIT-WS-09 | Redis subscriber uses connection pool instead of standalone | `ws_gateway/redis_subscriber.py` |
+| CRIT-ALG-01 | FIFO allocation algorithm fixed with proper charge ordering | `services/allocation.py` |
+
+**Key Database Integrity Fixes (HIGH/MEDIUM):**
+
+| ID | Fix Applied | File |
+|----|-------------|------|
+| HIGH-DB-01 | Partial unique index for global sectors (branch_id IS NULL) | `models.py` |
+| HIGH-DB-02 | Exclusive waiter assignment constraint (one sector per waiter per shift) | `models.py` |
+| HIGH-AUTH-05 | Login/logout events logged with structured logging | `routers/auth.py` |
+| HIGH-VALID-02 | Check constraints for total_cents, paid_cents validation | `models.py` |
+| HIGH-EVENT-01 | N+1 queries fixed with selectinload/joinedload | `routers/recipes.py`, `routers/diner.py` |
+| MED-IDX-01 | Composite index on Allocation(charge_id, payment_id) | `models.py` |
+| MED-CONS-01/02/03 | Check constraints: paid ≤ total, non-negative amounts | `models.py` |
+
+**Authentication Security Pattern:**
+```python
+# shared/auth.py - Token blacklist verification
+def verify_jwt(token: str) -> dict:
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    jti = payload.get("jti")
+    if jti and is_token_revoked(jti):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+    return payload
+
+# shared/password.py - Bcrypt-only (no plaintext)
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    if not hashed_password.startswith(("$2a$", "$2b$", "$2y$")):
+        logger.warning("SECURITY: Non-bcrypt password hash detected")
+        return False
+    return pwd_context.verify(plain_password, hashed_password)
+```
+
+**Email-based Rate Limiting Pattern:**
+```python
+# routers/auth.py - Prevents credential stuffing from distributed IPs
+@router.post("/login")
+@limiter.limit("5/minute")           # IP-based
+@email_limiter.limit("5/minute")     # Email-based
+def login(request: Request, body: LoginRequest):
+    set_rate_limit_email(request, body.email)  # Set email for rate limit key
+    # ... authentication logic ...
+```
+
+**Audit Trail Pattern:**
+```python
+# routers/admin_base.py - Proper user_id extraction from JWT
+def get_user_id(ctx: dict) -> int:
+    return int(ctx["sub"])  # NOT ctx.get("user_id") which returns None
+
+def get_user_email(ctx: dict) -> str:
+    return ctx.get("email", "")
+```
+
+#### Comprehensive Audit (auditoria28.md) - COMPLETED
+
+See [auditoria28.md](auditoria28.md) for the full architectural audit. **95 defects identified and ALL 95 fixed:**
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| CRITICAL | 18 | ✅ Fixed |
+| HIGH | 27 | ✅ Fixed |
+| MEDIUM | 31 | ✅ Fixed |
+| LOW | 19 | ✅ Fixed |
+
+**Key Fixes:**
+- **CRIT-01**: Race condition in MP webhook - Added `SELECT FOR UPDATE`
+- **CRIT-03**: N+1 queries in kitchen_tickets.py - Batch fetching with eager loading
+- **CRIT-05**: Race condition in cleanup - Used `list()` snapshot
+- **CRIT-10**: Memory leak in Dashboard WebSocket - Clear listeners in `disconnect()`
+- **CRIT-12**: Zustand selector anti-pattern - Stable empty array references
+- **HIGH-01**: Branch validation in product update
+- **HIGH-02**: Consistent event publishing to all channels
+- **HIGH-07**: Token sync between api.ts and websocket.ts
+- **MED-08**: WebSocket event type constants in pwaWaiter
+
+#### Architectural Audit (ARQUITECTURA_AUDIT_2026.md)
+
+See [ARQUITECTURA_AUDIT_2026.md](ARQUITECTURA_AUDIT_2026.md) for comprehensive architectural audit. **47 defects identified and 12 critical/high fixed:**
+
+**CRITICAL (Fixed):**
+- N+1 queries in `recipes.py` and `diner.py` - Added eager loading with `selectinload`/`joinedload`
+- Dashboard WebSocket not connected globally - Added `useWebSocketConnection` hook in Layout
+
+**HIGH (Fixed):**
+- Backend commit error handling - Added try-except with rollback in billing.py, diner.py
+- Backend race condition - Added `SELECT FOR UPDATE` in billing.py
+- Backend tenant validation - Added branch_id change validation in recipes.py
+- Dashboard listener accumulation - Refactored `useAdminWebSocket` with useRef pattern
+- pwaWaiter SSRF protection - Added `isValidApiBase()` validation
+- Backend async/sync mismatch - Fixed event publishing patterns
+
+**Files Modified:**
+- `Dashboard/src/hooks/useWebSocketConnection.ts` (created)
+- `Dashboard/src/hooks/useAdminWebSocket.ts`
+- `Dashboard/src/components/layout/Layout.tsx`
+- `backend/rest_api/routers/billing.py`
+- `backend/rest_api/routers/diner.py`
+- `backend/rest_api/routers/recipes.py`
+- `pwaWaiter/src/services/api.ts`
+- `pwaWaiter/src/utils/constants.ts`
+
+#### Resolved Issues
 - ✅ **Backend Event Publishing**: `publish_round_event()`, `publish_service_call_event()`, and `publish_check_event()` now publish to **4 channels**: waiters, kitchen, admin (Dashboard), and session (diners). See `backend/shared/events.py`.
 - ✅ **Payment Allocation**: MP webhook calls `allocate_payment_fifo()` after payment creation
 - ✅ **pwaMenu Selectors**: Normalized to camelCase (`sharedCart`, `dinerId`, `backendRoundId`)
 - ✅ **pwaMenu Payment Flow**: `useCloseTableFlow` calls `dinerAPI.createServiceCall({ type: 'PAYMENT_HELP' })`
 - ✅ **pwaWaiter Events**: All 9 events mapped (ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, SERVICE_CALL_CREATED, CHECK_REQUESTED, CHECK_PAID, TABLE_CLEARED, PAYMENT_APPROVED)
 - ✅ **Dashboard WebSocket**: `tableStore.ts` has `subscribeToTableEvents()` for real-time table updates
-- ✅ **Exponential Backoff**: Both pwaMenu and pwaWaiter WebSocket services use exponential backoff with jitter
+- ✅ **Exponential Backoff**: All 3 apps (Dashboard, pwaMenu, pwaWaiter) use exponential backoff with jitter
+- ✅ **Heartbeat Timeout**: All 3 apps detect stale connections via 10s pong timeout (WS-31-HIGH-01)
+- ✅ **Visibility Handlers**: All 3 apps reconnect when tab becomes visible after sleep (WS-31-MED-02)
+- ✅ **HMR Cleanup**: All WebSocket hooks have HMR cleanup guards for development (WS-31-MED-05)
 - ✅ **Session Expiry**: pwaMenu API service handles 401 with `onSessionExpired()` callback
 - ✅ **Rate Limiting**: Backend uses slowapi for rate limiting on public endpoints
 - ✅ **Refresh Tokens**: `POST /api/auth/refresh` endpoint implemented
 - ✅ **Cascade Delete Preview**: Dashboard shows affected items before deletion via `CascadePreviewList`
 - ✅ **Duplicate Validation**: `validateProduct()` and `validateStaff()` check for duplicates
 
-### Dashboard Real-time Updates
+#### Dashboard Real-time Updates
 
 ```typescript
 // Dashboard/src/stores/tableStore.ts
@@ -541,7 +952,7 @@ const unsubscribe = useTableStore.getState().subscribeToTableEvents()
 //                 ROUND_SERVED, CHECK_REQUESTED, CHECK_PAID
 ```
 
-### Dashboard Admin CRUD Sync (DEF-HIGH-01 Fix)
+#### Dashboard Admin CRUD Sync (DEF-HIGH-01 Fix)
 
 ```typescript
 // Dashboard/src/hooks/useAdminWebSocket.ts
@@ -556,12 +967,12 @@ function AdminPage() {
   // Entities auto-removed on ENTITY_DELETED/CASCADE_DELETE
 }
 
-// Backend publishes events from admin.py delete endpoints:
+// Backend publishes events from admin/ delete endpoints:
 // - publish_entity_deleted() for single entity
 // - publish_cascade_delete() with affected_entities list for cascades
 ```
 
-### New Features (January 2026)
+#### New Features by App
 
 **pwaMenu (audi2pwa.md audit):**
 - `CallWaiterModal.tsx`: Connected to backend via `dinerAPI.createServiceCall()` (C001)
@@ -589,13 +1000,11 @@ function AdminPage() {
 - `UI_CONFIG` constants for magic numbers (pull threshold, refresh interval, etc.)
 - PWA manifest enhanced with shortcuts and screenshots
 
-**Dashboard:**
+**Dashboard (audi2das.md audit):**
 - `Reports.tsx`: Sales reports page with charts and CSV export
 - `exportCsv.ts`: Generic CSV export utility with Excel BOM support
 - `useKeyboardShortcuts.ts`: Mac/Windows keyboard shortcuts hook
 - `useSystemTheme.ts`: OS theme preference detection
-
-**Dashboard (audi2das.md audit - January 2026):**
 - `promotionStore.ts`: Full backend integration with `promotionAPI` (C001)
 - `restaurantStore.ts`: Connected to `tenantAPI.get()` and `tenantAPI.update()` (C002)
 - `staffAPI.get(id)`: New endpoint for fetching single staff member (C003)
@@ -606,18 +1015,58 @@ function AdminPage() {
 - `kitchen_tickets.py`: KitchenTicket CRUD endpoints (group round items by station)
 - `promotions.py`: Promotion CRUD with branch and item associations
 
-## QA Status (January 2026)
+### Dashboard-Backend Consistency
+
+When adding new endpoints, ensure consistency between:
+- `Dashboard/src/services/api.ts` (frontend API calls)
+- `backend/rest_api/routers/*.py` (backend endpoints)
+- `backend/rest_api/main.py` (router registration)
+
+**Common inconsistencies to check:**
+1. **Missing endpoints**: Dashboard calls an endpoint that doesn't exist in backend
+2. **Response type mismatch**: Frontend expects different structure than backend returns
+3. **Router not registered**: Router file exists but not included in `main.py`
+
+**Verification commands:**
+```bash
+# List all Dashboard API endpoints
+grep -E "async \w+\(" Dashboard/src/services/api.ts | head -50
+
+# List all backend routes
+curl http://localhost:8000/openapi.json | jq '.paths | keys'
+
+# Check router registrations
+grep "include_router" backend/rest_api/main.py
+```
+
+**Recent fixes (January 2026):**
+- Added `GET /api/admin/tables/{table_id}` (was missing, Dashboard called it)
+- Registered `kitchen_tickets_router` in `main.py` (file existed but wasn't registered)
+- Fixed recipe ingest response type (backend returns `RecipeOutput`, not `{success, message}`)
+- **CRITICAL FIX**: Removed `await redis.close()` from all routers (was closing pooled connections)
+  - Affected files: diner.py, billing.py, kitchen.py, tables.py, waiter.py, kitchen_tickets.py
+  - 11 occurrences fixed - pool now manages connection lifecycle correctly
+- **auditoria34.md improvements** (execution traces audit):
+  - Added circuit breaker for Mercado Pago API (`rest_api/services/circuit_breaker.py`)
+  - Added webhook retry queue with exponential backoff (`rest_api/services/webhook_retry.py`)
+  - Added batch inserts for round_items in `diner.py` (prevents N+1 queries)
+  - Health check now includes circuit breaker stats and retry queue stats
+
+### QA Status
 
 See [RESULTADOS_QA.md](RESULTADOS_QA.md) and [todaslasTraza.md](todaslasTraza.md) for full QA reports.
 
-### Test Results
+#### Test Results (January 2026)
 | App | Tests | Status |
 |-----|-------|--------|
-| Dashboard | 100 | PASSED |
-| pwaMenu | 108 | PASSED |
-| pwaWaiter | 0 | No tests yet |
+| Dashboard | 100 | ✅ PASSED |
+| pwaMenu | 108 | ✅ PASSED |
+| pwaWaiter | 74 | ✅ PASSED |
+| Backend (pytest) | 25+ | ✅ PASSED |
 
-### Running Individual Tests
+All builds verified after auditoria29.md fixes.
+
+#### Running Individual Tests
 
 ```bash
 # Dashboard - run single test file
@@ -636,7 +1085,7 @@ cd pwaMenu && npm run test:run
 cd pwaMenu && npm run test -- --coverage
 ```
 
-### Resolved Defects (January 2026)
+#### Resolved Defects
 
 **CRITICAL (Fixed):**
 - **DEF-CRIT-01**: Product validation before submitOrder (`pwaMenu/src/stores/tableStore/store.ts`)
@@ -648,7 +1097,7 @@ cd pwaMenu && npm run test -- --coverage
 - **DEF-HIGH-03**: retryQueueStore integrated with tablesStore (`pwaWaiter/src/stores/tablesStore.ts`)
 - **DEF-HIGH-04**: Token refresh with auto-renewal interval (`pwaWaiter/src/stores/authStore.ts`)
 
-### TypeScript Errors
+#### TypeScript Errors
 
 Dashboard and pwaMenu have preexisting TypeScript errors (39 and 44 respectively) that don't affect production builds. Key issues:
 - FormData types missing `id` property
@@ -657,11 +1106,61 @@ Dashboard and pwaMenu have preexisting TypeScript errors (39 and 44 respectively
 
 Run `npx tsc --noEmit` from each directory to see current errors.
 
-## Architecture Patterns (January 2026 Audit)
+### Architecture Patterns
 
 See [auintegral11.md](auintegral11.md) for comprehensive audit. Key patterns enforced:
 
-### Backend - Redis Connection Pool
+#### Backend - Modular Admin Router (January 2026 Refactoring)
+
+The admin router has been refactored from a single 4,829-line file into 15 focused modules:
+
+```
+backend/rest_api/routers/admin/
+├── __init__.py          # Combined router (imports all sub-routers)
+├── _base.py             # Shared dependencies, models, auth helpers
+├── tenant.py            # Tenant info and settings (2 endpoints)
+├── branches.py          # Branch CRUD (5 endpoints)
+├── categories.py        # Category CRUD (5 endpoints)
+├── subcategories.py     # Subcategory CRUD (5 endpoints)
+├── products.py          # Product CRUD with canonical model (5 endpoints)
+├── allergens.py         # Allergen CRUD + cross-reactions (9 endpoints)
+├── staff.py             # Staff management with branch access control (5 endpoints)
+├── tables.py            # Table CRUD + batch creation (6 endpoints)
+├── sectors.py           # Sector management (3 endpoints)
+├── orders.py            # Active orders and stats (2 endpoints)
+├── exclusions.py        # Branch exclusions for categories/subcategories (5 endpoints)
+├── assignments.py       # Daily waiter-sector assignments (5 endpoints)
+├── reports.py           # Sales analytics (3 endpoints)
+├── audit.py             # Audit log viewing (1 endpoint)
+└── restore.py           # Entity restoration (1 endpoint)
+
+Supporting files:
+├── admin_schemas.py     # All Pydantic schemas for admin endpoints
+└── admin_base.py        # Legacy helpers (get_user_id, get_user_email)
+```
+
+**Import pattern for sub-modules:**
+```python
+# Each module imports from _base.py for shared dependencies
+from rest_api.routers.admin._base import (
+    Depends, HTTPException, status, Session, select,
+    get_db, current_user, Branch, Category, Product,
+    soft_delete, set_created_by, get_user_id, get_user_email,
+    require_admin, require_admin_or_manager,
+)
+from rest_api.routers.admin_schemas import BranchOutput, BranchCreate
+```
+
+**main.py import unchanged:**
+```python
+# The __init__.py exports the combined router
+from rest_api.routers.admin import router as admin_router
+app.include_router(admin_router, prefix="/api/admin")
+```
+
+**Total: 62 endpoints across 15 modules** (100% API compatible with original)
+
+#### Backend - Redis Connection Pool
 ```python
 # CORRECT: Use connection pool singleton (shared/events.py)
 from shared.events import get_redis_pool
@@ -673,7 +1172,7 @@ await redis.publish(channel, message)
 # Pool closed automatically on app shutdown via close_redis_pool()
 ```
 
-### Backend - Eager Loading (Avoid N+1)
+#### Backend - Eager Loading (Avoid N+1)
 ```python
 # CORRECT: Use selectinload for collections, joinedload for single relations
 from sqlalchemy.orm import selectinload, joinedload
@@ -686,7 +1185,7 @@ rounds = db.execute(
 ).scalars().unique().all()
 ```
 
-### Backend - Database Pool Settings
+#### Backend - Database Pool Settings
 ```python
 # rest_api/db.py - Connection pool configured for reliability
 engine = create_engine(
@@ -700,7 +1199,120 @@ engine = create_engine(
 )
 ```
 
-### Frontend - useEffect Cleanup Pattern
+#### Backend - Safe Commit Pattern (HIGH-01 Fix)
+```python
+# CORRECT: Use safe_commit() for automatic rollback on failure
+from rest_api.db import safe_commit
+
+# In router:
+db.add(new_entity)
+safe_commit(db)  # Rolls back and re-raises on failure
+
+# Implementation (rest_api/db.py):
+def safe_commit(db: Session) -> None:
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+```
+
+#### Backend - Circuit Breaker Pattern (auditoria34.md REC-01)
+```python
+# Use circuit breaker to prevent cascading failures with external APIs
+from rest_api.services.circuit_breaker import mercadopago_breaker, CircuitBreakerError
+
+# In router (e.g., billing.py):
+try:
+    async with mercadopago_breaker.call():
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post("https://api.mercadopago.com/...")
+except CircuitBreakerError as e:
+    # Circuit is open - return 503 with Retry-After header
+    raise HTTPException(
+        status_code=503,
+        detail=f"Service temporarily unavailable. Retry in {int(e.retry_after)}s",
+        headers={"Retry-After": str(int(e.retry_after))},
+    )
+
+# Configuration (rest_api/services/circuit_breaker.py):
+# - failure_threshold: 5 failures before opening circuit
+# - success_threshold: 2 successes in half-open to close
+# - timeout_seconds: 30s before attempting half-open
+# - States: CLOSED (normal) → OPEN (failing) → HALF-OPEN (testing)
+
+# Monitor via health check:
+curl http://localhost:8000/api/health/detailed | jq '.circuit_breakers'
+```
+
+#### Backend - Webhook Retry Queue Pattern (auditoria34.md REC-02)
+```python
+# Queue failed webhooks for retry with exponential backoff
+from rest_api.services.webhook_retry import webhook_retry_queue
+
+# Enqueue failed webhook (e.g., in billing.py):
+await webhook_retry_queue.enqueue(
+    webhook_type="mercadopago",
+    payload=body,
+    error="Connection timeout",
+)
+
+# Register handler (in main.py lifespan):
+from rest_api.services.mp_webhook_handler import register_mp_webhook_handler
+register_mp_webhook_handler()
+
+# Start background processor (in main.py lifespan):
+import asyncio
+asyncio.create_task(start_retry_processor(interval_seconds=30.0))
+
+# Configuration:
+# - Exponential backoff: 10s, 20s, 40s, 80s, 160s (max 1 hour)
+# - Max 5 attempts before dead letter queue
+# - Persisted in Redis (survives restarts)
+
+# Monitor via health check and Redis:
+curl http://localhost:8000/api/health/detailed | jq '.webhook_retry'
+redis-cli -p 6380 ZRANGE webhook_retry:pending 0 -1 WITHSCORES
+redis-cli -p 6380 LRANGE webhook_retry:dead_letter 0 10
+```
+
+#### Backend - Batch Insert Pattern (auditoria34.md REC-03)
+```python
+# WRONG: N+1 queries - one query per item
+for item in body.items:
+    result = db.execute(select(Product, BranchProduct)...).first()
+    db.add(RoundItem(...))
+
+# CORRECT: Single batch query + batch add
+# 1. Collect all IDs first
+product_ids = [item.product_id for item in body.items]
+
+# 2. Single query to fetch all products with their branch prices
+products_query = db.execute(
+    select(Product, BranchProduct)
+    .join(BranchProduct, Product.id == BranchProduct.product_id)
+    .where(
+        Product.id.in_(product_ids),
+        Product.is_active == True,
+        BranchProduct.branch_id == branch_id,
+    )
+).all()
+
+# 3. Build lookup dict
+product_lookup = {p.id: (p, bp) for p, bp in products_query}
+
+# 4. Validate all products exist
+for item in body.items:
+    if item.product_id not in product_lookup:
+        raise HTTPException(400, f"Product {item.product_id} not available")
+
+# 5. Batch create items
+round_items = [RoundItem(product_id=item.product_id, ...) for item in body.items]
+db.add_all(round_items)
+db.commit()
+```
+
+#### Frontend - useEffect Cleanup Pattern
 ```typescript
 // CORRECT: Clean up setTimeout to prevent memory leaks
 const timeoutRef = useRef<number | null>(null)
@@ -716,7 +1328,7 @@ useEffect(() => {
 }, [])
 ```
 
-### Frontend - WebSocket Listener Pattern
+#### Frontend - WebSocket Listener Pattern
 ```typescript
 // CORRECT: Use useRef to avoid listener accumulation
 const handleEventRef = useRef(handleEvent)
@@ -724,11 +1336,19 @@ useEffect(() => { handleEventRef.current = handleEvent })
 
 useEffect(() => {
   const unsubscribe = ws.on('*', (e) => handleEventRef.current(e))
+
+  // WS-31-MED-05 FIX: HMR cleanup guard for development
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      unsubscribe()
+    })
+  }
+
   return unsubscribe
 }, [])  // Empty deps - subscribe once
 ```
 
-### Frontend - WebSocket Singleton Pattern (Dashboard)
+#### Frontend - WebSocket Singleton Pattern (Dashboard)
 ```typescript
 // Dashboard uses a singleton WebSocket (dashboardWS) shared across components.
 // Components should NOT disconnect on cleanup - only unsubscribe listeners.
@@ -758,9 +1378,14 @@ logout: () => {
   dashboardWS.disconnect()  // ✅ Disconnect when user logs out
   // ... clear auth state
 }
+
+// WS-31-HIGH-02 FIX: Dashboard now has soft/hard disconnect methods
+softDisconnect()  // Close socket, preserve listeners (for temporary disconnect)
+disconnect()      // Close socket AND clear all listeners (for logout)
+destroy()         // Alias for disconnect (API consistency)
 ```
 
-### Frontend - React Keys Pattern
+#### Frontend - React Keys Pattern
 ```typescript
 // WRONG: Using name as key causes duplicates when same name appears in multiple groups
 <NavLink key={item.name} ... />  // "Sucursales" duplicated in Gestión and Estadísticas
@@ -789,23 +1414,349 @@ const columns = [
 ]
 ```
 
-### pwaWaiter - Auth Token Refresh
+#### WebSocket Configuration Constants (WS-31-LOW-01)
+
+Keep WebSocket constants synchronized across all 3 apps:
+
+```typescript
+// pwaWaiter/src/utils/constants.ts (reference implementation)
+export const WS_CONFIG = {
+  RECONNECT_INTERVAL: 1000,      // Base delay for exponential backoff
+  MAX_RECONNECT_DELAY: 30000,    // Maximum reconnect delay
+  MAX_RECONNECT_ATTEMPTS: 10,
+  HEARTBEAT_INTERVAL: 30000,     // 30 seconds ping interval
+  HEARTBEAT_TIMEOUT: 10000,      // 10 seconds to receive pong
+  JITTER_FACTOR: 0.3,            // Add up to 30% random jitter
+} as const
+
+// Dashboard/pwaMenu use same values (defined locally in websocket.ts)
+const BASE_RECONNECT_DELAY = 1000
+const MAX_RECONNECT_DELAY = 30000
+const MAX_RECONNECT_ATTEMPTS = 10
+const HEARTBEAT_INTERVAL = 30000
+const HEARTBEAT_TIMEOUT = 10000
+const JITTER_FACTOR = 0.3
+```
+
+#### pwaWaiter - Auth Token Refresh
 ```typescript
 // CORRECT: Max retries + auto-logout to prevent infinite loop
 const MAX_REFRESH_ATTEMPTS = 3
 
 refreshAccessToken: async () => {
-  const { refreshAttempts } = get()
+  const { refreshAttempts, isRefreshing } = get()
+
+  // HIGH-29-18 FIX: Prevent concurrent refresh attempts
+  if (isRefreshing) {
+    authLogger.debug('Token refresh already in progress, skipping')
+    return false
+  }
+
   if (refreshAttempts >= MAX_REFRESH_ATTEMPTS) {
     get().logout()
     return false
   }
-  set({ refreshAttempts: refreshAttempts + 1 })
-  // ... attempt refresh ...
+
+  set({ isRefreshing: true, refreshAttempts: refreshAttempts + 1 })
+  try {
+    // ... attempt refresh ...
+  } finally {
+    set({ isRefreshing: false })  // Always reset in finally
+  }
 }
 ```
 
-### Database Indexes
+#### Global Event Listener Guard Pattern (CRIT-29-02, CRIT-29-03)
+```typescript
+// WRONG: Listener registered multiple times on HMR/re-initialization
+window.addEventListener('online', handleOnline)  // Accumulates on each module reload
+
+// CORRECT: Guard against duplicate registration + export cleanup (auditoria36 WAITER-STORE-CRIT-02)
+let listenerRegistered = false
+let listenerCleanup: (() => void) | null = null
+
+if (typeof window !== 'undefined' && !listenerRegistered) {
+  listenerRegistered = true
+  const handleOnline = () => { /* ... */ }
+  window.addEventListener('online', handleOnline)
+
+  // Export cleanup function for tests and app unmount
+  listenerCleanup = () => {
+    window.removeEventListener('online', handleOnline)
+    listenerRegistered = false
+    listenerCleanup = null
+  }
+}
+
+export function cleanupOnlineListener(): void {
+  if (listenerCleanup) listenerCleanup()
+}
+```
+
+#### IndexedDB Timeout Pattern (auditoria36 WAITER-SVC-MED-02)
+```typescript
+// WRONG: IndexedDB operations can hang indefinitely
+const db = await openDB()  // May never resolve on corrupt/locked DB
+
+// CORRECT: Wrap with timeout (30s default)
+const IDB_TIMEOUT_MS = 30000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, op: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`${op} timed out after ${ms}ms`))
+    }, ms)
+    promise
+      .then((r) => { clearTimeout(timeoutId); resolve(r) })
+      .catch((e) => { clearTimeout(timeoutId); reject(e) })
+  })
+}
+
+// Usage
+return withTimeout(openPromise, IDB_TIMEOUT_MS, 'openDB')
+```
+
+#### Memory Leak Prevention in Set/Map (auditoria36 WAITER-SVC-CRIT-03)
+```typescript
+// WRONG: Set grows unbounded over time
+const recentNotifications = new Set<string>()
+recentNotifications.add(key)  // Never cleaned up if setTimeout fails
+
+// CORRECT: Add maximum size limit
+const MAX_RECENT = 100
+if (recentNotifications.size >= MAX_RECENT) {
+  recentNotifications.clear()  // Prevent unbounded growth
+}
+recentNotifications.add(key)
+setTimeout(() => recentNotifications.delete(key), 5000)
+```
+
+#### Async Hook Mount Guard Pattern (auditoria36 MENU-HOOK-CRIT-01)
+```typescript
+// WRONG: setState after unmount causes memory leak warning
+useEffect(() => {
+  fetchData().then(data => setData(data))  // May run after unmount
+}, [])
+
+// CORRECT: Track mount state and check before setState
+useEffect(() => {
+  let isMounted = true
+
+  fetchData().then(data => {
+    if (!isMounted) return  // Skip if unmounted
+    setData(data)
+  })
+
+  return () => { isMounted = false }
+}, [])
+```
+
+#### Focus Trap Pattern for Modals (auditoria36 WAITER-COMP-CRIT-01/02)
+```typescript
+// In ConfirmDialog or any modal:
+const previousActiveElement = useRef<HTMLElement | null>(null)
+
+useEffect(() => {
+  if (isOpen) {
+    // Store focus to restore on close
+    previousActiveElement.current = document.activeElement as HTMLElement
+    setTimeout(() => firstFocusableRef.current?.focus(), 50)
+  } else if (previousActiveElement.current) {
+    previousActiveElement.current.focus()
+    previousActiveElement.current = null
+  }
+}, [isOpen])
+
+// Focus trap on Tab key
+const handleKeyDown = (e: KeyboardEvent) => {
+  if (e.key === 'Tab') {
+    const focusables = [cancelBtn, confirmBtn].filter(Boolean)
+    if (e.shiftKey && document.activeElement === focusables[0]) {
+      e.preventDefault()
+      focusables[focusables.length - 1].focus()
+    } else if (!e.shiftKey && document.activeElement === focusables[focusables.length - 1]) {
+      e.preventDefault()
+      focusables[0].focus()
+    }
+  }
+}
+```
+
+#### BroadcastChannel Synchronous Initialization (CRIT-29-04)
+```typescript
+// WRONG: Async initialization causes race condition
+useEffect(() => {
+  initBroadcastChannel()  // Messages received before init are lost
+}, [])
+
+// CORRECT: Synchronous initialization in store creation
+let isChannelInitialized = false
+const pendingBroadcasts: HistoryEntry[] = []
+
+// In store persist config onRehydrateStorage:
+if (typeof BroadcastChannel !== 'undefined' && !isChannelInitialized) {
+  initBroadcastChannel({ setState: set })
+  // Flush any pending broadcasts
+  pendingBroadcasts.forEach((entry) => broadcastHistoryEntry(entry))
+  pendingBroadcasts.length = 0
+}
+```
+
+#### Zustand useCallback Dependency Pattern (CRIT-29-05)
+```typescript
+// WRONG: Depending on entire filter object causes infinite loop
+const shouldShowProduct = useCallback(
+  (product) => {
+    if (allergenFilter.hasActiveFilter) { ... }  // allergenFilter changes on each render
+  },
+  [allergenFilter]  // Cyclic dependency!
+)
+
+// CORRECT: Extract stable references before useCallback
+const allergenHasActive = allergenFilter.hasActiveFilter
+const allergenShouldHide = allergenFilter.shouldHideProductAdvanced
+
+const shouldShowProduct = useCallback(
+  (product) => {
+    if (allergenHasActive) {
+      if (allergenShouldHide(product.allergens)) return false
+    }
+    return true
+  },
+  [allergenHasActive, allergenShouldHide]  // Stable primitives/functions
+)
+```
+
+#### Backend Race Condition Prevention (CRIT-29-01)
+```python
+# WRONG: Read-then-write without locking allows concurrent modifications
+session = db.scalar(select(TableSession).where(TableSession.id == id))
+session.total_rounds += 1  # Race condition if concurrent requests
+
+# CORRECT: Use SELECT FOR UPDATE to lock the row
+locked_session = db.scalar(
+    select(TableSession)
+    .where(TableSession.id == session_id)
+    .with_for_update()  # Locks row until transaction commits
+)
+locked_session.total_rounds += 1
+```
+
+#### Async Context Detection in Sync Wrappers (CRIT-29-07)
+```python
+# WRONG: loop.run_until_complete() fails in async context
+def sync_wrapper():
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(async_func())  # RuntimeError if loop running
+
+# CORRECT: Detect async context and schedule appropriately
+def sync_wrapper():
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already in async context - schedule and return optimistically
+            asyncio.ensure_future(async_func())
+            return True  # Operation will complete asynchronously
+        return loop.run_until_complete(async_func())
+    except RuntimeError:
+        return asyncio.run(async_func())
+```
+
+#### Backend - Authentication Security (auditoria32.md Fixes)
+
+**Token Blacklist Verification (CRIT-AUTH-01):**
+```python
+# shared/auth.py - verify_jwt() MUST check blacklist
+def verify_jwt(token: str) -> dict:
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    jti = payload.get("jti")
+    if jti and is_token_revoked(jti):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+    return payload
+
+# JWT claims MUST include "jti" for revocation (CRIT-AUTH-04)
+def sign_jwt(payload: dict) -> str:
+    payload["jti"] = str(uuid.uuid4())  # Unique token identifier
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+```
+
+**Email-based Rate Limiting (CRIT-AUTH-02):**
+```python
+# routers/auth.py - Prevents credential stuffing attacks
+from shared.rate_limit import limiter, email_limiter, set_rate_limit_email
+
+@router.post("/login")
+@limiter.limit("5/minute")           # IP-based rate limit
+@email_limiter.limit("5/minute")     # Email-based rate limit (CRITICAL)
+def login(request: Request, body: LoginRequest):
+    set_rate_limit_email(request, body.email)  # MUST be called first
+    # ... authentication logic ...
+```
+
+**Bcrypt-only Password Verification (CRIT-AUTH-03):**
+```python
+# shared/password.py - NO plaintext password support
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    # SECURITY: Reject non-bcrypt hashes (no plaintext fallback)
+    if not hashed_password.startswith(("$2a$", "$2b$", "$2y$")):
+        logger.warning("SECURITY: Non-bcrypt password hash detected")
+        return False  # Fail closed, don't allow login
+    return pwd_context.verify(plain_password, hashed_password)
+```
+
+**Tenant Isolation Validation (CRIT-AUTH-05):**
+```python
+# routers/auth.py - All branches MUST belong to user's tenant
+branches = db.execute(select(Branch).where(Branch.id.in_(branch_ids))).scalars().all()
+for branch in branches:
+    if branch.tenant_id != user.tenant_id:
+        logger.error("SECURITY: Tenant isolation violation", user_id=user.id)
+        raise HTTPException(status_code=403, detail="Security error: tenant isolation violation")
+```
+
+**Audit Trail User ID Extraction (CRIT-ADMIN-01):**
+```python
+# routers/admin_base.py - CORRECT way to get user_id from JWT context
+def get_user_id(ctx: dict) -> int:
+    return int(ctx["sub"])  # JWT "sub" claim contains user ID as string
+
+def get_user_email(ctx: dict) -> str:
+    return ctx.get("email", "")
+
+# WRONG: This returns None because "user_id" key doesn't exist
+user_id = ctx.get("user_id")  # ❌ Always None
+```
+
+**Security Logging Pattern (HIGH-AUTH-05):**
+```python
+# routers/auth.py - Log all auth events for security monitoring
+logger.warning("LOGIN_FAILED: User not found", email=body.email)
+logger.warning("LOGIN_FAILED: Invalid password", email=body.email, user_id=user.id)
+logger.warning("LOGIN_FAILED: No branch assignments", email=body.email, user_id=user.id)
+logger.info("LOGIN_SUCCESS", email=user.email, user_id=user.id, roles=roles)
+logger.info("LOGOUT_SUCCESS", email=user_email, user_id=user_id)
+```
+
+#### Backend - Redis Subscriber Pool Pattern (CRIT-WS-09)
+```python
+# ws_gateway/redis_subscriber.py - Use pooled connection, NOT standalone
+from shared.events import get_redis_pool
+
+async def run_subscriber(channels: list[str], on_message: Callable) -> None:
+    # CORRECT: Use the global pool
+    redis_pool = await get_redis_pool()
+    pubsub = redis_pool.pubsub()
+    await pubsub.psubscribe(*channels)
+
+    try:
+        async for msg in pubsub.listen():
+            # ... handle messages ...
+    finally:
+        await pubsub.punsubscribe(*channels)
+        # DON'T close the pool connection - pool manages lifecycle
+```
+
+#### Database Indexes
 Status columns have indexes for frequent queries (auto-created on startup):
 - `Table.status`, `TableSession.status`, `Round.status`
 - `ServiceCall.status`, `Check.status`, `Payment.status`
@@ -813,11 +1764,31 @@ Status columns have indexes for frequent queries (auto-created on startup):
 - `is_active` indexed on all tables for soft delete filtering
 - All foreign keys indexed for join performance
 
-## Soft Delete Pattern (January 2026)
+**Composite Indexes** (optimized for common query patterns):
+- `ix_round_branch_status` on `Round(branch_id, status)` - kitchen pending rounds query
+- `ix_service_call_branch_status` on `ServiceCall(branch_id, status)` - waiter pending calls query
+- `ix_table_session_branch_status` on `TableSession(branch_id, status)` - tables by status query
+- `ix_category_branch_active` on `Category(branch_id, is_active)` - catalog queries
+- `ix_subcategory_category_active` on `Subcategory(category_id, is_active)` - subcategory queries
+- `ix_allocation_charge_payment` on `Allocation(charge_id, payment_id)` - FIFO allocation queries (MED-IDX-01)
+
+**Partial Indexes** (for nullable unique constraints):
+- `uq_sector_prefix_global` on `BranchSector(tenant_id, prefix)` WHERE `branch_id IS NULL` - global sectors (HIGH-DB-01)
+
+**Check Constraints** (data integrity):
+- `Check.chk_paid_not_exceed_total`: `paid_cents <= total_cents`
+- `Check.chk_total_non_negative`: `total_cents >= 0`
+- `Check.chk_paid_non_negative`: `paid_cents >= 0`
+- `Diner.uq_diner_session_local_id`: Unique constraint on `(session_id, local_id)` for idempotency
+
+**Exclusive Assignment Constraint** (HIGH-DB-02):
+- `WaiterSectorAssignment.uq_waiter_exclusive_assignment`: One sector per waiter per tenant/branch/date/shift
+
+### Soft Delete Pattern
 
 All 31 models support logical (soft) deletes with full audit trail tracking.
 
-### AuditMixin
+#### AuditMixin
 
 All models inherit from `AuditMixin` which provides:
 
@@ -855,7 +1826,7 @@ class AuditMixin:
         self.deleted_by_email = None
 ```
 
-### Soft Delete Service
+#### Soft Delete Service
 
 ```python
 # backend/rest_api/services/soft_delete_service.py
@@ -876,7 +1847,7 @@ def delete_branch(branch_id: int, db: Session, user: dict):
     soft_delete(db, branch, user["user_id"], user["email"])
 ```
 
-### API Patterns
+#### API Patterns
 
 **List endpoints** accept `include_deleted` query parameter:
 ```python
@@ -911,7 +1882,7 @@ def restore_deleted_entity(entity_type: str, entity_id: int):
     restore_entity(db, entity, user["user_id"], user["email"])
 ```
 
-### Dashboard Integration
+#### Dashboard Integration
 
 **AuditFields interface** (`Dashboard/src/types/index.ts`):
 ```typescript
@@ -945,7 +1916,7 @@ restoreAPI.restore(entityType: EntityType, entityId: number)
 - `branches`, `categories`, `subcategories`, `products`
 - `allergens`, `tables`, `staff`, `promotions`
 
-### No Cascade Delete
+#### No Cascade Delete
 
 When a parent entity is soft-deleted, child entities remain unchanged:
 - Deleting a Category does NOT soft-delete its Subcategories
@@ -953,11 +1924,11 @@ When a parent entity is soft-deleted, child entities remain unchanged:
 - Child entities can still be accessed via `include_deleted=true`
 - To fully remove a hierarchy, delete children first, then parent
 
-## Role-Based Access Control (January 2026)
+### Role-Based Access Control
 
 Dashboard enforces role-based permissions for all CRUD operations.
 
-### Permission Rules
+#### Permission Rules
 
 | Role | Create | Edit | Delete |
 |------|--------|------|--------|
@@ -968,7 +1939,7 @@ Dashboard enforces role-based permissions for all CRUD operations.
 
 **Note:** Categories, Subcategories, and Products are **ADMIN-only** for create/edit operations. All other roles can only view these entities.
 
-### Staff Management Branch Restrictions (January 2026)
+#### Staff Management Branch Restrictions
 
 Staff management has special branch-based restrictions:
 
@@ -980,7 +1951,7 @@ Staff management has special branch-based restrictions:
 | **Edit staff** | Any staff, any role | Only staff in their branches, cannot assign ADMIN role |
 | **Delete staff** | Any staff | Not allowed |
 
-**Backend implementation** (`backend/rest_api/routers/admin.py`):
+**Backend implementation** (`backend/rest_api/routers/admin/staff.py`):
 ```python
 # MANAGER branch validation for staff operations
 if is_manager and not is_admin:
@@ -1014,7 +1985,7 @@ const availableRoles = useMemo(() => {
 }, [userIsAdmin])
 ```
 
-### Permission Utility (`Dashboard/src/utils/permissions.ts`)
+#### Permission Utility (`Dashboard/src/utils/permissions.ts`)
 
 ```typescript
 import { canCreateBranch, canEditBranch, canDelete } from '../utils/permissions'
@@ -1038,7 +2009,7 @@ const canDeleteBranch = canDelete(userRoles)  // ADMIN only
 - `canCreateProduct(roles)` / `canEditProduct(roles)` - ADMIN only
 - Similar functions for Staff, Table, Allergen, Promotion, Badge, Seal, PromotionType (ADMIN + MANAGER)
 
-### UI Conditional Rendering Pattern
+#### UI Conditional Rendering Pattern
 
 All CRUD pages apply this pattern:
 
@@ -1066,12 +2037,12 @@ All CRUD pages apply this pattern:
 )}
 ```
 
-### Backend Role Validation
+#### Backend Role Validation
 
 DELETE endpoints require ADMIN role:
 
 ```python
-# backend/rest_api/routers/admin.py
+# backend/rest_api/routers/admin/branches.py
 @router.delete("/branches/{branch_id}")
 async def delete_branch(branch_id: int, user: dict = Depends(get_current_user)):
     if "ADMIN" not in user.get("roles", []):
@@ -1079,475 +2050,256 @@ async def delete_branch(branch_id: int, user: dict = Depends(get_current_user)):
     # ... soft delete logic
 ```
 
-### Pages with RBAC Applied
+#### Pages with RBAC Applied
 
 All 16 CRUD pages enforce permissions:
 - Branches, Categories, Subcategories, Products, Product Exclusions
 - Staff, Tables, Allergens, Promotions
 - Badges, Seals, PromotionTypes, Roles
 
-## Branch Exclusion System (January 2026)
+### Branch Management Features
+
+#### Branch Exclusion System
 
 Allows ADMIN users to mark which categories/subcategories are NOT sold at specific branches. This enables branch-specific menu customization without duplicating products.
 
-### Database Models
-
+**Database Models:**
 ```python
 # backend/rest_api/models.py
 class BranchCategoryExclusion(AuditMixin, Base):
     """Marks a category as NOT sold at a specific branch."""
     __tablename__ = "branch_category_exclusion"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"))
     branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"))
     category_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("category.id"))
-    # Unique constraint: one exclusion per branch-category pair
 
 class BranchSubcategoryExclusion(AuditMixin, Base):
     """Marks a subcategory as NOT sold at a specific branch."""
     __tablename__ = "branch_subcategory_exclusion"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"))
     branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"))
     subcategory_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("subcategory.id"))
 ```
 
-### API Endpoints
-
-All endpoints require ADMIN role:
-
+**API Endpoints (ADMIN only):**
 ```
-GET  /api/admin/exclusions
-  → Returns ExclusionOverview with all category and subcategory exclusions
-
-GET  /api/admin/exclusions/categories/{category_id}
-  → Returns CategoryExclusionSummary with excluded_branch_ids
-
-PUT  /api/admin/exclusions/categories/{category_id}
-  → Body: { excluded_branch_ids: number[] }
-  → Sets which branches exclude this category
-
-GET  /api/admin/exclusions/subcategories/{subcategory_id}
-  → Returns SubcategoryExclusionSummary with excluded_branch_ids
-
+GET  /api/admin/exclusions                              # Overview
+PUT  /api/admin/exclusions/categories/{category_id}     # Set excluded branches
 PUT  /api/admin/exclusions/subcategories/{subcategory_id}
-  → Body: { excluded_branch_ids: number[] }
-  → Sets which branches exclude this subcategory
 ```
 
-### Dashboard Integration
+**Navigation:** Gestión → Productos → Exclusiones (`/product-exclusions`)
 
-**Navigation:** Gestion → Productos → Exclusiones (`/product-exclusions`)
-
-**Store** (`Dashboard/src/stores/exclusionStore.ts`):
-```typescript
-interface ExclusionState {
-  categoryExclusions: CategoryExclusionSummary[]
-  subcategoryExclusions: SubcategoryExclusionSummary[]
-  isLoading: boolean
-  isUpdating: boolean
-  error: string | null
-
-  fetchExclusions: () => Promise<void>
-  updateCategoryExclusions: (categoryId: number, excludedBranchIds: number[]) => Promise<void>
-  updateSubcategoryExclusions: (subcategoryId: number, excludedBranchIds: number[]) => Promise<void>
-
-  // Helper functions
-  isCategoryExcludedFromBranch: (categoryId: number, branchId: number) => boolean
-  isSubcategoryExcludedFromBranch: (subcategoryId: number, branchId: number) => boolean
-  getExcludedBranchesForCategory: (categoryId: number) => number[]
-  getExcludedBranchesForSubcategory: (subcategoryId: number) => number[]
-}
-```
-
-**API Service** (`Dashboard/src/services/api.ts`):
-```typescript
-export const exclusionAPI = {
-  getOverview: () => api.get<ExclusionOverview>('/admin/exclusions'),
-  getCategoryExclusions: (categoryId: number) => ...,
-  updateCategoryExclusions: (categoryId: number, excludedBranchIds: number[]) => ...,
-  getSubcategoryExclusions: (subcategoryId: number) => ...,
-  updateSubcategoryExclusions: (subcategoryId: number, excludedBranchIds: number[]) => ...,
-}
-```
-
-**Types** (`Dashboard/src/types/index.ts`):
-```typescript
-export interface CategoryExclusionSummary {
-  category_id: number
-  category_name: string
-  excluded_branch_ids: number[]
-}
-
-export interface SubcategoryExclusionSummary {
-  subcategory_id: number
-  subcategory_name: string
-  category_id: number
-  category_name: string
-  excluded_branch_ids: number[]
-}
-
-export interface ExclusionOverview {
-  category_exclusions: CategoryExclusionSummary[]
-  subcategory_exclusions: SubcategoryExclusionSummary[]
-}
-```
-
-### UI Pattern
-
-The exclusion page uses a Table with string IDs for compatibility, storing `numericId` for API calls:
-
-```typescript
-interface CategoryRow {
-  id: string           // String like "cat-123" for Table component
-  numericId: number    // Original numeric ID for API calls
-  name: string
-  type: 'category'
-  excludedBranchIds: number[]
-}
-
-// Toggle exclusion for a branch
-const toggleExclusion = async (row: CategoryRow, branchId: number) => {
-  const currentExclusions = row.excludedBranchIds
-  const newExclusions = currentExclusions.includes(branchId)
-    ? currentExclusions.filter(id => id !== branchId)  // Remove
-    : [...currentExclusions, branchId]                 // Add
-
-  await updateCategoryExclusions(row.numericId, newExclusions)
-}
-```
-
-### Public Menu Filtering
-
-When fetching menu for pwaMenu, excluded items are filtered out:
-```python
-# backend/rest_api/routers/public.py - GET /api/public/menu/{slug}
-# Categories/subcategories excluded from the branch are not returned
-excluded_cat_ids = db.scalars(
-    select(BranchCategoryExclusion.category_id)
-    .where(BranchCategoryExclusion.branch_id == branch.id)
-).all()
-# Filter out excluded categories from response
-```
-
-## Bulk Table Creation by Sector (January 2026)
+#### Bulk Table Creation by Sector
 
 Allows creating multiple tables at once by selecting sectors and specifying quantities per capacity.
 
-### Database Model
-
+**Database Model:**
 ```python
-# backend/rest_api/models.py
 class BranchSector(AuditMixin, Base):
     """Sector for organizing tables (e.g., Interior, Terraza, VIP)."""
-    __tablename__ = "branch_sector"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"))
-    branch_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("branch.id"))  # NULL = global
-    name: Mapped[str] = mapped_column(Text)        # "Interior", "Terraza", "VIP"
-    prefix: Mapped[str] = mapped_column(Text)      # "INT", "TER", "VIP" for auto-codes
-    display_order: Mapped[int] = mapped_column(Integer, default=0)
-    # Unique constraint: (tenant_id, branch_id, prefix)
+    name: Mapped[str]      # "Interior", "Terraza", "VIP"
+    prefix: Mapped[str]    # "INT", "TER", "VIP" for auto-codes
 ```
 
-### API Endpoints
-
-```
-GET  /api/admin/sectors?branch_id={id}
-  → Returns global sectors (branch_id=NULL) + branch-specific sectors
-
-POST /api/admin/sectors
-  → Body: { branch_id?, name, prefix, display_order? }
-  → Creates custom sector (global if branch_id omitted)
-
-DELETE /api/admin/sectors/{sector_id}
-  → Soft-deletes sector
-
-POST /api/admin/tables/batch
-  → Body: { branch_id, tables: [{ sector_id, capacity, count }] }
-  → Creates tables with auto-generated codes (e.g., INT-01, INT-02, TER-01)
-  → Returns: { created_count, tables: [...] }
-```
-
-### Auto-generated Table Codes
-
-Tables are named using sector prefix + sequential number:
+**Auto-generated Table Codes:**
 - Sector "Interior" (prefix "INT") → INT-01, INT-02, INT-03...
 - Sector "Terraza" (prefix "TER") → TER-01, TER-02...
-- Sector "VIP" (prefix "VIP") → VIP-01, VIP-02...
 
-### Dashboard Integration
+**API Endpoints:**
+```
+GET  /api/admin/sectors?branch_id={id}
+POST /api/admin/sectors
+POST /api/admin/tables/batch  # Body: { branch_id, tables: [{ sector_id, capacity, count }] }
+```
 
 **Navigation:** Gestión → Sucursales → Mesas → "Creación Masiva"
 
-**Components:**
-- `BulkTableModal.tsx`: Modal with sector checkboxes and capacity inputs
-- `AddSectorDialog.tsx`: Dialog to create custom sectors
-- `sectorStore.ts`: Zustand store for sector management
+**Seed Data (Global Sectors):**
+Interior (INT), Terraza (TER), VIP (VIP), Barra (BAR), Jardín (JAR), Salón Principal (SAL)
 
-**Usage:**
-1. Click "Creación Masiva" button on Tables page
-2. Select sectors via checkboxes (Interior, Terraza, VIP, etc.)
-3. Specify quantity per capacity (e.g., 5 tables for 4 people, 3 tables for 6 people)
-4. Preview auto-generated codes
-5. Click "Crear Mesas" to create all tables at once
-
-### Seed Data
-
-Global sectors created on first run:
-- Interior (INT), Terraza (TER), VIP (VIP), Barra (BAR), Jardín (JAR), Salón Principal (SAL)
-
-## Daily Waiter-Sector Assignment (January 2026)
+#### Daily Waiter-Sector Assignment
 
 Allows daily assignment of waiters to sectors. A waiter can be assigned to multiple sectors, and a sector can have multiple waiters.
 
-### Database Model
-
+**Database Model:**
 ```python
-# backend/rest_api/models.py
 class WaiterSectorAssignment(AuditMixin, Base):
     """Daily assignment of waiters to sectors."""
-    __tablename__ = "waiter_sector_assignment"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"))
-    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"))
-    sector_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch_sector.id"))
-    waiter_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("app_user.id"))
-    assignment_date: Mapped[date] = mapped_column(Date, nullable=False)
-    shift: Mapped[Optional[str]] = mapped_column(Text)  # "MORNING", "AFTERNOON", "NIGHT" or NULL
-    # Unique constraint: (tenant_id, branch_id, sector_id, waiter_id, assignment_date, shift)
+    sector_id: Mapped[int]
+    waiter_id: Mapped[int]
+    assignment_date: Mapped[date]
+    shift: Mapped[Optional[str]]  # "MORNING", "AFTERNOON", "NIGHT" or NULL
 ```
 
-### API Endpoints
-
+**API Endpoints:**
 ```
 GET  /api/admin/assignments?branch_id={id}&assignment_date={date}&shift={shift}
-  → Returns BranchAssignmentOverview with sectors, assigned waiters, and unassigned waiters
-
 POST /api/admin/assignments/bulk
-  → Body: { branch_id, assignment_date, shift, assignments: [{ sector_id, waiter_ids: [...] }] }
-  → Creates multiple assignments at once, skips duplicates
-
-DELETE /api/admin/assignments/{assignment_id}
-  → Soft-deletes single assignment
-
 DELETE /api/admin/assignments-bulk?branch_id={id}&assignment_date={date}&shift={shift}
-  → Clears all assignments for a branch on a given date
-  → NOTE: Uses /assignments-bulk (not /assignments/bulk) to avoid FastAPI route conflict with {assignment_id}
-
-POST /api/admin/assignments/copy?branch_id={id}&from_date={date}&to_date={date}&shift={shift}
-  → Copies assignments from one date to another (useful for repeating yesterday's schedule)
+POST /api/admin/assignments/copy?branch_id={id}&from_date={date}&to_date={date}
 ```
-
-### Dashboard Integration
 
 **Navigation:** Gestión → Sucursales → Mesas → "Asignar Mozos"
 
-**Components:**
-- `WaiterAssignmentModal.tsx`: Modal for bulk waiter-sector assignments
-- `waiterAssignmentStore.ts`: Zustand store for assignment management
-
-**Store** (`Dashboard/src/stores/waiterAssignmentStore.ts`):
-```typescript
-interface WaiterAssignmentState {
-  overview: BranchAssignmentOverview | null
-  selectedDate: string
-  selectedShift: string | null
-
-  fetchAssignments: (branchId: number, date: string, shift?: string) => Promise<void>
-  createBulkAssignments: (branchId, date, shift, assignments) => Promise<BulkAssignmentResult>
-  clearAssignments: (branchId, date, shift?) => Promise<number>
-  copyFromPreviousDay: (branchId, fromDate, toDate, shift?) => Promise<BulkAssignmentResult>
-}
-```
-
-**API Service** (`Dashboard/src/services/api.ts`):
-```typescript
-export const assignmentAPI = {
-  getOverview: (branchId, date, shift?) => ...,
-  createBulk: (data: BulkAssignmentRequest) => ...,
-  delete: (assignmentId) => ...,
-  deleteBulk: (branchId, date, shift?) => ...,
-  copy: (branchId, fromDate, toDate, shift?) => ...,
-}
-```
-
-**Usage:**
-1. Click "Asignar Mozos" button on Tables page
-2. Select date and optionally a shift (morning/afternoon/night)
-3. For each sector, click "Editar" to expand and check/uncheck waiters
-4. Use "Copiar de ayer" to repeat previous day's assignments
-5. Click "Guardar Asignaciones" to save
-
-### Features:
+**Features:**
 - Date picker for assignment date
 - Shift selector (all day, morning, afternoon, night)
-- Visual display of assigned vs unassigned waiters
 - Copy from previous day functionality
-- Clear all assignments option
-- Real-time validation of waiter roles (only WAITER role users shown)
-- **Exclusive assignment**: A waiter can only be assigned to ONE sector at a time (assigning to a new sector removes from previous)
+- **Exclusive assignment**: A waiter can only be assigned to ONE sector at a time
 
-## Sector-Based Waiter Notifications (January 2026)
+#### Sector-Based Waiter Notifications
 
-When waiters are assigned to sectors, WebSocket notifications are filtered so each waiter only receives events for their assigned sectors. This prevents notification overload and ensures waiters only see relevant alerts.
+When waiters are assigned to sectors, WebSocket notifications are filtered so each waiter only receives events for their assigned sectors.
 
-### How it Works
+**How it Works:**
+1. **On WebSocket Connect**: Gateway fetches waiter's sector assignments and registers connection to those channels
+2. **Event Publishing**: Events with `sector_id` published to `sector:{id}:waiters` channel
+3. **Dynamic Updates**: Waiters can send `refresh_sectors` message to re-fetch assignments
 
-1. **On WebSocket Connect**: When a waiter connects to `/ws/waiter`, the gateway fetches their today's sector assignments from the database and registers the connection to those sector channels.
+**Fallback Behavior:**
+- If a waiter has no sector assignments, they receive ALL branch events
+- Managers and Admins always receive all branch events
 
-2. **Event Publishing**: Events include `sector_id` when available. Events with `sector_id` are published to `sector:{id}:waiters` channel instead of `branch:{id}:waiters`.
+#### Tables Display by Sector
 
-3. **Dynamic Updates**: Waiters can send `refresh_sectors` message to re-fetch their assignments if they change during a shift.
+The Tables page groups tables by sector to avoid confusion when table numbers repeat across areas. Tables are sorted by status urgency within each sector.
 
-### Backend Implementation
+### Recipe Module
 
+Technical recipe sheets ("fichas técnicas") for Kitchen staff. Recipes can be linked to products and ingested into the RAG chatbot.
+
+**Access Control:** KITCHEN, MANAGER, ADMIN have full CRUD access
+**Navigation:** Cocina → Recetas (`/recipes`)
+
+**Database Model:**
 ```python
-# ws_gateway/connection_manager.py
-class ConnectionManager:
-    by_sector: dict[int, set[WebSocket]]  # Index connections by sector
-
-    async def connect(self, websocket, user_id, branch_ids, sector_ids=None):
-        # Register by user, branch, AND sector
-
-    async def send_to_sector(self, sector_id, payload):
-        # Send only to waiters assigned to this sector
-
-# ws_gateway/main.py
-@app.websocket("/ws/waiter")
-async def waiter_websocket(websocket, token):
-    # Get today's sector assignments for this waiter
-    sector_ids = get_waiter_sector_ids(user_id, tenant_id)
-    await manager.connect(websocket, user_id, branch_ids, sector_ids)
-```
-
-### Event Schema Update
-
-```python
-# shared/events.py
-@dataclass
-class Event:
-    type: str
-    tenant_id: int
-    branch_id: int
-    table_id: int | None = None
-    session_id: int | None = None
-    sector_id: int | None = None  # NEW: For sector-based filtering
-    entity: dict[str, Any] = field(default_factory=dict)
-    actor: dict[str, Any] = field(default_factory=dict)
-
-# All publish functions accept optional sector_id parameter and publish to multiple channels:
-# - publish_round_event() → waiters, kitchen, admin, session (4 channels)
-# - publish_service_call_event() → waiters, admin, session (3 channels)
-# - publish_check_event() → waiters, admin, session (3 channels)
-# - publish_table_event() → waiters, admin (2 channels)
-```
-
-### Waiter Endpoints for pwaWaiter
-
-```
-GET /api/waiter/my-assignments?assignment_date={date}&shift={shift}
-  → Returns waiter's assigned sectors with sector_ids list for WebSocket filtering
-
-GET /api/waiter/my-tables?assignment_date={date}&shift={shift}
-  → Returns tables in waiter's assigned sectors
-```
-
-### pwaWaiter Integration
-
-```typescript
-// On login, fetch assigned sectors
-const { sector_ids } = await waiterAPI.getMyAssignments()
-
-// Store sector_ids for client-side filtering (backup)
-// WebSocket events are already filtered server-side
-```
-
-### Fallback Behavior
-
-- If a waiter has no sector assignments, they receive ALL branch events (like before)
-- Managers and Admins always receive all branch events regardless of sector assignments
-- Events without `sector_id` are broadcast to the entire branch
-
-## Tables Display by Sector (January 2026)
-
-The Tables page (`Dashboard/src/pages/Tables.tsx`) groups tables by sector to avoid confusion when table numbers repeat across areas.
-
-### UI Structure
-
-```tsx
-// Tables are grouped by sector with visual headers
-{tablesBySector.map(([sector, sectorTables]) => (
-  <div key={sector}>
-    <h3>{sector}</h3>  {/* e.g., "Interior", "Terraza" */}
-    <Badge>{sectorTables.length} mesas</Badge>
-    <div className="grid">
-      {sectorTables.map(table => <TableCard ... />)}
-    </div>
-  </div>
-))}
-```
-
-### Sorting Logic
-
-1. Tables grouped by `sector` field (alphabetically sorted)
-2. Within each sector, sorted by status urgency then by number:
-   - `cuenta_solicitada` (most urgent)
-   - `solicito_pedido`
-   - `pedido_cumplido`
-   - `ocupada`
-   - `libre` (least urgent)
-
-## Recipe Module (January 2026)
-
-Technical recipe sheets ("fichas técnicas") for Kitchen staff. Recipes can be linked to products and ingested into the RAG chatbot for AI-powered customer queries.
-
-### Access Control
-
-- **KITCHEN, MANAGER, ADMIN**: Full CRUD access to recipes
-- **Navigation**: Cocina → Recetas (`/recipes`)
-
-### Database Model
-
-```python
-# backend/rest_api/models.py
 class Recipe(AuditMixin, Base):
-    __tablename__ = "recipe"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    tenant_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("tenant.id"))
-    branch_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("branch.id"))
-    product_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("product.id"))
-    name: Mapped[str] = mapped_column(Text)
-    description: Mapped[Optional[str]] = mapped_column(Text)
-    category: Mapped[Optional[str]] = mapped_column(Text)  # e.g., "Platos Principales"
-    cuisine_type: Mapped[Optional[str]] = mapped_column(Text)  # e.g., "Italiana"
-    difficulty: Mapped[Optional[str]] = mapped_column(Text)  # EASY, MEDIUM, HARD
-    prep_time_minutes: Mapped[Optional[int]]
-    cook_time_minutes: Mapped[Optional[int]]
-    total_time_minutes: Mapped[Optional[int]]  # Auto-calculated
-    servings: Mapped[Optional[int]]
-    calories_per_serving: Mapped[Optional[int]]
-    ingredients: Mapped[list] = mapped_column(JSONB)  # [{name, quantity, unit, notes}]
-    preparation_steps: Mapped[list] = mapped_column(JSONB)  # [{step, instruction, time_minutes}]
-    chef_notes: Mapped[Optional[str]]
-    presentation_tips: Mapped[Optional[str]]
-    storage_instructions: Mapped[Optional[str]]
-    allergens: Mapped[list] = mapped_column(JSONB)  # ["gluten", "dairy"]
-    dietary_tags: Mapped[list] = mapped_column(JSONB)  # ["vegetarian", "vegan"]
-    cost_cents: Mapped[Optional[int]]
-    image: Mapped[Optional[str]]
-    is_ingested: Mapped[bool] = mapped_column(Boolean, default=False)
-    last_ingested_at: Mapped[Optional[datetime]]
+    # Basic info
+    branch_id: Mapped[int]
+    product_id: Mapped[Optional[int]]  # Optional link to Product
+    subcategory_id: Mapped[Optional[int]]  # Normalized category via FK
+    name, description, short_description, image  # short_description for previews
+    cuisine_type, difficulty  # EASY, MEDIUM, HARD
+
+    # Time and servings
+    prep_time_minutes, cook_time_minutes, servings, calories_per_serving
+
+    # Structured data (JSONB fields)
+    ingredients: JSONB  # [{ingredient_id?, name, quantity, unit, notes}]
+    preparation_steps: JSONB  # [{step, instruction, time_minutes?}]
+
+    # Sensory profile (Phase 3 - planteo.md)
+    flavors: JSONB  # ["suave", "intenso", "dulce", "salado", "acido", "amargo", "umami", "picante"]
+    textures: JSONB  # ["crocante", "cremoso", "tierno", "firme", "esponjoso", "gelatinoso", "granulado"]
+
+    # Cooking info
+    cooking_methods: JSONB  # ["horneado", "frito", "grillado", "crudo", "hervido", "vapor", "salteado", "braseado"]
+    uses_oil: bool  # For filtering "sin frito"
+
+    # Allergens (M:N via RecipeAllergen)
+    # allergen_ids: list[int] in API, actual storage via RecipeAllergen table
+    is_celiac_safe: bool  # Specific celiac certification
+    allergen_notes: Optional[str]  # Additional allergen notes
+
+    # Modifications and warnings (Phase 4 - planteo.md)
+    modifications: JSONB  # [{action: "remove"|"substitute", item: str, allowed: bool}]
+    warnings: JSONB  # [str] - e.g., "Contiene huesos pequeños"
+
+    # Cost and yield
+    cost_cents: Optional[int]
+    suggested_price_cents: Optional[int]
+    yield_quantity, yield_unit  # e.g., "2kg", "24 unidades"
+    portion_size: Optional[str]  # e.g., "200g", "1 unidad"
+
+    # RAG config (Phase 5 - planteo.md)
+    risk_level: str  # "low", "medium", "high" - affects RAG disclaimers
+    custom_rag_disclaimer: Optional[str]
+
+    # Status
+    is_ingested: bool  # RAG chatbot flag
+    last_ingested_at: Optional[datetime]
+
+class RecipeAllergen(AuditMixin, Base):
+    """M:N relationship between Recipe and Allergen."""
+    recipe_id: Mapped[int]
+    allergen_id: Mapped[int]
+    tenant_id: Mapped[int]
+    risk_level: Mapped[str]  # "low", "standard", "high" for this recipe-allergen combo
 ```
 
-### Frontend Types
+**Features:**
+- Cascading category → subcategory selection (normalized via `subcategory_id`)
+- Ingredient selection from normalized Ingredient database (combo-box with group names)
+- Allergen selection via visual multi-select grid with emoji icons
+- RAG ingestion button converts recipe to structured text with pgvector embeddings
+- Risk-level based disclaimers in RAG responses
+- Sensory profile (flavors, textures) for recommendation queries
+- Cooking method filtering ("sin frito", "solo grillado")
+- Modifications tracking (what can/cannot be removed or substituted)
+- Cost analysis and yield calculations
+
+#### Recipe-Product Relationship (propuesta1.md)
+
+The system supports optional linkage between Recipes and Products. This "Recipe opcional pero enriquecedora" approach allows:
+
+1. **Recipe First**: Chef creates recipe → derives Product (inherits allergens)
+2. **Product Only**: Quick product creation without recipe (fast onboarding)
+3. **Recipe Standalone**: Internal documentation not sold (mise en place, procedures)
+
+**Database Model:**
+```python
+class Product(AuditMixin, Base):
+    # Recipe linkage (propuesta1.md)
+    recipe_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("recipe.id"))
+    inherits_from_recipe: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Relationship
+    recipe: Mapped[Optional["Recipe"]] = relationship(back_populates="products")
+
+class Recipe(AuditMixin, Base):
+    # 1:N relationship - one recipe can derive multiple products
+    # e.g., "Milanesa" recipe → "Milanesa Simple", "Milanesa Napolitana", "Milanesa a Caballo"
+    products: Mapped[list["Product"]] = relationship(back_populates="recipe")
+```
+
+**Sync Service** (`backend/rest_api/services/recipe_product_sync.py`):
+```python
+from rest_api.services.recipe_product_sync import (
+    sync_product_from_recipe,      # Sync allergens from recipe to product
+    derive_product_from_recipe,    # Create product from recipe
+    sync_all_products_for_recipe,  # Bulk sync when recipe updates
+    get_recipe_product_summary,    # Summary helper
+)
+```
+
+**API Endpoints:**
+```
+POST /api/recipes/{id}/derive-product  # Create Product from Recipe
+  Body: { name, category_id, subcategory_id?, branch_prices?: [{branch_id, price_cents}] }
+  Returns: { id, name, recipe_id, recipe_name, inherits_from_recipe, message }
+
+GET  /api/recipes/{id}/products  # List all products derived from recipe
+  Returns: [{ id, name, description, category_id, inherits_from_recipe }]
+```
+
+**When `inherits_from_recipe=True`:**
+- Product allergens auto-sync from Recipe allergens (RecipeAllergen → ProductAllergen)
+- Changes to recipe allergens propagate to linked products on update
+- Product's `recipe_name` field displays linked recipe name
+
+**Frontend Types:**
+```typescript
+// Product interface (when linked to Recipe)
+recipe_id?: number | null        // Optional reference to Recipe
+inherits_from_recipe?: boolean   // When true, inherits allergens from recipe
+recipe_name?: string | null      // Display name of linked recipe
+```
+
+#### Recipe Frontend Types (Dashboard)
 
 ```typescript
 // Dashboard/src/types/index.ts
-export type RecipeDifficulty = 'EASY' | 'MEDIUM' | 'HARD'
-
 export interface RecipeIngredient {
-  name: string
+  ingredient_id?: number | null  // Optional reference to Ingredient table (null for manual entry)
+  name: string                   // Display name (from selected ingredient or manual)
   quantity: string
   unit: string
   notes?: string
@@ -1559,14 +2311,29 @@ export interface RecipePreparationStep {
   time_minutes?: number
 }
 
+export interface RecipeModification {
+  action: 'remove' | 'substitute'  // Type of modification
+  item: string                     // What can be removed/substituted
+  allowed: boolean                 // Whether this modification is allowed
+}
+
+export interface RecipeAllergenInfo {
+  id: number
+  name: string
+  icon?: string | null
+}
+
 export interface RecipeFormData {
   branch_id: string
+  category_id?: string           // For UI filtering (cascading select)
+  subcategory_id?: string        // Sent to API for normalized category
   product_id?: string
   name: string
   description?: string
-  category?: string
+  short_description?: string     // Preview text (100-150 chars)
+  image?: string
   cuisine_type?: string
-  difficulty?: RecipeDifficulty
+  difficulty?: 'EASY' | 'MEDIUM' | 'HARD'
   prep_time_minutes?: number
   cook_time_minutes?: number
   servings?: number
@@ -1576,79 +2343,65 @@ export interface RecipeFormData {
   chef_notes?: string
   presentation_tips?: string
   storage_instructions?: string
-  allergens: string[]
+  allergen_ids: number[]         // M:N via RecipeAllergen (backend manages relationship)
   dietary_tags: string[]
+  // Sensory profile
+  flavors: string[]              // From catalog
+  textures: string[]             // From catalog
+  // Cooking info
+  cooking_methods: string[]      // From catalog
+  uses_oil: boolean
+  // Celiac safety
+  is_celiac_safe: boolean
+  allergen_notes?: string
+  // Modifications and warnings
+  modifications: RecipeModification[]
+  warnings: string[]
+  // Cost and yield
   cost_cents?: number
-  image?: string
+  suggested_price_cents?: number
+  yield_quantity?: string
+  yield_unit?: string
+  portion_size?: string
+  // RAG config
+  risk_level: 'low' | 'medium' | 'high'
+  custom_rag_disclaimer?: string
+  // Status
   is_active: boolean
 }
 ```
 
-### Store (`Dashboard/src/stores/recipeStore.ts`)
+**API Schema (Pydantic):**
+```python
+# backend/rest_api/routers/recipes.py
+class RecipeCreate(BaseModel):
+    branch_id: int
+    name: str
+    description: str | None = None
+    short_description: str | None = None
+    allergen_ids: list[int] | None = None  # M:N via RecipeAllergen
+    flavors: list[str] | None = None
+    textures: list[str] | None = None
+    cooking_methods: list[str] | None = None
+    uses_oil: bool = False
+    is_celiac_safe: bool = False
+    modifications: list[ModificationItem] | None = None
+    warnings: list[str] | None = None
+    risk_level: str = "low"
+    custom_rag_disclaimer: str | None = None
+    # ... other fields
 
-```typescript
-interface RecipeState {
-  recipes: Recipe[]
-  categories: string[]
-  isLoading: boolean
-  error: string | null
-
-  // Sync local actions
-  addRecipe: (data: RecipeFormData) => Recipe
-  updateRecipe: (id: string, data: Partial<RecipeFormData>) => void
-  deleteRecipe: (id: string) => void
-
-  // Async API actions
-  fetchRecipes: (branchId?: number, category?: string) => Promise<void>
-  fetchCategories: () => Promise<void>
-  createRecipeAsync: (data: RecipeFormData) => Promise<Recipe>
-  updateRecipeAsync: (id: string, data: Partial<RecipeFormData>) => Promise<void>
-  deleteRecipeAsync: (id: string) => Promise<void>
-  ingestRecipeAsync: (id: string) => Promise<{ success: boolean; message: string }>
-}
-
-// Selectors
-export const selectRecipes = (state: RecipeState) => state.recipes
-export const selectRecipeCategories = (state: RecipeState) => state.categories
-export const selectRecipesByBranch = (branchId: string) => (state: RecipeState) =>
-  state.recipes.filter(r => r.branch_id === branchId)
+class RecipeOutput(BaseModel):
+    # Returns both allergen_ids (for form binding) and allergens (for display)
+    allergen_ids: list[int] | None = None
+    allergens: list[AllergenInfo] | None = None  # Full allergen info with icons
 ```
 
-### RAG Ingestion
+### Canonical Product Model
 
-Recipes can be ingested into the RAG chatbot knowledge base for AI-powered customer queries:
+The system uses a normalized 19-table model for products to support advanced nutritional queries, dietary filtering, and RAG chatbot responses.
 
-```typescript
-// Ingest button in Recipes page
-const handleIngest = async (recipeId: string) => {
-  const result = await ingestRecipeAsync(recipeId)
-  if (result.success) {
-    toast.success('Receta ingested al chatbot')
-  }
-}
-```
-
-Backend endpoint converts recipe to structured text and stores in `knowledge_document` table with pgvector embeddings.
-
-### Field Name Mapping (Frontend ↔ Backend)
-
-| Frontend (RecipeFormData) | Backend (Recipe model) |
-|---------------------------|------------------------|
-| `servings` | `servings` |
-| `prep_time_minutes` | `prep_time_minutes` |
-| `cook_time_minutes` | `cook_time_minutes` |
-| `presentation_tips` | `presentation_tips` |
-| `cost_cents` | `cost_cents` |
-| `preparation_steps[].step` | `preparation_steps[].step` |
-| `preparation_steps[].instruction` | `preparation_steps[].instruction` |
-| `preparation_steps[].time_minutes` | `preparation_steps[].time_minutes` |
-
-## Canonical Product Model (January 2026)
-
-The system uses a normalized 19-table model for products to support advanced nutritional queries, dietary filtering, and RAG chatbot responses. This replaces the original 9-table model.
-
-### Migration Phases (All Complete)
-
+**Migration Phases (All Complete):**
 - **Phase 0**: Normalized allergens with presence types (contains, may_contain, free_from)
 - **Phase 1**: Ingredient system with groups and sub-ingredients
 - **Phase 2**: Dietary profile (vegan, vegetarian, gluten-free, celiac-safe, keto, low-sodium)
@@ -1656,39 +2409,100 @@ The system uses a normalized 19-table model for products to support advanced nut
 - **Phase 4**: Advanced features (modifications, warnings, RAG config)
 - **Phase 5**: Consolidated product view and RAG integration
 
-### Key Models
-
+**Key Models:**
 ```python
-# Product Allergen (Phase 0) - Replaces allergen_ids JSON
-ProductAllergen(product_id, allergen_id, presence_type)  # "contains", "may_contain", "free_from"
+# Allergens (Phase 0)
+ProductAllergen(product_id, allergen_id, presence_type, risk_level)
 
-# Ingredient System (Phase 1)
+# Ingredients (Phase 1)
 IngredientGroup(name)  # proteina, vegetal, lacteo, cereal, condimento, otro
 Ingredient(tenant_id, name, group_id, is_processed)
-SubIngredient(ingredient_id, name)  # For processed ingredients (e.g., mayonnaise → eggs, oil, lemon)
+SubIngredient(ingredient_id, name)  # For processed ingredients
 ProductIngredient(product_id, ingredient_id, is_main, notes)
 
 # Dietary Profile (Phase 2)
 ProductDietaryProfile(product_id, is_vegetarian, is_vegan, is_gluten_free, is_dairy_free, is_celiac_safe, is_keto, is_low_sodium)
 
 # Cooking/Sensory (Phase 3)
-CookingMethod(name)  # horneado, frito, grillado, crudo, hervido, vapor, salteado, braseado
-FlavorProfile(name)  # suave, intenso, dulce, salado, acido, amargo, umami, picante
-TextureProfile(name)  # crocante, cremoso, tierno, firme, esponjoso, gelatinoso, granulado
-ProductCookingMethod(product_id, cooking_method_id)
-ProductFlavor(product_id, flavor_profile_id)
-ProductTexture(product_id, texture_profile_id)
+CookingMethod, FlavorProfile, TextureProfile  # Catalogs
+ProductCookingMethod, ProductFlavor, ProductTexture  # M:N
 ProductCooking(product_id, uses_oil, prep_time_minutes, cook_time_minutes)
 
-# Advanced Features (Phase 4)
-ProductModification(product_id, action, item, is_allowed, extra_cost_cents)  # action: "remove" or "substitute"
-ProductWarning(product_id, text, severity)  # severity: "info", "warning", "danger"
-ProductRAGConfig(product_id, risk_level, custom_disclaimer, highlight_allergens)  # risk_level: "low", "medium", "high"
+# Advanced (Phase 4)
+ProductModification(product_id, action, item, is_allowed, extra_cost_cents)
+ProductWarning(product_id, text, severity)
+ProductRAGConfig(product_id, risk_level, custom_disclaimer, highlight_allergens)
 ```
 
-### Dashboard - Ingredients Page
+**Consolidated Product View Service:**
+```python
+# backend/rest_api/services/product_view.py
+view = get_product_complete(db, product_id)
+text = generate_product_text_for_rag(view, price_cents=12500)
+
+# Batch function with Redis caching for branch menus
+products = get_products_complete_for_branch(db, branch_id)  # Uses cache
+products = get_products_complete_for_branch(db, branch_id, use_cache=False)  # Skip cache
+invalidate_branch_products_cache(branch_id)  # Clear cache on product update
+```
+
+**Redis Caching for Product Views:**
+- Cache key: `products_complete:branch:{branch_id}`
+- TTL: 5 minutes (300 seconds)
+- Automatically invalidated on product create/update/delete
+- Reduces database load for menu fetching in pwaMenu
+- Located in `backend/rest_api/services/product_view.py`
+
+**Catalog API Endpoints** (`backend/rest_api/routers/catalogs.py`):
+```
+GET /api/admin/cooking-methods      # List all cooking methods
+GET /api/admin/flavor-profiles      # List all flavor profiles
+GET /api/admin/texture-profiles     # List all texture profiles
+```
+
+**Dashboard catalogsAPI** (`Dashboard/src/services/api.ts`):
+```typescript
+export const catalogsAPI = {
+  listCookingMethods: () => api.get<CookingMethod[]>('/admin/cooking-methods'),
+  listFlavorProfiles: () => api.get<FlavorProfile[]>('/admin/flavor-profiles'),
+  listTextureProfiles: () => api.get<TextureProfile[]>('/admin/texture-profiles'),
+}
+```
+
+**RAG Service Risk Disclaimers** (`backend/rest_api/services/rag_service.py`):
+```python
+# RAG responses include risk-based disclaimers for allergen safety
+# High-risk products: "IMPORTANTE: Los productos mencionados contienen alérgenos de alto riesgo..."
+# Medium-risk products: "Nota: Algunos productos mencionados pueden contener trazas de alérgenos..."
+```
+
+#### Dashboard Ingredients Page
 
 **Navigation:** Cocina → Ingredientes (`/ingredients`)
+
+**Components:**
+- `Dashboard/src/pages/Ingredients.tsx` (614 lines) - Full CRUD page
+- `Dashboard/src/stores/ingredientStore.ts` (272 lines) - Zustand store
+
+**Features:**
+- Group-based ingredient organization (collapsible rows by IngredientGroup)
+- Sub-ingredient management for processed ingredients (e.g., mayonesa → huevo, aceite, limón)
+- `is_processed` flag indicates ingredient has sub-components
+- Role-based permissions: ADMIN can delete, MANAGER can create/edit
+- Pagination and sorting
+
+**API Endpoints:**
+```
+GET  /api/admin/ingredients?group_id={id}     # List by group
+POST /api/admin/ingredients                    # Create
+GET  /api/admin/ingredients/{id}               # Detail with sub-ingredients
+PUT  /api/admin/ingredients/{id}               # Update
+DELETE /api/admin/ingredients/{id}             # Soft delete
+POST /api/admin/ingredients/{id}/sub           # Add sub-ingredient
+DELETE /api/admin/ingredients/{id}/sub/{subId} # Remove sub-ingredient
+GET  /api/admin/ingredient-groups              # List groups
+POST /api/admin/ingredient-groups              # Create custom group
+```
 
 **Store** (`Dashboard/src/stores/ingredientStore.ts`):
 ```typescript
@@ -1696,136 +2510,251 @@ interface IngredientState {
   ingredients: Ingredient[]
   groups: IngredientGroup[]
   isLoading: boolean
-  error: string | null
-
   fetchIngredients: (groupId?: number) => Promise<void>
   fetchGroups: () => Promise<void>
   createIngredientAsync: (data: IngredientFormData) => Promise<Ingredient>
-  updateIngredientAsync: (id: string, data: Partial<IngredientFormData>) => Promise<void>
-  deleteIngredientAsync: (id: string) => Promise<void>
-  createGroupAsync: (name: string, description?: string, icon?: string) => Promise<IngredientGroup>
   createSubIngredientAsync: (ingredientId: string, data: SubIngredientFormData) => Promise<void>
   deleteSubIngredientAsync: (ingredientId: string, subIngredientId: number) => Promise<void>
 }
 ```
 
-### API Endpoints
+**Seed Data (Ingredient Groups):**
+Proteína, Vegetal, Lácteo, Cereal, Condimento, Otro
 
-```
-# Ingredients (Phase 1)
-GET  /api/admin/ingredients?group_id={id}  # List ingredients, optionally by group
-POST /api/admin/ingredients                 # Create ingredient
-GET  /api/admin/ingredients/{id}            # Get with sub-ingredients
-PUT  /api/admin/ingredients/{id}            # Update
-DELETE /api/admin/ingredients/{id}          # Soft delete
-POST /api/admin/ingredients/{id}/sub        # Add sub-ingredient
-DELETE /api/admin/ingredients/{id}/sub/{subId}  # Delete sub-ingredient
-GET  /api/admin/ingredient-groups           # List groups
-POST /api/admin/ingredient-groups           # Create group
+### pwaMenu Advanced Filters
 
-# Complete Product View (Phase 5)
-GET  /api/public/menu/{branch_slug}/products/{product_id}/complete
-  → Returns ProductCompleteOutput with all canonical data
-```
+The pwaMenu app provides advanced filtering hooks for dietary preferences and cooking methods.
 
-### Consolidated Product View Service
+**Filter Hooks** (`pwaMenu/src/hooks/`):
 
-```python
-# backend/rest_api/services/product_view.py
-from rest_api.services.product_view import get_product_complete, generate_product_text_for_rag
+| Hook | Purpose |
+|------|---------|
+| `useAllergenFilter` | Filter by allergens with presence types (contains, may_contain, free_from) and strictness levels |
+| `useDietaryFilter` | Filter by dietary profile (vegetarian, vegan, gluten_free, dairy_free, celiac_safe, keto, low_sodium) |
+| `useCookingMethodFilter` | Filter by cooking methods (exclude fried, require grilled) and oil usage |
+| `useAdvancedFilters` | Combined hook aggregating all filters |
 
-# Get complete product with all canonical data
-view = get_product_complete(db, product_id)
-# Returns: {
-#   id, name, description, image, category_id, subcategory_id, featured, popular, badge,
-#   allergens: { contains: [...], may_contain: [...], free_from: [...] },
-#   dietary: { is_vegetarian, is_vegan, is_gluten_free, is_dairy_free, is_celiac_safe, is_keto, is_low_sodium },
-#   ingredients: [{ id, name, group_name, is_processed, is_main, notes, sub_ingredients: [...] }],
-#   cooking: { methods: [...], uses_oil, prep_time_minutes, cook_time_minutes },
-#   sensory: { flavors: [...], textures: [...] },
-#   modifications: [{ id, action, item, is_allowed, extra_cost_cents }],
-#   warnings: [{ id, text, severity }],
-#   rag_config: { risk_level, custom_disclaimer, highlight_allergens } | null
-# }
-
-# Generate text for RAG ingestion
-text = generate_product_text_for_rag(view, price_cents=12500)
-# Returns enriched text with allergens, dietary profile, ingredients, etc.
-```
-
-### RAG Integration (Phase 5)
-
-The RAG service uses the consolidated view for enriched product ingestion:
-
-```python
-# backend/rest_api/services/rag_service.py
-# ingest_product() now uses get_product_complete() and generate_product_text_for_rag()
-# Generates text like:
-# PRODUCTO: Milanesa Napolitana
-# Descripción: Milanesa de ternera con salsa de tomate y queso
-# Precio: $125.00
-# CONTIENE ALÉRGENOS: Gluten, Lácteos, Huevo
-# PUEDE CONTENER TRAZAS DE: Frutos Secos
-# Perfil dietético: Sin restricciones
-# Ingredientes principales: Carne de ternera, Pan rallado
-# Otros ingredientes: Huevo, Queso, Tomate
-# Métodos de cocción: frito
-# ⚠️ Advertencia: Contiene huesos pequeños
-```
-
-### Frontend Types
-
+**useAllergenFilter** (enhanced with cross-reactions):
 ```typescript
-// Dashboard/src/types/index.ts
-export interface IngredientGroup {
-  id: string
-  name: string
-  description?: string
-  icon?: string
-  is_active: boolean
-}
+// Pass branchSlug to enable cross-reaction filtering
+const allergenFilter = useAllergenFilter(branchSlug)
 
-export interface SubIngredient {
+// Strictness levels
+allergenFilter.setStrictness('strict')      // Only hide products that CONTAIN allergen
+allergenFilter.setStrictness('very_strict') // Also hide products that MAY_CONTAIN (traces)
+
+// Cross-reaction support (latex-fruit syndrome, etc.)
+allergenFilter.toggleCrossReactions()       // Enable/disable cross-reaction filtering
+allergenFilter.setCrossReactionSensitivity('high_only')   // Only high probability
+allergenFilter.setCrossReactionSensitivity('high_medium') // High + medium (default)
+allergenFilter.setCrossReactionSensitivity('all')         // All cross-reactions
+
+// Cross-reaction state
+allergenFilter.crossReactionsEnabled        // Boolean
+allergenFilter.crossReactedAllergenIds      // IDs derived from excluded allergens
+allergenFilter.allFilteredAllergenIds       // Combined: excluded + cross-reacted
+allergenFilter.crossReactionWarnings        // Human-readable warnings for display
+allergenFilter.hasCrossReactions            // Boolean - any cross-reactions detected
+
+// Advanced filtering with presence types
+allergenFilter.shouldHideProductAdvanced({
+  contains: [{ id: 1, name: 'Gluten' }],
+  may_contain: [{ id: 2, name: 'Lácteos' }],
+  free_from: [{ id: 3, name: 'Soja' }]
+})
+```
+
+**Cross-Reaction API** (`pwaMenu/src/services/api.ts`):
+```typescript
+// Fetch allergens with cross-reaction data for a branch
+menuAPI.getAllergensWithCrossReactions(branchSlug)
+// Returns: AllergenWithCrossReactionsAPI[] with cross_reactions array
+
+// Backend endpoint
+GET /api/public/menu/{slug}/allergens  // Returns allergens + cross_reactions
+```
+
+**useDietaryFilter**:
+```typescript
+const dietaryFilter = useDietaryFilter()
+dietaryFilter.toggleOption('vegan')
+dietaryFilter.toggleOption('gluten_free')
+dietaryFilter.matchesFilter(product.dietary) // Returns boolean
+
+// Constants exported
+DIETARY_LABELS: { vegan: 'Vegano', vegetarian: 'Vegetariano', ... }
+DIETARY_ICONS: { vegan: '🌱', vegetarian: '🥬', ... }
+```
+
+**useCookingMethodFilter**:
+```typescript
+const cookingFilter = useCookingMethodFilter()
+cookingFilter.toggleExcludedMethod('frito')    // Exclude fried foods
+cookingFilter.toggleRequiredMethod('grillado') // Require grilled foods
+cookingFilter.toggleExcludeOil()               // Exclude foods that use oil
+cookingFilter.matchesFilter(methods, usesOil)  // Returns boolean
+
+// Cooking methods: horneado, frito, grillado, crudo, hervido, vapor, salteado, braseado
+COOKING_METHOD_LABELS: { frito: 'Frito', grillado: 'Grillado/Parrilla', ... }
+COOKING_METHOD_ICONS: { frito: '🍳', grillado: '♨️', ... }
+```
+
+**useAdvancedFilters** (combined):
+```typescript
+const filters = useAdvancedFilters()
+
+// Filter a single product
+if (filters.shouldShowProduct(product)) { ... }
+
+// Filter an array of products
+const visibleProducts = filters.filterProducts(allProducts)
+
+// Clear all filters at once
+filters.clearAllFilters()
+
+// Computed state
+filters.totalActiveFilters  // Number of active filters across all types
+filters.hasAnyActiveFilter  // Boolean
+
+// Access individual filters
+filters.allergen.toggleAllergen(1)
+filters.dietary.toggleOption('vegan')
+filters.cooking.toggleExcludedMethod('frito')
+```
+
+**ProductFilterData Interface**:
+```typescript
+interface ProductFilterData {
   id: number
-  ingredient_id: number
   name: string
-  description?: string
-  is_active: boolean
-}
-
-export interface Ingredient {
-  id: string
-  tenant_id: number
-  name: string
-  description?: string
-  group_id?: number
-  group_name?: string
-  is_processed: boolean
-  is_active: boolean
-  created_at: string
-  sub_ingredients: SubIngredient[]
-}
-
-export interface IngredientFormData {
-  name: string
-  description?: string
-  group_id?: number
-  is_processed: boolean
-}
-
-export interface SubIngredientFormData {
-  name: string
-  description?: string
+  allergens?: {
+    contains: Array<{ id: number; name: string; icon?: string | null }>
+    may_contain: Array<{ id: number; name: string; icon?: string | null }>
+    free_from: Array<{ id: number; name: string; icon?: string | null }>
+  } | null
+  dietary?: {
+    is_vegetarian: boolean
+    is_vegan: boolean
+    is_gluten_free: boolean
+    is_dairy_free: boolean
+    is_celiac_safe: boolean
+    is_keto: boolean
+    is_low_sodium: boolean
+  } | null
+  cooking?: {
+    methods: string[]
+    uses_oil: boolean
+    prep_time_minutes?: number | null
+    cook_time_minutes?: number | null
+  } | null
 }
 ```
 
-### Seed Data (Catalogs)
+**Advanced Filters UI Components** (`pwaMenu/src/components/`):
 
-On first run, the backend seeds cooking methods, flavor profiles, texture profiles, and ingredient groups:
+| Component | Purpose |
+|-----------|---------|
+| `FilterBadge` | Button showing active filter count, opens AdvancedFiltersModal |
+| `AdvancedFiltersModal` | Full-screen modal with allergen, dietary, and cooking method filters |
 
+```tsx
+// FilterBadge usage (next to search bar)
+<FilterBadge
+  onClick={() => setFiltersModalOpen(true)}
+  branchSlug={branchSlug}  // Enables cross-reaction count
+/>
+// Shows orange badge with count when filters active
+
+// AdvancedFiltersModal usage
+<AdvancedFiltersModal
+  isOpen={filtersModalOpen}
+  onClose={() => setFiltersModalOpen(false)}
+  branchSlug={branchSlug}
+  allergens={branchAllergens}  // From menuStore
+/>
+```
+
+**AdvancedFiltersModal sections:**
+1. **Alergenos a evitar**: Clickable allergen chips with strictness selector (strict/very_strict)
+2. **Reacciones cruzadas**: Toggle + sensitivity selector (high_only/high_medium/all) with warnings
+3. **Preferencias dietéticas**: Grid of dietary options (vegetarian, vegan, gluten_free, etc.)
+4. **Métodos de cocción a evitar**: Cooking method chips (frito, horneado, vapor, etc.)
+
+### Enhanced Allergen Model
+
+The allergen system supports EU 1169/2011 mandatory allergens, severity levels, and cross-reactions.
+
+**Database Models:**
 ```python
-# Cooking methods: horneado, frito, grillado, crudo, hervido, vapor, salteado, braseado
-# Flavor profiles: suave, intenso, dulce, salado, acido, amargo, umami, picante
-# Texture profiles: crocante, cremoso, tierno, firme, esponjoso, gelatinoso, granulado
-# Ingredient groups: Proteína, Vegetal, Lácteo, Cereal, Condimento, Otro
+class Allergen(AuditMixin, Base):
+    name: Mapped[str]
+    icon: Mapped[Optional[str]]
+    is_mandatory: Mapped[bool]  # EU 1169/2011
+    severity: Mapped[str]  # mild, moderate, severe, life_threatening
+
+class AllergenCrossReaction(AuditMixin, Base):
+    """Cross-reaction information (e.g., latex → avocado)."""
+    allergen_id: Mapped[int]        # Primary allergen
+    cross_reacts_with_id: Mapped[int]  # Related allergen
+    probability: Mapped[str]  # low, medium, high
+    notes: Mapped[Optional[str]]
+
+# ProductAllergen and RecipeAllergen now include risk_level
+class ProductAllergen(AuditMixin, Base):
+    presence_type: Mapped[str]  # "contains", "may_contain", "free_from"
+    risk_level: Mapped[str]     # low, standard, high
+```
+
+**14 Mandatory EU Allergens (EU 1169/2011):**
+1. Gluten (🌾) - severe
+2. Crustáceos (🦐) - life_threatening
+3. Huevo (🥚) - severe
+4. Pescado (🐟) - severe
+5. Cacahuete (🥜) - life_threatening
+6. Soja (🫘) - moderate
+7. Lácteos (🥛) - moderate
+8. Frutos de cáscara (🌰) - life_threatening
+9. Apio (🥬) - moderate
+10. Mostaza (🟡) - moderate
+11. Sésamo (⚪) - severe
+12. Sulfitos (🧪) - moderate
+13. Altramuces (🫛) - moderate
+14. Moluscos (🦪) - severe
+
+Optional allergens: Látex, Aguacate, Kiwi, Plátano, Castaña, Maíz
+
+**Cross-Reactions (Seeded):**
+- **Latex-Fruit Syndrome**: Látex → Aguacate (high), Plátano (high), Kiwi (high), Castaña (medium)
+- **Crustáceos → Moluscos** (medium) - Tropomyosin
+- **Cacahuete → Frutos de cáscara** (medium)
+- **Frutos de cáscara → Sésamo** (low)
+- **Gluten → Maíz** (low) - Some celiacs
+
+**API Endpoints:**
+```
+GET  /api/admin/allergens?mandatory_only=true
+GET  /api/admin/allergens/{id}  # Includes cross_reactions[]
+GET  /api/admin/allergens/cross-reactions?allergen_id={id}
+POST /api/admin/allergens/cross-reactions
+```
+
+**Frontend Usage:**
+```typescript
+function CrossReactionWarning({ allergen }: { allergen: Allergen }) {
+  if (!allergen.cross_reactions?.length) return null
+  return (
+    <div className="bg-amber-500/10 border border-amber-500 rounded p-2">
+      <p className="text-amber-300 text-sm">
+        ⚠️ Si es alérgico a {allergen.name}, puede reaccionar a:
+      </p>
+      <ul className="text-xs text-amber-200">
+        {allergen.cross_reactions.map((cr) => (
+          <li key={cr.id}>
+            {cr.cross_reacts_with_name} ({cr.probability === 'high' ? 'Alta' : cr.probability === 'medium' ? 'Media' : 'Baja'} probabilidad)
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 ```

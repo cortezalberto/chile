@@ -54,6 +54,48 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         case_sensitive = False
 
+    def validate_production_secrets(self) -> list[str]:
+        """
+        SHARED-CRIT-03 FIX: Validate that secrets are properly configured for production.
+        Returns a list of validation errors. Empty list means all checks pass.
+        """
+        errors = []
+
+        # Define weak/default secrets that MUST be changed in production
+        WEAK_SECRETS = {
+            "dev-secret-change-me-in-production",
+            "table-token-secret-change-me",
+            "secret",
+            "password",
+            "changeme",
+            "default",
+        }
+
+        if self.environment == "production":
+            # Check JWT secret
+            if self.jwt_secret in WEAK_SECRETS or len(self.jwt_secret) < 32:
+                errors.append(
+                    "JWT_SECRET must be at least 32 characters and not a default value in production"
+                )
+
+            # Check table token secret
+            if self.table_token_secret in WEAK_SECRETS or len(self.table_token_secret) < 32:
+                errors.append(
+                    "TABLE_TOKEN_SECRET must be at least 32 characters and not a default value in production"
+                )
+
+            # Check debug is disabled
+            if self.debug:
+                errors.append("DEBUG must be False in production")
+
+            # Check Mercado Pago if using payments
+            if self.mercadopago_access_token and not self.mercadopago_webhook_secret:
+                errors.append(
+                    "MERCADOPAGO_WEBHOOK_SECRET must be set when using Mercado Pago"
+                )
+
+        return errors
+
 
 @lru_cache
 def get_settings() -> Settings:

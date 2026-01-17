@@ -19,6 +19,7 @@ from rest_api.services.soft_delete_service import (
     set_created_by,
     set_updated_by,
 )
+from rest_api.routers.admin_base import get_user_id, get_user_email
 
 
 router = APIRouter(prefix="/api/admin/ingredients", tags=["ingredients"])
@@ -143,7 +144,7 @@ def create_ingredient_group(
         description=body.description,
         icon=body.icon,
     )
-    set_created_by(group, user.get("user_id"), user.get("email", ""))
+    set_created_by(group, get_user_id(user), get_user_email(user))
     db.add(group)
     db.commit()
     db.refresh(group)
@@ -267,7 +268,7 @@ def create_ingredient(
         group_id=body.group_id,
         is_processed=body.is_processed,
     )
-    set_created_by(ingredient, user.get("user_id"), user.get("email", ""))
+    set_created_by(ingredient, get_user_id(user), get_user_email(user))
     db.add(ingredient)
     db.commit()
     db.refresh(ingredient)
@@ -322,7 +323,7 @@ def update_ingredient(
     for key, value in update_data.items():
         setattr(ingredient, key, value)
 
-    set_updated_by(ingredient, user.get("user_id"), user.get("email", ""))
+    set_updated_by(ingredient, get_user_id(user), get_user_email(user))
     db.commit()
     db.refresh(ingredient)
 
@@ -362,7 +363,7 @@ def delete_ingredient(
             detail="Ingredient not found",
         )
 
-    soft_delete(db, ingredient, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, ingredient, get_user_id(user), get_user_email(user))
     db.commit()
 
 
@@ -417,7 +418,7 @@ def create_sub_ingredient(
         name=body.name,
         description=body.description,
     )
-    set_created_by(sub_ingredient, user.get("user_id"), user.get("email", ""))
+    set_created_by(sub_ingredient, get_user_id(user), get_user_email(user))
     db.add(sub_ingredient)
     db.commit()
     db.refresh(sub_ingredient)
@@ -459,5 +460,5 @@ def delete_sub_ingredient(
             detail="Sub-ingredient not found",
         )
 
-    soft_delete(db, sub_ingredient, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, sub_ingredient, get_user_id(user), get_user_email(user))
     db.commit()

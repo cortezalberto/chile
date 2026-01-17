@@ -12,8 +12,9 @@ export function Header() {
   const pendingCount = useRetryQueueStore(selectQueueLength)
 
   return (
-    <header className="sticky top-0 z-50 bg-neutral-900/95 backdrop-blur border-b border-neutral-800">
-      <div className="px-4 py-3 flex items-center justify-between">
+    // WAITER-COMP-MED-03 FIX: Added role="banner" for navigation landmark
+    <header role="banner" className="sticky top-0 z-50 bg-neutral-900/95 backdrop-blur border-b border-neutral-800">
+      <nav className="px-4 py-3 flex items-center justify-between" aria-label="Navegación principal">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-orange-500">Mozo</h1>
           {selectedBranchId && (
@@ -78,7 +79,7 @@ export function Header() {
             </div>
           )}
         </div>
-      </div>
+      </nav>
     </header>
   )
 }

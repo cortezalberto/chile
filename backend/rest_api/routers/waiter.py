@@ -2,6 +2,7 @@
 Waiter router.
 Handles operations performed by waiters.
 PWAW-C001: Service call acknowledge/resolve endpoints.
+HU-WAITER-MESA: Waiter-managed table flow (activate, order, payment, close).
 """
 
 from datetime import date, datetime, timezone
@@ -9,26 +10,56 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, or_
+from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy import select, or_, func
 
-from rest_api.db import get_db
+from rest_api.db import get_db, safe_commit
 from rest_api.models import (
+    Branch,
+    BranchProduct,
     BranchSector,
+    Check,
+    Diner,
+    Payment,
+    Product,
+    Round,
+    RoundItem,
     ServiceCall,
     Table,
     TableSession,
     WaiterSectorAssignment,
 )
 from shared.auth import current_user_context, require_roles
-from shared.schemas import ServiceCallOutput
+from shared.schemas import (
+    ServiceCallOutput,
+    WaiterActivateTableRequest,
+    WaiterActivateTableResponse,
+    WaiterSubmitRoundRequest,
+    WaiterSubmitRoundResponse,
+    WaiterRequestCheckResponse,
+    ManualPaymentRequest,
+    ManualPaymentResponse,
+    WaiterCloseTableRequest,
+    WaiterCloseTableResponse,
+    WaiterSessionSummaryOutput,
+)
 from shared.logging import waiter_logger as logger
 from shared.events import (
     get_redis_client,
     publish_service_call_event,
+    publish_round_event,
+    publish_check_event,
+    publish_table_event,
     SERVICE_CALL_ACKED,
     SERVICE_CALL_CLOSED,
+    ROUND_SUBMITTED,
+    CHECK_REQUESTED,
+    PAYMENT_APPROVED,
+    CHECK_PAID,
+    TABLE_SESSION_STARTED,
+    TABLE_CLEARED,
 )
+from rest_api.services.allocation import allocate_payment_fifo
 
 
 # =============================================================================
@@ -162,10 +193,14 @@ async def acknowledge_service_call(
 
     # Update status
     user_id = int(ctx["sub"])
+    # ROUTER-HIGH-07 FIX: Use getattr with default for safe attribute access
     call.status = "ACKED"
     call.acked_by_user_id = user_id
-    if hasattr(call, 'acked_at'):
+    # Set acked_at if the attribute exists (uses AuditMixin pattern)
+    try:
         call.acked_at = datetime.now(timezone.utc)
+    except AttributeError:
+        pass  # Model doesn't have acked_at field
 
     db.commit()
     db.refresh(call)
@@ -193,9 +228,7 @@ async def acknowledge_service_call(
         logger.info("Service call acknowledged", call_id=call_id, user_id=user_id)
     except Exception as e:
         logger.error("Failed to publish SERVICE_CALL_ACKED event", call_id=call_id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ServiceCallOutput(
         id=call.id,
@@ -254,12 +287,17 @@ async def resolve_service_call(
         )
 
     # Update status
+    # ROUTER-HIGH-07 FIX: Use try-except for safe attribute access
     user_id = int(ctx["sub"])
     call.status = "CLOSED"
-    if hasattr(call, 'resolved_at'):
+    try:
         call.resolved_at = datetime.now(timezone.utc)
-    if hasattr(call, 'resolved_by_user_id'):
+    except AttributeError:
+        pass
+    try:
         call.resolved_by_user_id = user_id
+    except AttributeError:
+        pass
 
     db.commit()
     db.refresh(call)
@@ -287,9 +325,7 @@ async def resolve_service_call(
         logger.info("Service call resolved", call_id=call_id, user_id=user_id)
     except Exception as e:
         logger.error("Failed to publish SERVICE_CALL_CLOSED event", call_id=call_id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ServiceCallOutput(
         id=call.id,
@@ -452,3 +488,807 @@ def get_my_assigned_tables(
         }
         for t in tables
     ]
+
+
+# =============================================================================
+# Waiter-Managed Table Flow (HU-WAITER-MESA)
+# =============================================================================
+
+
+@router.post("/tables/{table_id}/activate", response_model=WaiterActivateTableResponse)
+async def activate_table(
+    table_id: int,
+    body: WaiterActivateTableRequest,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> WaiterActivateTableResponse:
+    """
+    HU-WAITER-MESA CA-01: Waiter manually activates a table.
+
+    This creates a new table session with opened_by="WAITER" to track
+    that this is a waiter-managed flow (no pwaMenu usage by customers).
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the table
+    table = db.scalar(
+        select(Table)
+        .where(
+            Table.id == table_id,
+            Table.tenant_id == tenant_id,
+            Table.is_active == True,
+        )
+    )
+
+    if not table:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Table {table_id} not found",
+        )
+
+    # Verify branch access
+    if table.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Check if table is already occupied
+    if table.status != "FREE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Table is already {table.status}. Cannot activate.",
+        )
+
+    # Check for existing open session (defensive)
+    existing_session = db.scalar(
+        select(TableSession)
+        .where(
+            TableSession.table_id == table_id,
+            TableSession.status.in_(["OPEN", "PAYING"]),
+        )
+    )
+    if existing_session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Table already has an active session (ID: {existing_session.id})",
+        )
+
+    # Create new session with waiter traceability
+    now = datetime.now(timezone.utc)
+    session = TableSession(
+        tenant_id=tenant_id,
+        branch_id=table.branch_id,
+        table_id=table.id,
+        status="OPEN",
+        assigned_waiter_id=waiter_id,
+        opened_at=now,
+        opened_by="WAITER",
+        opened_by_waiter_id=waiter_id,
+    )
+    db.add(session)
+
+    # Update table status
+    table.status = "ACTIVE"
+
+    safe_commit(db)
+    db.refresh(session)
+    db.refresh(table)
+
+    # Publish TABLE_SESSION_STARTED event
+    try:
+        redis = await get_redis_client()
+        await publish_table_event(
+            redis_client=redis,
+            event_type=TABLE_SESSION_STARTED,
+            tenant_id=tenant_id,
+            branch_id=table.branch_id,
+            table_id=table.id,
+            session_id=session.id,
+            table_code=table.code,
+            table_status=table.status,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=table.sector_id,
+        )
+        logger.info("Table activated by waiter", table_id=table_id, session_id=session.id, waiter_id=waiter_id)
+    except Exception as e:
+        logger.error("Failed to publish TABLE_SESSION_STARTED event", error=str(e))
+
+    return WaiterActivateTableResponse(
+        session_id=session.id,
+        table_id=table.id,
+        table_code=table.code,
+        status=session.status,
+        opened_at=session.opened_at,
+        opened_by=session.opened_by,
+        opened_by_waiter_id=waiter_id,
+        diner_count=body.diner_count,
+    )
+
+
+@router.post("/sessions/{session_id}/rounds", response_model=WaiterSubmitRoundResponse)
+async def submit_round_for_session(
+    session_id: int,
+    body: WaiterSubmitRoundRequest,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> WaiterSubmitRoundResponse:
+    """
+    HU-WAITER-MESA CA-03: Waiter submits a round of orders for a session.
+
+    This creates a new round with submitted_by="WAITER" to track that
+    the order was taken verbally by the waiter (not via pwaMenu).
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the session with table info using SELECT FOR UPDATE to prevent race conditions
+    session = db.scalar(
+        select(TableSession)
+        .options(joinedload(TableSession.table))
+        .where(
+            TableSession.id == session_id,
+            TableSession.tenant_id == tenant_id,
+            TableSession.status == "OPEN",
+        )
+        .with_for_update()
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Active session {session_id} not found",
+        )
+
+    # Verify branch access
+    if session.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Validate products and get pricing - batch query to avoid N+1
+    product_ids = [item.product_id for item in body.items]
+    products_query = db.execute(
+        select(Product, BranchProduct)
+        .join(BranchProduct, Product.id == BranchProduct.product_id)
+        .where(
+            Product.id.in_(product_ids),
+            Product.tenant_id == tenant_id,
+            Product.is_active == True,
+            BranchProduct.branch_id == session.branch_id,
+        )
+    ).all()
+
+    product_lookup = {p.id: (p, bp) for p, bp in products_query}
+
+    # Validate all products exist and are available
+    for item in body.items:
+        if item.product_id not in product_lookup:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product {item.product_id} not available at this branch",
+            )
+
+    # Calculate next round number
+    max_round = db.scalar(
+        select(func.max(Round.round_number))
+        .where(Round.table_session_id == session_id)
+    ) or 0
+    next_round_number = max_round + 1
+
+    # Create the round with waiter traceability
+    now = datetime.now(timezone.utc)
+    new_round = Round(
+        tenant_id=tenant_id,
+        branch_id=session.branch_id,
+        table_session_id=session_id,
+        round_number=next_round_number,
+        status="SUBMITTED",
+        submitted_at=now,
+        submitted_by="WAITER",
+        submitted_by_waiter_id=waiter_id,
+    )
+    db.add(new_round)
+    db.flush()  # Get round ID
+
+    # Create round items in batch
+    total_cents = 0
+    round_items = []
+    for item in body.items:
+        product, branch_product = product_lookup[item.product_id]
+        unit_price = branch_product.price_cents
+
+        round_item = RoundItem(
+            tenant_id=tenant_id,
+            round_id=new_round.id,
+            product_id=item.product_id,
+            qty=item.qty,
+            unit_price_cents=unit_price,
+            notes=item.notes,
+        )
+        round_items.append(round_item)
+        total_cents += unit_price * item.qty
+
+    db.add_all(round_items)
+    safe_commit(db)
+    db.refresh(new_round)
+
+    # Publish ROUND_SUBMITTED event
+    table = session.table
+    try:
+        redis = await get_redis_client()
+        await publish_round_event(
+            redis_client=redis,
+            event_type=ROUND_SUBMITTED,
+            tenant_id=tenant_id,
+            branch_id=session.branch_id,
+            table_id=table.id if table else 0,
+            session_id=session_id,
+            round_id=new_round.id,
+            round_number=new_round.round_number,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=table.sector_id if table else None,
+        )
+        logger.info(
+            "Round submitted by waiter",
+            session_id=session_id,
+            round_id=new_round.id,
+            waiter_id=waiter_id,
+            items_count=len(body.items),
+        )
+    except Exception as e:
+        logger.error("Failed to publish ROUND_SUBMITTED event", error=str(e))
+
+    return WaiterSubmitRoundResponse(
+        session_id=session_id,
+        round_id=new_round.id,
+        round_number=new_round.round_number,
+        status=new_round.status,
+        submitted_by=new_round.submitted_by,
+        submitted_by_waiter_id=waiter_id,
+        items_count=len(body.items),
+        total_cents=total_cents,
+    )
+
+
+@router.post("/sessions/{session_id}/check", response_model=WaiterRequestCheckResponse)
+async def request_check_for_session(
+    session_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> WaiterRequestCheckResponse:
+    """
+    HU-WAITER-MESA CA-05: Waiter requests the check for a session.
+
+    Creates or retrieves the check for the session, aggregating all
+    submitted rounds into a single bill.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the session with table and rounds
+    session = db.scalar(
+        select(TableSession)
+        .options(
+            joinedload(TableSession.table),
+            selectinload(TableSession.rounds).selectinload(Round.items),
+        )
+        .where(
+            TableSession.id == session_id,
+            TableSession.tenant_id == tenant_id,
+            TableSession.status.in_(["OPEN", "PAYING"]),
+        )
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Active session {session_id} not found",
+        )
+
+    # Verify branch access
+    if session.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Check for existing check
+    existing_check = db.scalar(
+        select(Check)
+        .where(
+            Check.table_session_id == session_id,
+            Check.is_active == True,
+        )
+    )
+
+    if existing_check:
+        # Return existing check info
+        items_count = sum(
+            item.qty
+            for r in session.rounds
+            if r.status not in ["DRAFT", "CANCELED"]
+            for item in r.items
+        )
+        return WaiterRequestCheckResponse(
+            check_id=existing_check.id,
+            session_id=session_id,
+            total_cents=existing_check.total_cents,
+            paid_cents=existing_check.paid_cents,
+            status=existing_check.status,
+            items_count=items_count,
+        )
+
+    # Calculate total from all submitted rounds
+    total_cents = 0
+    items_count = 0
+    for round_obj in session.rounds:
+        if round_obj.status not in ["DRAFT", "CANCELED"]:
+            for item in round_obj.items:
+                total_cents += item.unit_price_cents * item.qty
+                items_count += item.qty
+
+    if total_cents == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No items to bill. Submit at least one round first.",
+        )
+
+    # Create the check
+    new_check = Check(
+        tenant_id=tenant_id,
+        branch_id=session.branch_id,
+        table_session_id=session_id,
+        status="REQUESTED",
+        total_cents=total_cents,
+        paid_cents=0,
+    )
+    db.add(new_check)
+
+    # Update session status to PAYING
+    session.status = "PAYING"
+
+    safe_commit(db)
+    db.refresh(new_check)
+
+    # Publish CHECK_REQUESTED event
+    table = session.table
+    try:
+        redis = await get_redis_client()
+        await publish_check_event(
+            redis_client=redis,
+            event_type=CHECK_REQUESTED,
+            tenant_id=tenant_id,
+            branch_id=session.branch_id,
+            table_id=table.id if table else 0,
+            session_id=session_id,
+            check_id=new_check.id,
+            total_cents=new_check.total_cents,
+            paid_cents=0,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=table.sector_id if table else None,
+        )
+        logger.info(
+            "Check requested by waiter",
+            session_id=session_id,
+            check_id=new_check.id,
+            total_cents=total_cents,
+            waiter_id=waiter_id,
+        )
+    except Exception as e:
+        logger.error("Failed to publish CHECK_REQUESTED event", error=str(e))
+
+    return WaiterRequestCheckResponse(
+        check_id=new_check.id,
+        session_id=session_id,
+        total_cents=new_check.total_cents,
+        paid_cents=new_check.paid_cents,
+        status=new_check.status,
+        items_count=items_count,
+    )
+
+
+@router.post("/payments/manual", response_model=ManualPaymentResponse)
+async def register_manual_payment(
+    body: ManualPaymentRequest,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> ManualPaymentResponse:
+    """
+    HU-WAITER-MESA CA-06: Waiter registers a manual payment.
+
+    CRITICAL: This endpoint does NOT integrate with Mercado Pago or any
+    digital payment provider. The waiter physically receives the payment
+    (cash, physical card, or bank transfer) and registers it in the system.
+
+    The payment is immediately marked as APPROVED since the waiter confirms
+    having received it.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the check with session info
+    check = db.scalar(
+        select(Check)
+        .options(joinedload(Check.session).joinedload(TableSession.table))
+        .where(
+            Check.id == body.check_id,
+            Check.tenant_id == tenant_id,
+            Check.is_active == True,
+        )
+        .with_for_update()  # Lock to prevent race conditions
+    )
+
+    if not check:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Check {body.check_id} not found",
+        )
+
+    # Verify branch access
+    if check.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Validate check status - can only pay REQUESTED or IN_PAYMENT checks
+    if check.status not in ["REQUESTED", "IN_PAYMENT"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot pay check with status {check.status}",
+        )
+
+    # Calculate remaining amount
+    remaining = check.total_cents - check.paid_cents
+
+    if body.amount_cents > remaining:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment amount ({body.amount_cents}) exceeds remaining balance ({remaining})",
+        )
+
+    # Create the manual payment - immediately APPROVED since waiter confirms receipt
+    payment = Payment(
+        tenant_id=tenant_id,
+        branch_id=check.branch_id,
+        check_id=check.id,
+        provider="CASH" if body.manual_method == "CASH" else "CARD_PHYSICAL",
+        status="APPROVED",
+        amount_cents=body.amount_cents,
+        payment_category="MANUAL",
+        registered_by="WAITER",
+        registered_by_waiter_id=waiter_id,
+        manual_method=body.manual_method,
+        manual_notes=body.notes,
+    )
+    db.add(payment)
+
+    # Update check paid amount
+    check.paid_cents += body.amount_cents
+
+    # Update check status
+    if check.paid_cents >= check.total_cents:
+        check.status = "PAID"
+    else:
+        check.status = "IN_PAYMENT"
+
+    safe_commit(db)
+    db.refresh(payment)
+    db.refresh(check)
+
+    # Allocate payment to charges (FIFO)
+    try:
+        allocate_payment_fifo(db, payment)
+    except Exception as e:
+        logger.warning("Payment allocation failed", payment_id=payment.id, error=str(e))
+
+    # Publish payment event
+    session = check.session
+    table = session.table if session else None
+    try:
+        redis = await get_redis_client()
+
+        # Always publish PAYMENT_APPROVED
+        await publish_check_event(
+            redis_client=redis,
+            event_type=PAYMENT_APPROVED,
+            tenant_id=tenant_id,
+            branch_id=check.branch_id,
+            table_id=table.id if table else 0,
+            session_id=session.id if session else 0,
+            check_id=check.id,
+            total_cents=check.total_cents,
+            paid_cents=check.paid_cents,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=table.sector_id if table else None,
+        )
+
+        # If fully paid, also publish CHECK_PAID
+        if check.status == "PAID":
+            await publish_check_event(
+                redis_client=redis,
+                event_type=CHECK_PAID,
+                tenant_id=tenant_id,
+                branch_id=check.branch_id,
+                table_id=table.id if table else 0,
+                session_id=session.id if session else 0,
+                check_id=check.id,
+                total_cents=check.total_cents,
+                paid_cents=check.paid_cents,
+                actor_user_id=waiter_id,
+                actor_role="WAITER",
+                sector_id=table.sector_id if table else None,
+            )
+
+        logger.info(
+            "Manual payment registered",
+            check_id=check.id,
+            payment_id=payment.id,
+            amount_cents=body.amount_cents,
+            method=body.manual_method,
+            waiter_id=waiter_id,
+            check_status=check.status,
+        )
+    except Exception as e:
+        logger.error("Failed to publish payment event", error=str(e))
+
+    return ManualPaymentResponse(
+        payment_id=payment.id,
+        check_id=check.id,
+        amount_cents=payment.amount_cents,
+        manual_method=body.manual_method,
+        status=payment.status,
+        payment_category=payment.payment_category,
+        registered_by=payment.registered_by,
+        registered_by_waiter_id=waiter_id,
+        check_status=check.status,
+        check_total_cents=check.total_cents,
+        check_paid_cents=check.paid_cents,
+        check_remaining_cents=check.total_cents - check.paid_cents,
+    )
+
+
+@router.post("/tables/{table_id}/close", response_model=WaiterCloseTableResponse)
+async def close_table(
+    table_id: int,
+    body: WaiterCloseTableRequest = WaiterCloseTableRequest(),
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> WaiterCloseTableResponse:
+    """
+    HU-WAITER-MESA CA-07: Waiter closes a table after payment is complete.
+
+    This closes the session, updates the table status to FREE, and records
+    the closure time. Normally requires the check to be fully paid, unless
+    force=True (requires ADMIN role).
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+    user_roles = ctx.get("roles", [])
+
+    # Find the table with active session
+    table = db.scalar(
+        select(Table)
+        .where(
+            Table.id == table_id,
+            Table.tenant_id == tenant_id,
+            Table.is_active == True,
+        )
+    )
+
+    if not table:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Table {table_id} not found",
+        )
+
+    # Verify branch access
+    if table.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Find active session
+    session = db.scalar(
+        select(TableSession)
+        .where(
+            TableSession.table_id == table_id,
+            TableSession.status.in_(["OPEN", "PAYING"]),
+        )
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Table {table_id} has no active session to close",
+        )
+
+    # Find check if exists
+    check = db.scalar(
+        select(Check)
+        .where(
+            Check.table_session_id == session.id,
+            Check.is_active == True,
+        )
+    )
+
+    total_cents = check.total_cents if check else 0
+    paid_cents = check.paid_cents if check else 0
+
+    # Validate payment status (unless force close)
+    if check and check.status != "PAID" and not body.force:
+        remaining = check.total_cents - check.paid_cents
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Check not fully paid. Remaining: {remaining} cents. Use force=true to close anyway (ADMIN only).",
+        )
+
+    # Force close requires ADMIN
+    if body.force and "ADMIN" not in user_roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Force close requires ADMIN role",
+        )
+
+    # Close the session
+    now = datetime.now(timezone.utc)
+    session.status = "CLOSED"
+    session.closed_at = now
+
+    # Update table status
+    table.status = "FREE"
+
+    safe_commit(db)
+    db.refresh(session)
+    db.refresh(table)
+
+    # Publish TABLE_CLEARED event
+    try:
+        redis = await get_redis_client()
+        await publish_table_event(
+            redis_client=redis,
+            event_type=TABLE_CLEARED,
+            tenant_id=tenant_id,
+            branch_id=table.branch_id,
+            table_id=table.id,
+            session_id=session.id,
+            table_code=table.code,
+            table_status=table.status,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=table.sector_id,
+        )
+        logger.info(
+            "Table closed by waiter",
+            table_id=table_id,
+            session_id=session.id,
+            waiter_id=waiter_id,
+            total_cents=total_cents,
+            paid_cents=paid_cents,
+        )
+    except Exception as e:
+        logger.error("Failed to publish TABLE_CLEARED event", error=str(e))
+
+    return WaiterCloseTableResponse(
+        table_id=table.id,
+        table_code=table.code,
+        table_status=table.status,
+        session_id=session.id,
+        session_status=session.status,
+        total_cents=total_cents,
+        paid_cents=paid_cents,
+        closed_at=now,
+    )
+
+
+@router.get("/sessions/{session_id}/summary", response_model=WaiterSessionSummaryOutput)
+def get_session_summary(
+    session_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> WaiterSessionSummaryOutput:
+    """
+    HU-WAITER-MESA CA-09: Get summary of a session for waiter view.
+
+    Returns session details including traceability info (who opened it,
+    who submitted orders) and whether it's a hybrid flow.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find session with related data
+    session = db.scalar(
+        select(TableSession)
+        .options(
+            joinedload(TableSession.table),
+            selectinload(TableSession.rounds),
+            selectinload(TableSession.diners),
+        )
+        .where(
+            TableSession.id == session_id,
+            TableSession.tenant_id == tenant_id,
+        )
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        )
+
+    # Verify branch access
+    if session.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Get check info if exists
+    check = db.scalar(
+        select(Check)
+        .where(
+            Check.table_session_id == session_id,
+            Check.is_active == True,
+        )
+    )
+
+    # Calculate totals from rounds
+    total_cents = 0
+    for round_obj in session.rounds:
+        if round_obj.status not in ["DRAFT", "CANCELED"]:
+            # Need to load items to calculate
+            items = db.execute(
+                select(RoundItem).where(RoundItem.round_id == round_obj.id)
+            ).scalars().all()
+            for item in items:
+                total_cents += item.unit_price_cents * item.qty
+
+    # Check for hybrid flow (both waiter and diner-submitted rounds)
+    has_waiter_rounds = any(r.submitted_by == "WAITER" for r in session.rounds)
+    has_diner_rounds = any(r.submitted_by == "DINER" for r in session.rounds)
+    is_hybrid = has_waiter_rounds and has_diner_rounds
+
+    table = session.table
+    diner_count = len(session.diners) if session.diners else 0
+
+    return WaiterSessionSummaryOutput(
+        session_id=session.id,
+        table_id=table.id if table else 0,
+        table_code=table.code if table else "",
+        status=session.status,
+        opened_at=session.opened_at,
+        opened_by=session.opened_by,
+        opened_by_waiter_id=session.opened_by_waiter_id,
+        assigned_waiter_id=session.assigned_waiter_id,
+        diner_count=diner_count,
+        rounds_count=len(session.rounds),
+        total_cents=check.total_cents if check else total_cents,
+        paid_cents=check.paid_cents if check else 0,
+        check_status=check.status if check else None,
+        is_hybrid=is_hybrid,
+    )

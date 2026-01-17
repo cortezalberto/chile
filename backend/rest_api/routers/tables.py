@@ -6,11 +6,12 @@ Handles table management and session creation.
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 
 from rest_api.db import get_db
+from shared.rate_limit import limiter
 from rest_api.models import (
     Table,
     TableSession,
@@ -101,22 +102,26 @@ def get_waiter_tables(
             session_id = active_session.id
 
             # Count open rounds (not SERVED or CANCELED)
+            # ROUTER-HIGH-06 FIX: Added is_active filter
             open_rounds = db.scalar(
                 select(func.count())
                 .select_from(Round)
                 .where(
                     Round.table_session_id == active_session.id,
                     Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
+                    Round.is_active == True,
                 )
             ) or 0
 
             # Count pending service calls
+            # ROUTER-HIGH-06 FIX: Added is_active filter
             pending_calls = db.scalar(
                 select(func.count())
                 .select_from(ServiceCall)
                 .where(
                     ServiceCall.table_session_id == active_session.id,
                     ServiceCall.status == "OPEN",
+                    ServiceCall.is_active == True,
                 )
             ) or 0
 
@@ -145,7 +150,9 @@ def get_waiter_tables(
 
 
 @router.post("/api/tables/{table_id}/session", response_model=TableSessionResponse)
+@limiter.limit("30/minute")
 async def create_or_get_session(
+    request: Request,
     table_id: int,
     db: Session = Depends(get_db),
 ) -> TableSessionResponse:
@@ -159,12 +166,15 @@ async def create_or_get_session(
     If the table already has an active session, returns that session.
     Otherwise, creates a new session and marks the table as ACTIVE.
     """
-    # Find the table
+    # CRIT-RACE-01 FIX: Use SELECT FOR UPDATE to prevent race condition
+    # when multiple diners scan QR simultaneously
     table = db.scalar(
-        select(Table).where(
+        select(Table)
+        .where(
             Table.id == table_id,
             Table.is_active == True,
         )
+        .with_for_update()  # Lock the row until transaction completes
     )
 
     if not table:
@@ -179,7 +189,7 @@ async def create_or_get_session(
             detail="Table is out of service",
         )
 
-    # Check for existing active session
+    # Check for existing active session (also with lock to be safe)
     existing_session = db.scalar(
         select(TableSession)
         .where(
@@ -187,6 +197,7 @@ async def create_or_get_session(
             TableSession.status.in_(["OPEN", "PAYING"]),
         )
         .order_by(TableSession.opened_at.desc())
+        .with_for_update()  # Lock existing session row if found
     )
 
     if existing_session:
@@ -229,6 +240,7 @@ async def create_or_get_session(
     )
 
     # PWAW-C002: Publish TABLE_SESSION_STARTED event for waiters
+    # HIGH-EVENT-01 FIX: Include sector_id for sector-based waiter notifications
     redis = None
     try:
         redis = await get_redis_client()
@@ -240,14 +252,13 @@ async def create_or_get_session(
             table_id=table.id,
             table_code=table.code,
             session_id=new_session.id,
+            sector_id=table.sector_id,  # HIGH-EVENT-01 FIX: Include sector for waiter routing
         )
-        logger.info("TABLE_SESSION_STARTED published", table_id=table.id, session_id=new_session.id)
+        logger.info("TABLE_SESSION_STARTED published", table_id=table.id, session_id=new_session.id, sector_id=table.sector_id)
     except Exception as e:
         # Log but don't fail the request
         logger.error("Failed to publish TABLE_SESSION_STARTED", table_id=table.id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return TableSessionResponse(
         session_id=new_session.id,
@@ -301,27 +312,31 @@ def get_table(
     if active_session:
         session_id = active_session.id
 
+        # ROUTER-HIGH-06 FIX: Added is_active filter
         open_rounds = db.scalar(
             select(func.count())
             .select_from(Round)
             .where(
                 Round.table_session_id == active_session.id,
                 Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
+                Round.is_active == True,
             )
         ) or 0
 
+        # ROUTER-HIGH-06 FIX: Added is_active filter
         pending_calls = db.scalar(
             select(func.count())
             .select_from(ServiceCall)
             .where(
                 ServiceCall.table_session_id == active_session.id,
                 ServiceCall.status == "OPEN",
+                ServiceCall.is_active == True,
             )
         ) or 0
 
         check = db.scalar(
             select(Check)
-            .where(Check.table_session_id == active_session.id)
+            .where(Check.table_session_id == active_session.id, Check.is_active == True)
             .order_by(Check.created_at.desc())
         )
         if check:

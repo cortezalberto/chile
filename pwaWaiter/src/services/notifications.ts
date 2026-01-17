@@ -1,9 +1,13 @@
 import { notificationLogger } from '../utils/logger'
+// MED-08 FIX: Import WS event constants to avoid magic strings
+import { WS_EVENT_TYPES, URGENT_WS_EVENTS, UI_CONFIG } from '../utils/constants'
 import type { WSEvent } from '../types'
 
 // WAITER-HIGH-02 FIX: Track recent notifications to prevent duplicates
 const recentNotifications = new Set<string>()
 const NOTIFICATION_COOLDOWN_MS = 5000
+// WAITER-SVC-CRIT-03 FIX: Maximum size limit for recentNotifications to prevent memory leak
+const MAX_RECENT_NOTIFICATIONS = 100
 
 class NotificationService {
   private permission: NotificationPermission = 'default'
@@ -75,9 +79,11 @@ class NotificationService {
   private playAlertSound(): void {
     try {
       // Create audio element if not exists
+      // WAITER-SVC-LOW-02 FIX: Set preload="none" for lazy loading
       if (!this.alertSound) {
         this.alertSound = new Audio('/sounds/alert.mp3')
-        this.alertSound.volume = 0.5
+        this.alertSound.preload = 'none'
+        this.alertSound.volume = UI_CONFIG.ALERT_SOUND_VOLUME
       }
 
       // Reset and play
@@ -108,6 +114,13 @@ class NotificationService {
     if (recentNotifications.has(key)) {
       notificationLogger.debug('Notification recently shown, skipping', { key })
       return
+    }
+
+    // WAITER-SVC-CRIT-03 FIX: Prevent unbounded growth of recentNotifications Set
+    if (recentNotifications.size >= MAX_RECENT_NOTIFICATIONS) {
+      // Clear oldest entries by clearing and starting fresh
+      recentNotifications.clear()
+      notificationLogger.debug('Cleared recentNotifications cache due to size limit')
     }
 
     recentNotifications.add(key)
@@ -145,36 +158,37 @@ class NotificationService {
   } {
     const tableInfo = `Mesa ${event.table_id}`
 
+    // MED-08 FIX: Use WS event type constants instead of magic strings
     switch (event.type) {
-      case 'ROUND_SUBMITTED':
+      case WS_EVENT_TYPES.ROUND_SUBMITTED:
         return {
           title: 'Nuevo Pedido',
           body: `${tableInfo} envió un nuevo pedido`,
           tag: `round-${event.entity?.round_id}`,
         }
 
-      case 'ROUND_IN_KITCHEN':
+      case WS_EVENT_TYPES.ROUND_IN_KITCHEN:
         return {
           title: 'Pedido en Cocina',
           body: `${tableInfo} - Pedido #${event.entity?.round_number} en preparación`,
           tag: `round-kitchen-${event.entity?.round_id}`,
         }
 
-      case 'ROUND_READY':
+      case WS_EVENT_TYPES.ROUND_READY:
         return {
           title: 'Pedido Listo',
           body: `${tableInfo} tiene un pedido listo para servir`,
           tag: `round-ready-${event.entity?.round_id}`,
         }
 
-      case 'ROUND_SERVED':
+      case WS_EVENT_TYPES.ROUND_SERVED:
         return {
           title: 'Pedido Servido',
           body: `${tableInfo} - Pedido #${event.entity?.round_number} entregado`,
           tag: `round-served-${event.entity?.round_id}`,
         }
 
-      case 'SERVICE_CALL_CREATED': {
+      case WS_EVENT_TYPES.SERVICE_CALL_CREATED: {
         // PWAW-004: Include call_type in notification
         const callType = event.entity?.call_type as string | undefined
         const callTypeText = callType === 'BILL'
@@ -189,28 +203,28 @@ class NotificationService {
         }
       }
 
-      case 'CHECK_REQUESTED':
+      case WS_EVENT_TYPES.CHECK_REQUESTED:
         return {
           title: 'Cuenta Solicitada',
           body: `${tableInfo} solicitó la cuenta`,
           tag: `check-${event.session_id}`,
         }
 
-      case 'CHECK_PAID':
+      case WS_EVENT_TYPES.CHECK_PAID:
         return {
           title: 'Cuenta Pagada',
           body: `${tableInfo} completó el pago`,
           tag: `check-paid-${event.entity?.check_id}`,
         }
 
-      case 'TABLE_CLEARED':
+      case WS_EVENT_TYPES.TABLE_CLEARED:
         return {
           title: 'Mesa Liberada',
           body: `${tableInfo} ha sido liberada`,
           tag: `table-cleared-${event.table_id}`,
         }
 
-      case 'PAYMENT_APPROVED':
+      case WS_EVENT_TYPES.PAYMENT_APPROVED:
         return {
           title: 'Pago Aprobado',
           body: `${tableInfo} - Pago de $${((event.entity?.amount_cents || 0) / 100).toFixed(2)} aprobado`,
@@ -224,9 +238,10 @@ class NotificationService {
 
   /**
    * Check if event type is urgent (requires user interaction)
+   * MED-08 FIX: Use URGENT_WS_EVENTS constant instead of magic strings
    */
   private isUrgent(type: WSEvent['type']): boolean {
-    return ['SERVICE_CALL_CREATED', 'CHECK_REQUESTED', 'ROUND_READY'].includes(type)
+    return (URGENT_WS_EVENTS as readonly string[]).includes(type)
   }
 }
 

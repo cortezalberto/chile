@@ -10,7 +10,11 @@ import { LoginPage } from './pages/Login'
 import { BranchSelectPage } from './pages/BranchSelect'
 import { TableGridPage } from './pages/TableGrid'
 import { TableDetailPage } from './pages/TableDetail'
+import { TakeOrderPage } from './pages/TakeOrder'
 import { OfflineBanner } from './components/OfflineBanner'
+
+// HU-WAITER-MESA: View modes for table management
+type TableViewMode = 'detail' | 'order'
 
 export function App() {
   const isAuthenticated = useAuthStore(selectIsAuthenticated)
@@ -21,6 +25,8 @@ export function App() {
   const selectedTableId = useTablesStore(selectSelectedTableId)
 
   const [isCheckingAuth, setIsCheckingAuth] = useState(true)
+  // HU-WAITER-MESA: Track which view mode when table is selected
+  const [tableViewMode, setTableViewMode] = useState<TableViewMode>('order')
 
   // Check auth on mount
   useEffect(() => {
@@ -39,14 +45,16 @@ export function App() {
     )
   }
 
-  // Handle table selection
-  const handleTableSelect = (tableId: number) => {
+  // HU-WAITER-MESA: Handle table selection - default to order taking view
+  const handleTableSelect = (tableId: number, mode: TableViewMode = 'order') => {
     selectTable(tableId)
+    setTableViewMode(mode)
   }
 
-  // Handle back from table detail
+  // Handle back from table detail/order
   const handleBackToGrid = () => {
     selectTable(null)
+    setTableViewMode('order')
   }
 
   // Derive view from state instead of using useEffect (React 19 best practice)
@@ -61,13 +69,17 @@ export function App() {
       return <BranchSelectPage />
     }
 
-    // Authenticated with branch, viewing table detail
+    // Authenticated with branch, viewing table
     if (selectedTableId !== null) {
+      // HU-WAITER-MESA: Show order page or detail page based on mode
+      if (tableViewMode === 'order') {
+        return <TakeOrderPage onBack={handleBackToGrid} />
+      }
       return <TableDetailPage onBack={handleBackToGrid} />
     }
 
     // Authenticated with branch -> table grid
-    return <TableGridPage onTableSelect={handleTableSelect} />
+    return <TableGridPage onTableSelect={(tableId) => handleTableSelect(tableId, 'order')} />
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTablesStore, selectSelectedTable } from '../stores/tablesStore'
 import { tablesAPI, roundsAPI } from '../services/api'
 import { wsService } from '../services/websocket'
@@ -7,6 +7,8 @@ import { Button } from '../components/Button'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { TableStatusBadge, RoundStatusBadge } from '../components/StatusBadge'
 import { formatTableCode, formatPrice, formatTime } from '../utils/format'
+// MED-08 FIX: Import WS event constants to avoid magic strings
+import { WS_EVENT_TYPES } from '../utils/constants'
 import type { TableSessionDetail, RoundDetail, WSEventType, RoundStatus } from '../types'
 
 interface TableDetailPageProps {
@@ -33,8 +35,16 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
   const [confirmRoundId, setConfirmRoundId] = useState<number | null>(null)
   const [confirmRoundNumber, setConfirmRoundNumber] = useState<number | null>(null)
 
+  // WAITER-PAGE-MED-02: Loading state for actions
+  const [isMarkingServed, setIsMarkingServed] = useState(false)
+  const [isClearingTable, setIsClearingTable] = useState(false)
+
   // PWAW-M003: Round filter state
   const [roundFilter, setRoundFilter] = useState<RoundFilterStatus>('ALL')
+
+  // WS-HIGH-05 FIX: Use refs to avoid re-subscription when callbacks change
+  const tableIdRef = useRef(table?.table_id)
+  const loadSessionDetailRef = useRef<() => Promise<void>>()
 
   // Load session detail when table is selected
   const loadSessionDetail = useCallback(async () => {
@@ -53,32 +63,42 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     }
   }, [table?.table_id, table?.session_id])
 
+  // WS-HIGH-05 FIX: Keep refs updated with latest values
+  useEffect(() => {
+    tableIdRef.current = table?.table_id
+  }, [table?.table_id])
+
+  useEffect(() => {
+    loadSessionDetailRef.current = loadSessionDetail
+  }, [loadSessionDetail])
+
   useEffect(() => {
     loadSessionDetail()
   }, [loadSessionDetail])
 
   // PWAW-A006: WebSocket listener to refresh on relevant events
+  // WS-HIGH-05 FIX: Subscribe once using refs to avoid re-subscription when callbacks change
   useEffect(() => {
-    if (!table?.table_id) return
-
+    // MED-08 FIX: Use WS event constants instead of magic strings
     // Events that should trigger a refresh for this table
     const relevantEvents: WSEventType[] = [
-      'ROUND_SUBMITTED',
-      'ROUND_IN_KITCHEN',
-      'ROUND_READY',
-      'ROUND_SERVED',
-      'SERVICE_CALL_CREATED',
-      'SERVICE_CALL_ACKED',
-      'SERVICE_CALL_CLOSED',
-      'CHECK_REQUESTED',
-      'CHECK_PAID',
+      WS_EVENT_TYPES.ROUND_SUBMITTED,
+      WS_EVENT_TYPES.ROUND_IN_KITCHEN,
+      WS_EVENT_TYPES.ROUND_READY,
+      WS_EVENT_TYPES.ROUND_SERVED,
+      WS_EVENT_TYPES.SERVICE_CALL_CREATED,
+      WS_EVENT_TYPES.SERVICE_CALL_ACKED,
+      WS_EVENT_TYPES.SERVICE_CALL_CLOSED,
+      WS_EVENT_TYPES.CHECK_REQUESTED,
+      WS_EVENT_TYPES.CHECK_PAID,
     ]
 
+    // WS-HIGH-05 FIX: Use refs to access latest values without causing re-subscription
     const unsubscribers = relevantEvents.map((eventType) =>
       wsService.on(eventType, (event) => {
-        // Only refresh if event is for this table
-        if (event.table_id === table.table_id) {
-          loadSessionDetail()
+        // Only refresh if event is for this table (using ref for latest table_id)
+        if (tableIdRef.current && event.table_id === tableIdRef.current) {
+          loadSessionDetailRef.current?.()
         }
       })
     )
@@ -86,7 +106,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     return () => {
       unsubscribers.forEach((unsub) => unsub())
     }
-  }, [table?.table_id, loadSessionDetail])
+  }, []) // WS-HIGH-05 FIX: Empty deps - subscribe once, use refs for latest values
 
   // PWAW-006: Show confirmation dialog before marking as served
   const promptMarkServed = (roundId: number, roundNumber: number) => {
@@ -95,9 +115,11 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
   }
 
   // Mark round as served (after confirmation)
+  // WAITER-PAGE-MED-02: Added loading state for better UX
   const handleMarkServed = async () => {
     if (!confirmRoundId) return
 
+    setIsMarkingServed(true)
     try {
       await roundsAPI.markAsServed(confirmRoundId)
       // Reload session detail to update UI
@@ -105,6 +127,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     } catch (err) {
       console.error('Failed to mark round as served:', err)
     } finally {
+      setIsMarkingServed(false)
       setConfirmRoundId(null)
       setConfirmRoundNumber(null)
     }
@@ -169,12 +192,16 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
 
   const hasActiveSession = table.session_id !== null
 
+  // WAITER-PAGE-MED-02: Added loading state for better UX
   const handleClearTable = async () => {
+    setIsClearingTable(true)
     try {
       await clearTable(table.table_id)
       onBack()
     } catch {
       // Error handled in store
+    } finally {
+      setIsClearingTable(false)
     }
   }
 
@@ -456,8 +483,9 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                     variant="primary"
                     className="w-full mt-4"
                     onClick={handleClearTable}
+                    disabled={isClearingTable}
                   >
-                    Liberar Mesa
+                    {isClearingTable ? 'Liberando...' : 'Liberar Mesa'}
                   </Button>
                 )}
               </section>
@@ -474,6 +502,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
       </main>
 
       {/* PWAW-006: Confirmation dialog for marking round as served */}
+      {/* WAITER-PAGE-MED-02: Added loading state */}
       <ConfirmDialog
         isOpen={confirmRoundId !== null}
         title="Marcar como servido"
@@ -482,6 +511,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
         cancelLabel="Cancelar"
         onConfirm={handleMarkServed}
         onCancel={cancelConfirm}
+        isLoading={isMarkingServed}
       />
     </div>
   )

@@ -15,11 +15,50 @@ This consolidated view is used by:
 - pwaMenu for complete product information display
 - RAG chatbot for enriched knowledge ingestion
 - Public API endpoints
+
+Enhanced with Redis caching (producto3.md improvement):
+- get_products_complete_for_branch has 5-minute cache
+- Cache invalidated on product update via invalidate_branch_products_cache()
 """
 
+import json
 from typing import Optional, TypedDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, joinedload
+
+from shared.logging import get_logger
+
+logger = get_logger(__name__)
+
+# =============================================================================
+# Redis Cache Configuration
+# =============================================================================
+
+# Cache TTL: 5 minutes for branch product views
+CACHE_TTL_SECONDS = 5 * 60
+
+def _get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
+    """
+    MED-03 FIX: Generate Redis cache key for branch products.
+    SVC-MED-03 FIX: Added defensive validation of inputs.
+
+    Args:
+        branch_id: Branch ID to include in the key (must be positive int)
+        tenant_id: Tenant ID for multi-tenant isolation (must be positive int)
+
+    Returns:
+        Formatted cache key string: "branch:{branch_id}:tenant:{tenant_id}:products_complete"
+
+    Raises:
+        ValueError: If branch_id or tenant_id are invalid
+    """
+    # SVC-MED-03 FIX: Defensive validation
+    if not isinstance(branch_id, int) or branch_id <= 0:
+        raise ValueError(f"Invalid branch_id: {branch_id}")
+    if not isinstance(tenant_id, int) or tenant_id <= 0:
+        raise ValueError(f"Invalid tenant_id: {tenant_id}")
+
+    return f"branch:{branch_id}:tenant:{tenant_id}:products_complete"
 
 from rest_api.models import (
     Product,
@@ -365,6 +404,12 @@ def get_product_complete(db: Session, product_id: int) -> Optional[ProductComple
 
     This is the main function used by pwaMenu and RAG for complete product information.
 
+    MED-29-07 NOTE: This function makes multiple DB queries per product (allergens, dietary,
+    ingredients, cooking, sensory, modifications, warnings, rag_config). When called in a loop
+    via get_products_complete_for_branch(), this creates an N+1 query pattern. However, this
+    is mitigated by the Redis cache in get_products_complete_for_branch_cached() which caches
+    the results for 5 minutes, avoiding repeated DB hits for the same branch.
+
     Args:
         db: Database session
         product_id: Product ID to fetch
@@ -433,6 +478,9 @@ def get_products_complete_for_branch(
         )
     ).scalars().all()
 
+    # MED-29-07 NOTE: This loop calls get_product_complete() per product, creating N+1 queries.
+    # This is mitigated by the Redis cache in get_products_complete_for_branch_cached() which
+    # should be used in production. Direct calls to this function bypass the cache.
     # Get complete view for each product
     results = []
     for product_id in product_ids:
@@ -441,6 +489,126 @@ def get_products_complete_for_branch(
             results.append(view)
 
     return results
+
+
+async def get_products_complete_for_branch_cached(
+    db: Session,
+    branch_id: int,
+    tenant_id: int,
+) -> list[ProductCompleteView]:
+    """
+    Get complete views for all active products with Redis caching.
+
+    producto3.md improvement: Cache branch product views for 5 minutes.
+    Falls back to database query if Redis is unavailable.
+
+    Args:
+        db: Database session
+        branch_id: Branch ID to filter by
+        tenant_id: Tenant ID for security
+
+    Returns:
+        List of complete product views (from cache or database)
+    """
+    from shared.events import get_redis_pool
+
+    cache_key = _get_branch_products_cache_key(branch_id, tenant_id)
+
+    try:
+        redis = await get_redis_pool()
+        cached = await redis.get(cache_key)
+
+        if cached:
+            logger.debug(f"Cache HIT for branch {branch_id} products")
+            return json.loads(cached)
+
+        logger.debug(f"Cache MISS for branch {branch_id} products")
+    except Exception as e:
+        logger.warning(f"Redis cache error, falling back to DB: {e}")
+        # Fall through to database query
+
+    # Query from database
+    results = get_products_complete_for_branch(db, branch_id, tenant_id)
+
+    # Cache the results
+    try:
+        redis = await get_redis_pool()
+        await redis.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(results))
+        logger.debug(f"Cached {len(results)} products for branch {branch_id}")
+    except Exception as e:
+        logger.warning(f"Failed to cache branch products: {e}")
+
+    return results
+
+
+async def invalidate_branch_products_cache(branch_id: int, tenant_id: int) -> bool:
+    """
+    Invalidate the cached product views for a branch.
+
+    Call this when:
+    - A product is created, updated, or deleted
+    - A BranchProduct is updated (availability, price)
+    - Allergen or ingredient data is modified
+
+    Args:
+        branch_id: Branch ID to invalidate
+        tenant_id: Tenant ID for security
+
+    Returns:
+        True if cache was invalidated, False on error
+    """
+    from shared.events import get_redis_pool
+
+    cache_key = _get_branch_products_cache_key(branch_id, tenant_id)
+
+    try:
+        redis = await get_redis_pool()
+        result = await redis.delete(cache_key)
+        logger.info(f"Invalidated cache for branch {branch_id} (deleted: {result})")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to invalidate branch cache: {e}")
+        return False
+
+
+async def invalidate_all_branch_caches_for_tenant(tenant_id: int) -> int:
+    """
+    Invalidate all cached product views for a tenant.
+
+    Call this when tenant-wide changes occur (e.g., allergen renamed).
+
+    SVC-MED-08 FIX: Added limit to scan_iter to prevent unbounded result set.
+
+    Args:
+        tenant_id: Tenant ID
+
+    Returns:
+        Number of cache keys deleted
+    """
+    from shared.events import get_redis_pool
+
+    # SVC-MED-08 FIX: Limit maximum keys to delete in one operation
+    MAX_KEYS_PER_OPERATION = 1000
+
+    try:
+        redis = await get_redis_pool()
+        pattern = f"branch:*:tenant:{tenant_id}:products_complete"
+        keys = []
+        # SVC-MED-08 FIX: Use count parameter to limit batch size and cap total
+        async for key in redis.scan_iter(pattern, count=100):
+            keys.append(key)
+            if len(keys) >= MAX_KEYS_PER_OPERATION:
+                logger.warning(f"Hit max keys limit ({MAX_KEYS_PER_OPERATION}) for tenant {tenant_id} cache invalidation")
+                break
+
+        if keys:
+            deleted = await redis.delete(*keys)
+            logger.info(f"Invalidated {deleted} branch caches for tenant {tenant_id}")
+            return deleted
+        return 0
+    except Exception as e:
+        logger.warning(f"Failed to invalidate tenant caches: {e}")
+        return 0
 
 
 # =============================================================================

@@ -45,7 +45,8 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
     }
   }, [branchId, fetchTables])
 
-  const { containerRef, pullDistance, isRefreshing, progress } = usePullToRefresh({
+  // WAITER-HOOK-MED-02: Added statusMessage for accessibility
+  const { containerRef, pullDistance, isRefreshing, progress, statusMessage } = usePullToRefresh({
     onRefresh: handleRefresh,
     threshold: 80,
   })
@@ -252,7 +253,45 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
               </section>
             )}
 
-            {/* Empty state */}
+            {/* WAITER-PAGE-MED-03: Empty state when filter returns no results */}
+            {tables.length > 0 &&
+             !showUrgent && !showActive && !showFree && !showOutOfService && (
+              <div className="flex flex-col items-center justify-center h-64">
+                <p className="text-neutral-400 mb-2">No hay mesas con este filtro</p>
+                <Button
+                  variant="secondary"
+                  onClick={() => setFilter('ALL')}
+                >
+                  Mostrar todas
+                </Button>
+              </div>
+            )}
+
+            {/* WAITER-PAGE-MED-03: Empty state when filter shows sections but all are empty */}
+            {tables.length > 0 &&
+             ((showUrgent && urgentTables.length === 0) ||
+              (showActive && activeTables.length === 0) ||
+              (showFree && availableTables.length === 0) ||
+              (showOutOfService && outOfServiceTables.length === 0)) &&
+             filter !== 'ALL' &&
+             filterCounts[filter] === 0 && (
+              <div className="flex flex-col items-center justify-center h-64">
+                <p className="text-neutral-400 mb-2">
+                  No hay mesas {filter === 'URGENT' ? 'urgentes' :
+                               filter === 'ACTIVE' ? 'activas' :
+                               filter === 'FREE' ? 'libres' :
+                               filter === 'OUT_OF_SERVICE' ? 'fuera de servicio' : ''}
+                </p>
+                <Button
+                  variant="secondary"
+                  onClick={() => setFilter('ALL')}
+                >
+                  Mostrar todas
+                </Button>
+              </div>
+            )}
+
+            {/* Empty state when no tables configured */}
             {tables.length === 0 && (
               <div className="flex flex-col items-center justify-center h-64">
                 <p className="text-neutral-400 mb-2">No hay mesas configuradas</p>

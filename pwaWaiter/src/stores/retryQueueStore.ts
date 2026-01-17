@@ -101,9 +101,15 @@ export const useRetryQueueStore = create<RetryQueueState>()(
 
         storeLogger.info('Action enqueued for retry', { type, payload })
 
-        // Try to process immediately if online
-        if (navigator.onLine) {
-          get().processQueue()
+        // CRIT-11 FIX: Use debounced processing to prevent race conditions
+        // Only process if online and not already processing
+        if (navigator.onLine && !get().isProcessing) {
+          // Use setTimeout to batch multiple enqueues
+          setTimeout(() => {
+            if (!get().isProcessing) {
+              get().processQueue()
+            }
+          }, 100)
         }
       },
 
@@ -199,10 +205,38 @@ export const selectQueuedActions = (state: RetryQueueState) => state.queue
 export const selectQueueLength = (state: RetryQueueState) => state.queue.length
 export const selectIsProcessing = (state: RetryQueueState) => state.isProcessing
 
+// CRIT-29-02 FIX: Guard against duplicate listener registration
+// Track whether listener is already registered to prevent memory leaks on HMR/re-initialization
+let onlineListenerRegistered = false
+// WAITER-STORE-CRIT-02 FIX: Store reference to cleanup function for testability
+let onlineListenerCleanup: (() => void) | null = null
+
 // Process queue when coming back online
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
+if (typeof window !== 'undefined' && !onlineListenerRegistered) {
+  onlineListenerRegistered = true
+
+  const handleOnline = () => {
     storeLogger.info('Back online - processing retry queue')
     useRetryQueueStore.getState().processQueue()
-  })
+  }
+
+  window.addEventListener('online', handleOnline)
+
+  // WAITER-STORE-CRIT-02 FIX: Export cleanup function
+  onlineListenerCleanup = () => {
+    window.removeEventListener('online', handleOnline)
+    onlineListenerRegistered = false
+    onlineListenerCleanup = null
+    storeLogger.debug('Online listener removed')
+  }
+}
+
+/**
+ * WAITER-STORE-CRIT-02 FIX: Cleanup function to remove the global online listener.
+ * Call this in test teardown or when unmounting the app.
+ */
+export function cleanupOnlineListener(): void {
+  if (onlineListenerCleanup) {
+    onlineListenerCleanup()
+  }
 }

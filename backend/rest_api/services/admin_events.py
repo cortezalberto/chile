@@ -20,7 +20,17 @@ logger = get_logger(__name__)
 
 
 def _run_async(coro):
-    """Run an async coroutine from sync code."""
+    """
+    MED-03 FIX: Run an async coroutine from sync code.
+
+    Handles three scenarios:
+    1. If already in an async context with running loop, creates a task
+    2. If loop exists but not running, uses run_until_complete
+    3. If no loop exists, creates one with asyncio.run
+
+    Args:
+        coro: The async coroutine to execute
+    """
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -43,9 +53,22 @@ async def _publish_event(
     affected_entities: Optional[list[dict]] = None,
     actor_user_id: Optional[int] = None,
 ) -> None:
-    """Internal async function to publish event."""
-    redis_client = None
+    """
+    MED-03 FIX: Internal async function to publish admin CRUD events via Redis.
+
+    Args:
+        event_type: Event type constant (ENTITY_CREATED, ENTITY_UPDATED, etc.)
+        tenant_id: Tenant ID for multi-tenant isolation
+        branch_id: Optional branch ID for branch-specific events
+        entity_type: Type of entity (e.g., "branch", "product", "category")
+        entity_id: ID of the affected entity
+        entity_name: Optional human-readable name of the entity
+        affected_entities: Optional list of child entities affected by cascade delete
+        actor_user_id: Optional ID of the user who triggered the action
+    """
     try:
+        # CRIT-01 FIX: Use pooled connection without closing it
+        # The pool manages connection lifecycle - we should NOT close pooled connections
         redis_client = await get_redis_client()
         await publish_admin_crud_event(
             redis_client=redis_client,
@@ -66,9 +89,7 @@ async def _publish_event(
         )
     except Exception as e:
         logger.error("Failed to publish admin event", error=str(e))
-    finally:
-        if redis_client:
-            await redis_client.close()
+    # CRIT-01 FIX: Removed finally block that closed pooled connection
 
 
 def publish_entity_created(

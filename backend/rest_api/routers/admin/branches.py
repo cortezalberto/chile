@@ -1,0 +1,139 @@
+"""
+Branch management endpoints.
+"""
+
+from fastapi import APIRouter
+
+from rest_api.routers.admin._base import (
+    Depends, HTTPException, status, Session, select,
+    get_db, current_user, Branch,
+    soft_delete, set_created_by, set_updated_by,
+    get_user_id, get_user_email, publish_entity_deleted,
+    require_admin, require_admin_or_manager,
+)
+from rest_api.routers.admin_schemas import BranchOutput, BranchCreate, BranchUpdate
+
+
+router = APIRouter(tags=["admin-branches"])
+
+
+@router.get("/branches", response_model=list[BranchOutput])
+def list_branches(
+    include_deleted: bool = False,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> list[BranchOutput]:
+    """List all branches for the user's tenant."""
+    query = select(Branch).where(Branch.tenant_id == user["tenant_id"])
+
+    if not include_deleted:
+        query = query.where(Branch.is_active == True)
+
+    branches = db.execute(query.order_by(Branch.name)).scalars().all()
+    return [BranchOutput.model_validate(b) for b in branches]
+
+
+@router.get("/branches/{branch_id}", response_model=BranchOutput)
+def get_branch(
+    branch_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> BranchOutput:
+    """Get a specific branch."""
+    branch = db.scalar(
+        select(Branch).where(
+            Branch.id == branch_id,
+            Branch.tenant_id == user["tenant_id"],
+            Branch.is_active == True,
+        )
+    )
+    if not branch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found",
+        )
+    return BranchOutput.model_validate(branch)
+
+
+@router.post("/branches", response_model=BranchOutput, status_code=status.HTTP_201_CREATED)
+def create_branch(
+    body: BranchCreate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+) -> BranchOutput:
+    """Create a new branch. Requires ADMIN role."""
+    branch = Branch(
+        tenant_id=user["tenant_id"],
+        **body.model_dump(),
+    )
+    set_created_by(branch, get_user_id(user), get_user_email(user))
+    db.add(branch)
+    db.commit()
+    db.refresh(branch)
+    return BranchOutput.model_validate(branch)
+
+
+@router.patch("/branches/{branch_id}", response_model=BranchOutput)
+def update_branch(
+    branch_id: int,
+    body: BranchUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin_or_manager),
+) -> BranchOutput:
+    """Update a branch. Requires ADMIN or MANAGER role."""
+    branch = db.scalar(
+        select(Branch).where(
+            Branch.id == branch_id,
+            Branch.tenant_id == user["tenant_id"],
+            Branch.is_active == True,
+        )
+    )
+    if not branch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found",
+        )
+
+    update_data = body.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(branch, key, value)
+
+    set_updated_by(branch, get_user_id(user), get_user_email(user))
+
+    db.commit()
+    db.refresh(branch)
+    return BranchOutput.model_validate(branch)
+
+
+@router.delete("/branches/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_branch(
+    branch_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_admin),
+) -> None:
+    """Soft delete a branch. Requires ADMIN role."""
+    branch = db.scalar(
+        select(Branch).where(
+            Branch.id == branch_id,
+            Branch.tenant_id == user["tenant_id"],
+            Branch.is_active == True,
+        )
+    )
+    if not branch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Branch not found",
+        )
+
+    branch_name = branch.name
+    tenant_id = branch.tenant_id
+
+    soft_delete(db, branch, get_user_id(user), get_user_email(user))
+
+    publish_entity_deleted(
+        tenant_id=tenant_id,
+        entity_type="branch",
+        entity_id=branch_id,
+        entity_name=branch_name,
+        actor_user_id=get_user_id(user),
+    )

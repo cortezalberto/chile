@@ -172,9 +172,18 @@ async def update_round_status(
         )
 
     # Update status
+    # ROUTER-HIGH-02 FIX: Add error handling for commit
     round_obj.status = new_status
-    db.commit()
-    db.refresh(round_obj)
+    try:
+        db.commit()
+        db.refresh(round_obj)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update round status", round_id=round_id, new_status=new_status, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update round status - please try again",
+        )
 
     # Access pre-loaded session for event (already loaded via joinedload)
     session = round_obj.session
@@ -203,9 +212,7 @@ async def update_round_status(
         )
     except Exception as e:
         logger.error("Failed to publish round status event", round_id=round_id, new_status=new_status, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     # Build response using pre-loaded relationships (no additional queries)
     # Note: After db.refresh(), relationships need to be re-queried

@@ -1,13 +1,18 @@
 """
 Authentication and authorization utilities.
 Handles JWT tokens for staff and HMAC tokens for diners.
+
+CRIT-AUTH-01 FIX: Now verifies tokens against blacklist
+CRIT-AUTH-04 FIX: JWT tokens now include "jti" (unique token ID)
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,6 +26,9 @@ from shared.settings import (
     TABLE_TOKEN_SECRET,
     settings,
 )
+from shared.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -35,6 +43,8 @@ def sign_jwt(
 ) -> str:
     """
     Sign a JWT token with the given payload.
+
+    CRIT-AUTH-04 FIX: Now includes "jti" (JWT ID) for individual token blacklisting.
 
     Args:
         payload: Claims to include in the token (sub, tenant_id, branch_ids, roles, etc.)
@@ -58,6 +68,8 @@ def sign_jwt(
         "iat": now,
         "exp": now + ttl_seconds,
         "type": token_type,
+        # CRIT-AUTH-04 FIX: Add unique token ID for individual blacklisting
+        "jti": str(uuid.uuid4()),
     }
     return jwt.encode(data, JWT_SECRET, algorithm="HS256")
 
@@ -91,27 +103,76 @@ def verify_refresh_token(token: str) -> dict[str, Any]:
     return payload
 
 
-def verify_jwt(token: str) -> dict[str, Any]:
+def verify_jwt(token: str, check_blacklist: bool = True) -> dict[str, Any]:
     """
     Verify and decode a JWT token.
 
+    CRIT-AUTH-01 FIX: Now checks token against blacklist.
+    SHARED-HIGH-03 FIX: Added validation of required claims.
+
     Args:
         token: The JWT token string.
+        check_blacklist: Whether to check token against blacklist (default True).
 
     Returns:
         Decoded token claims.
 
     Raises:
-        HTTPException: If token is invalid or expired.
+        HTTPException: If token is invalid, expired, or blacklisted.
     """
     try:
-        return jwt.decode(
+        payload = jwt.decode(
             token,
             JWT_SECRET,
             algorithms=["HS256"],
             audience=JWT_AUDIENCE,
             issuer=JWT_ISSUER,
         )
+
+        # SHARED-HIGH-03 FIX: Validate required claims for access tokens
+        # Access tokens must have: sub, tenant_id, type
+        if "sub" not in payload:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing subject claim",
+            )
+
+        if "tenant_id" not in payload:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: missing tenant_id claim",
+            )
+
+        # SHARED-HIGH-03 FIX: Validate type claim exists
+        token_type = payload.get("type")
+        if token_type not in ("access", "refresh", None):  # None for legacy tokens
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: invalid type claim",
+            )
+
+        # SHARED-HIGH-03 FIX: Validate sub is a valid integer string
+        try:
+            int(payload["sub"])
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: malformed subject claim",
+            )
+
+        # SHARED-HIGH-03 FIX: Validate tenant_id is an integer
+        if not isinstance(payload["tenant_id"], int):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: malformed tenant_id claim",
+            )
+
+        # CRIT-AUTH-01 FIX: Check token against blacklist
+        if check_blacklist:
+            _check_token_blacklist(payload)
+
+        return payload
+
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -122,6 +183,77 @@ def verify_jwt(token: str) -> dict[str, Any]:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {str(e)}",
         )
+
+
+def _check_token_blacklist(payload: dict[str, Any]) -> None:
+    """
+    CRIT-AUTH-01 FIX: Check if token is blacklisted.
+    SHARED-CRIT-01 FIX: Refactored to avoid deadlock with ThreadPoolExecutor+asyncio.run.
+
+    Checks both:
+    1. Individual token blacklist (by jti)
+    2. User-level revocation (all tokens before timestamp)
+
+    Raises:
+        HTTPException: If token is blacklisted/revoked.
+    """
+    from shared.token_blacklist import (
+        is_token_blacklisted_sync,
+        is_token_revoked_by_user_sync,
+    )
+
+    token_jti = payload.get("jti")
+    user_id = payload.get("sub")
+    token_iat = payload.get("iat")
+
+    # SHARED-CRIT-01 FIX: Use synchronous wrappers that handle event loop correctly
+    # SHARED-HIGH-01 FIX: Changed from "fail open" to "fail closed" for security
+    # If Redis is unavailable, we deny access rather than allowing potentially revoked tokens
+
+    # If token has jti, check individual blacklist
+    if token_jti:
+        try:
+            is_blacklisted = is_token_blacklisted_sync(token_jti)
+
+            if is_blacklisted:
+                logger.warning("Blacklisted token used", jti=token_jti)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            # SHARED-HIGH-01 FIX: Fail closed - deny access if we can't verify token status
+            logger.error("Error checking token blacklist - denying access for security", jti=token_jti, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service temporarily unavailable. Please try again.",
+            )
+
+    # Check user-level revocation
+    if user_id and token_iat:
+        try:
+            token_iat_dt = datetime.fromtimestamp(token_iat, tz=timezone.utc)
+            user_id_int = int(user_id)
+
+            is_revoked = is_token_revoked_by_user_sync(user_id_int, token_iat_dt)
+
+            if is_revoked:
+                logger.warning("User-revoked token used", user_id=user_id)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            # SHARED-HIGH-01 FIX: Fail closed - deny access if we can't verify token status
+            logger.error("Error checking user token revocation - denying access for security", user_id=user_id, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authentication service temporarily unavailable. Please try again.",
+            )
 
 
 def get_bearer_token(authorization: str | None) -> str:

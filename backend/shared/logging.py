@@ -161,10 +161,83 @@ def get_logger(name: str) -> StructuredLogger:
         from shared.logging import get_logger
         logger = get_logger(__name__)
 
-        logger.info("User logged in", user_id=123, email="user@example.com")
+        # SHARED-HIGH-02 FIX: Use mask_email() for PII protection
+        logger.info("User logged in", user_id=123, email=mask_email("user@example.com"))
         logger.error("Failed to process payment", check_id=456, exc_info=True)
     """
     return logging.getLogger(name)  # type: ignore
+
+
+def mask_email(email: str | None) -> str:
+    """
+    SHARED-HIGH-02 FIX: Mask email address for logging to protect PII.
+
+    Converts "user@example.com" to "us***@example.com"
+    Only shows first 2 characters of local part and full domain for debugging.
+
+    Args:
+        email: The email address to mask.
+
+    Returns:
+        Masked email string safe for logging.
+    """
+    if not email:
+        return "<no-email>"
+
+    try:
+        local, domain = email.split("@", 1)
+        if len(local) <= 2:
+            masked_local = local[0] + "***"
+        else:
+            masked_local = local[:2] + "***"
+        return f"{masked_local}@{domain}"
+    except ValueError:
+        # Not a valid email format
+        return "***@invalid"
+
+
+def mask_jti(jti: str | None) -> str:
+    """
+    SHARED-MED-02 FIX: Mask JWT ID (jti) for logging.
+
+    Shows only first 8 characters for correlation while protecting full token ID.
+    Example: "abc12345-6789-..." → "abc12345..."
+
+    Args:
+        jti: The JWT ID to mask.
+
+    Returns:
+        Masked JTI string safe for logging.
+    """
+    if not jti:
+        return "<no-jti>"
+
+    if len(jti) <= 8:
+        return jti
+    return f"{jti[:8]}..."
+
+
+def mask_user_id(user_id: int | str | None) -> str:
+    """
+    SHARED-MED-02 FIX: Mask user ID for logging in sensitive contexts.
+
+    For general logging, user IDs can be shown. Use this function when
+    logging in security-sensitive contexts where correlation attacks are possible.
+
+    Args:
+        user_id: The user ID to mask.
+
+    Returns:
+        Masked user ID string safe for logging.
+    """
+    if user_id is None:
+        return "<no-user>"
+
+    # Convert to string and show first 2 digits + ***
+    user_str = str(user_id)
+    if len(user_str) <= 2:
+        return user_str[0] + "***"
+    return f"{user_str[:2]}***"
 
 
 # Pre-configured loggers for common modules

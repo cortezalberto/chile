@@ -65,3 +65,20 @@ def get_db_context() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def safe_commit(db: Session) -> None:
+    """
+    HIGH-01 FIX: Safe commit with automatic rollback on failure.
+
+    Usage:
+        from rest_api.db import safe_commit
+        safe_commit(db)
+
+    Raises the original exception after rolling back.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise

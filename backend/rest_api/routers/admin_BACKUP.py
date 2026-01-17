@@ -23,6 +23,7 @@ from rest_api.models import (
     Product,
     BranchProduct,
     Allergen,
+    AllergenCrossReaction,
     ProductAllergen,
     Table,
     User,
@@ -35,8 +36,23 @@ from rest_api.models import (
     BranchCategoryExclusion,
     BranchSubcategoryExclusion,
     WaiterSectorAssignment,
+    # Canonical Product Model (Phases 1-4)
+    Ingredient,
+    ProductIngredient,
+    ProductDietaryProfile,
+    CookingMethod,
+    FlavorProfile,
+    TextureProfile,
+    ProductCookingMethod,
+    ProductFlavor,
+    ProductTexture,
+    ProductCooking,
+    ProductModification,
+    ProductWarning,
+    ProductRAGConfig,
 )
 from shared.auth import current_user_context as current_user
+from shared.password import hash_password
 from rest_api.services.audit import log_create, log_update, log_delete, serialize_model
 from rest_api.services.admin_events import publish_entity_deleted
 from rest_api.services.soft_delete_service import (
@@ -49,6 +65,7 @@ from rest_api.services.soft_delete_service import (
     find_deleted_entity,
     filter_active,
 )
+from rest_api.routers.admin_base import get_user_id, get_user_email
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -199,6 +216,10 @@ class ProductOutput(BaseModel):
     allergen_ids: list[int] = []
     # New format with presence types (Phase 0)
     allergens: list["AllergenPresenceOutput"] = []
+    # Recipe linkage (propuesta1.md)
+    recipe_id: int | None = None
+    inherits_from_recipe: bool = False
+    recipe_name: str | None = None  # For display convenience
     is_active: bool
     created_at: datetime
     branch_prices: list[BranchPriceOutput] = []
@@ -232,6 +253,64 @@ class AllergenPresenceOutput(BaseModel):
     presence_type: str  # contains, may_contain, free_from
 
 
+# =============================================================================
+# Canonical Product Model Inputs (Phases 1-4)
+# =============================================================================
+
+
+class ProductIngredientInput(BaseModel):
+    """Input for product ingredient relationship."""
+    ingredient_id: int
+    is_main: bool = False  # Main ingredient flag
+    notes: str | None = None  # e.g., "fresco", "sin semillas"
+
+
+class DietaryProfileInput(BaseModel):
+    """Input for product dietary profile."""
+    is_vegetarian: bool = False
+    is_vegan: bool = False
+    is_gluten_free: bool = False
+    is_dairy_free: bool = False
+    is_celiac_safe: bool = False
+    is_keto: bool = False
+    is_low_sodium: bool = False
+
+
+class CookingInfoInput(BaseModel):
+    """Input for product cooking information."""
+    cooking_method_ids: list[int] = []  # IDs of CookingMethod
+    uses_oil: bool = False
+    prep_time_minutes: int | None = None
+    cook_time_minutes: int | None = None
+
+
+class SensoryProfileInput(BaseModel):
+    """Input for product sensory profile (flavors and textures)."""
+    flavor_ids: list[int] = []  # IDs of FlavorProfile
+    texture_ids: list[int] = []  # IDs of TextureProfile
+
+
+class ModificationInput(BaseModel):
+    """Input for product modification."""
+    action: str  # "remove" or "substitute"
+    item: str  # e.g., "cebolla", "pan común por pan sin gluten"
+    is_allowed: bool = True
+    extra_cost_cents: int = 0
+
+
+class WarningInput(BaseModel):
+    """Input for product warning."""
+    text: str  # e.g., "Contiene huesos pequeños"
+    severity: str = "info"  # info, warning, danger
+
+
+class RAGConfigInput(BaseModel):
+    """Input for product RAG chatbot configuration."""
+    risk_level: str = "low"  # low, medium, high
+    custom_disclaimer: str | None = None
+    highlight_allergens: bool = True
+
+
 class ProductCreate(BaseModel):
     name: str
     description: str | None = None
@@ -248,6 +327,17 @@ class ProductCreate(BaseModel):
     allergens: list[AllergenPresenceInput] = []
     is_active: bool = True
     branch_prices: list[BranchPriceInput] = []
+    # Recipe linkage (propuesta1.md)
+    recipe_id: int | None = None
+    inherits_from_recipe: bool = False
+    # Canonical Product Model (Phases 1-4)
+    ingredients: list[ProductIngredientInput] = []  # Phase 1
+    dietary_profile: DietaryProfileInput | None = None  # Phase 2
+    cooking_info: CookingInfoInput | None = None  # Phase 3
+    sensory_profile: SensoryProfileInput | None = None  # Phase 3
+    modifications: list[ModificationInput] = []  # Phase 4
+    warnings: list[WarningInput] = []  # Phase 4
+    rag_config: RAGConfigInput | None = None  # Phase 4
 
 
 class ProductUpdate(BaseModel):
@@ -266,6 +356,26 @@ class ProductUpdate(BaseModel):
     allergens: list[AllergenPresenceInput] | None = None
     is_active: bool | None = None
     branch_prices: list[BranchPriceInput] | None = None
+    # Recipe linkage (propuesta1.md)
+    recipe_id: int | None = None
+    inherits_from_recipe: bool | None = None
+    # Canonical Product Model (Phases 1-4)
+    ingredients: list[ProductIngredientInput] | None = None  # Phase 1
+    dietary_profile: DietaryProfileInput | None = None  # Phase 2
+    cooking_info: CookingInfoInput | None = None  # Phase 3
+    sensory_profile: SensoryProfileInput | None = None  # Phase 3
+    modifications: list[ModificationInput] | None = None  # Phase 4
+    warnings: list[WarningInput] | None = None  # Phase 4
+    rag_config: RAGConfigInput | None = None  # Phase 4
+
+
+class CrossReactionInfo(BaseModel):
+    """Cross-reaction summary for allergen output."""
+    id: int
+    cross_reacts_with_id: int
+    cross_reacts_with_name: str
+    probability: str
+    notes: str | None = None
 
 
 class AllergenOutput(BaseModel):
@@ -274,7 +384,10 @@ class AllergenOutput(BaseModel):
     name: str
     icon: str | None = None
     description: str | None = None
+    is_mandatory: bool = False  # EU 1169/2011 - 14 mandatory allergens
+    severity: str = "moderate"  # mild, moderate, severe, life_threatening
     is_active: bool
+    cross_reactions: list[CrossReactionInfo] | None = None
 
     class Config:
         from_attributes = True
@@ -284,6 +397,8 @@ class AllergenCreate(BaseModel):
     name: str
     icon: str | None = None
     description: str | None = None
+    is_mandatory: bool = False
+    severity: str = "moderate"
     is_active: bool = True
 
 
@@ -291,7 +406,39 @@ class AllergenUpdate(BaseModel):
     name: str | None = None
     icon: str | None = None
     description: str | None = None
+    is_mandatory: bool | None = None
+    severity: str | None = None
     is_active: bool | None = None
+
+
+class CrossReactionCreate(BaseModel):
+    """Create a cross-reaction between two allergens."""
+    allergen_id: int
+    cross_reacts_with_id: int
+    probability: str = "medium"  # high, medium, low
+    notes: str | None = None
+
+
+class CrossReactionUpdate(BaseModel):
+    """Update a cross-reaction."""
+    probability: str | None = None
+    notes: str | None = None
+
+
+class CrossReactionOutput(BaseModel):
+    """Full cross-reaction output."""
+    id: int
+    tenant_id: int
+    allergen_id: int
+    allergen_name: str
+    cross_reacts_with_id: int
+    cross_reacts_with_name: str
+    probability: str
+    notes: str | None = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
 
 
 class TableOutput(BaseModel):
@@ -657,7 +804,7 @@ def create_branch(
         **body.model_dump(),
     )
     # Set audit fields
-    set_created_by(branch, user.get("user_id"), user.get("email", ""))
+    set_created_by(branch, get_user_id(user), get_user_email(user))
     db.add(branch)
     db.commit()
     db.refresh(branch)
@@ -696,7 +843,7 @@ def update_branch(
         setattr(branch, key, value)
 
     # Set audit fields
-    set_updated_by(branch, user.get("user_id"), user.get("email", ""))
+    set_updated_by(branch, get_user_id(user), get_user_email(user))
 
     db.commit()
     db.refresh(branch)
@@ -733,7 +880,7 @@ def delete_branch(
     tenant_id = branch.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, branch, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, branch, get_user_id(user), get_user_email(user))
 
     # Publish delete event (no cascade - children remain active but hidden)
     publish_entity_deleted(
@@ -741,7 +888,7 @@ def delete_branch(
         entity_type="branch",
         entity_id=branch_id,
         entity_name=branch_name,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -831,7 +978,7 @@ def create_category(
         is_active=body.is_active,
     )
     # Set audit fields
-    set_created_by(category, user.get("user_id"), user.get("email", ""))
+    set_created_by(category, get_user_id(user), get_user_email(user))
     db.add(category)
     db.commit()
     db.refresh(category)
@@ -864,7 +1011,7 @@ def update_category(
         setattr(category, key, value)
 
     # Set audit fields
-    set_updated_by(category, user.get("user_id"), user.get("email", ""))
+    set_updated_by(category, get_user_id(user), get_user_email(user))
 
     db.commit()
     db.refresh(category)
@@ -902,7 +1049,7 @@ def delete_category(
     tenant_id = category.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, category, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, category, get_user_id(user), get_user_email(user))
 
     # Publish delete event (no cascade - children remain active but hidden)
     publish_entity_deleted(
@@ -911,7 +1058,7 @@ def delete_category(
         entity_id=category_id,
         entity_name=category_name,
         branch_id=branch_id,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -1000,7 +1147,7 @@ def create_subcategory(
         is_active=body.is_active,
     )
     # Set audit fields
-    set_created_by(subcategory, user.get("user_id"), user.get("email", ""))
+    set_created_by(subcategory, get_user_id(user), get_user_email(user))
     db.add(subcategory)
     db.commit()
     db.refresh(subcategory)
@@ -1033,7 +1180,7 @@ def update_subcategory(
         setattr(subcategory, key, value)
 
     # Set audit fields
-    set_updated_by(subcategory, user.get("user_id"), user.get("email", ""))
+    set_updated_by(subcategory, get_user_id(user), get_user_email(user))
 
     db.commit()
     db.refresh(subcategory)
@@ -1076,7 +1223,7 @@ def delete_subcategory(
     tenant_id = subcategory.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, subcategory, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, subcategory, get_user_id(user), get_user_email(user))
 
     # Publish delete event (no cascade - children remain active but hidden)
     publish_entity_deleted(
@@ -1085,7 +1232,7 @@ def delete_subcategory(
         entity_id=subcategory_id,
         entity_name=subcategory_name,
         branch_id=branch_id,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -1165,6 +1312,16 @@ def _build_product_output(product: Product, db: Session = None, preloaded_branch
                     presence_type=pa.presence_type,
                 ))
 
+    # Get recipe name if linked (propuesta1.md)
+    recipe_name = None
+    if product.recipe_id:
+        if hasattr(product, 'recipe') and product.recipe:
+            recipe_name = product.recipe.name
+        elif db is not None:
+            from rest_api.models import Recipe
+            recipe = db.scalar(select(Recipe).where(Recipe.id == product.recipe_id))
+            recipe_name = recipe.name if recipe else None
+
     return ProductOutput(
         id=product.id,
         tenant_id=product.tenant_id,
@@ -1179,6 +1336,10 @@ def _build_product_output(product: Product, db: Session = None, preloaded_branch
         seal=product.seal,
         allergen_ids=allergen_ids,
         allergens=allergens,
+        # Recipe linkage (propuesta1.md)
+        recipe_id=product.recipe_id,
+        inherits_from_recipe=product.inherits_from_recipe,
+        recipe_name=recipe_name,
         is_active=product.is_active,
         created_at=product.created_at,
         branch_prices=branch_prices,
@@ -1194,10 +1355,11 @@ def list_products(
     user: dict = Depends(current_user),
 ) -> list[ProductOutput]:
     """List products, optionally filtered by category or branch."""
-    # Eager load branch_products and product_allergens to avoid N+1 queries
+    # Eager load branch_products, product_allergens, and recipe to avoid N+1 queries
     query = select(Product).options(
         selectinload(Product.branch_products),
         selectinload(Product.product_allergens).joinedload(ProductAllergen.allergen),
+        joinedload(Product.recipe),  # propuesta1.md - Recipe linkage
     ).where(Product.tenant_id == user["tenant_id"])
 
     if not include_deleted:
@@ -1221,11 +1383,12 @@ def get_product(
     user: dict = Depends(current_user),
 ) -> ProductOutput:
     """Get a specific product with branch prices and allergens."""
-    # Eager load branch_products and product_allergens to avoid additional queries
+    # Eager load branch_products, product_allergens, and recipe to avoid additional queries
     product = db.scalar(
         select(Product).options(
             selectinload(Product.branch_products),
             selectinload(Product.product_allergens).joinedload(ProductAllergen.allergen),
+            joinedload(Product.recipe),  # propuesta1.md - Recipe linkage
         ).where(
             Product.id == product_id,
             Product.tenant_id == user["tenant_id"],
@@ -1285,6 +1448,22 @@ def create_product(
     elif body.allergen_ids:
         allergen_ids_for_legacy = body.allergen_ids
 
+    # Validate recipe_id if provided (propuesta1.md)
+    if body.recipe_id:
+        from rest_api.models import Recipe
+        recipe = db.scalar(
+            select(Recipe).where(
+                Recipe.id == body.recipe_id,
+                Recipe.tenant_id == user["tenant_id"],
+                Recipe.is_active == True,
+            )
+        )
+        if not recipe:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid recipe_id",
+            )
+
     product = Product(
         tenant_id=user["tenant_id"],
         name=body.name,
@@ -1299,9 +1478,12 @@ def create_product(
         # Legacy field (backward compatible)
         allergen_ids=json.dumps(allergen_ids_for_legacy) if allergen_ids_for_legacy else None,
         is_active=body.is_active,
+        # Recipe linkage (propuesta1.md)
+        recipe_id=body.recipe_id,
+        inherits_from_recipe=body.inherits_from_recipe,
     )
     # Set audit fields
-    set_created_by(product, user.get("user_id"), user.get("email", ""))
+    set_created_by(product, get_user_id(user), get_user_email(user))
     db.add(product)
     db.flush()  # Get product ID
 
@@ -1335,7 +1517,7 @@ def create_product(
                 allergen_id=allergen_input.allergen_id,
                 presence_type=allergen_input.presence_type,
             )
-            set_created_by(product_allergen, user.get("user_id"), user.get("email", ""))
+            set_created_by(product_allergen, get_user_id(user), get_user_email(user))
             db.add(product_allergen)
     elif body.allergen_ids:
         # Old format: migrate allergen_ids to ProductAllergen as "contains"
@@ -1360,7 +1542,7 @@ def create_product(
                 allergen_id=allergen_id,
                 presence_type="contains",  # Default to "contains" for legacy format
             )
-            set_created_by(product_allergen, user.get("user_id"), user.get("email", ""))
+            set_created_by(product_allergen, get_user_id(user), get_user_email(user))
             db.add(product_allergen)
 
     # Create branch prices
@@ -1387,6 +1569,174 @@ def create_product(
             is_available=bp.is_available,
         )
         db.add(branch_product)
+
+    # Sync allergens from recipe if inherits_from_recipe is True (propuesta1.md)
+    # Note: This supplements any manually provided allergens with recipe allergens
+    if body.inherits_from_recipe and body.recipe_id:
+        from rest_api.services.recipe_product_sync import sync_product_from_recipe
+        sync_product_from_recipe(db, product, get_user_id(user), get_user_email(user))
+
+    # ==========================================================================
+    # Canonical Product Model Data (Phases 1-4)
+    # ==========================================================================
+
+    # Phase 1: Ingredients
+    if body.ingredients:
+        for ing_input in body.ingredients:
+            # Verify ingredient exists and belongs to tenant
+            ingredient = db.scalar(
+                select(Ingredient).where(
+                    Ingredient.id == ing_input.ingredient_id,
+                    Ingredient.tenant_id == user["tenant_id"],
+                    Ingredient.is_active == True,
+                )
+            )
+            if not ingredient:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid ingredient_id: {ing_input.ingredient_id}",
+                )
+            product_ingredient = ProductIngredient(
+                tenant_id=user["tenant_id"],
+                product_id=product.id,
+                ingredient_id=ing_input.ingredient_id,
+                is_main=ing_input.is_main,
+                notes=ing_input.notes,
+            )
+            set_created_by(product_ingredient, get_user_id(user), get_user_email(user))
+            db.add(product_ingredient)
+
+    # Phase 2: Dietary Profile
+    if body.dietary_profile:
+        dietary = ProductDietaryProfile(
+            product_id=product.id,
+            is_vegetarian=body.dietary_profile.is_vegetarian,
+            is_vegan=body.dietary_profile.is_vegan,
+            is_gluten_free=body.dietary_profile.is_gluten_free,
+            is_dairy_free=body.dietary_profile.is_dairy_free,
+            is_celiac_safe=body.dietary_profile.is_celiac_safe,
+            is_keto=body.dietary_profile.is_keto,
+            is_low_sodium=body.dietary_profile.is_low_sodium,
+        )
+        set_created_by(dietary, get_user_id(user), get_user_email(user))
+        db.add(dietary)
+
+    # Phase 3: Cooking Information
+    if body.cooking_info:
+        # Create cooking methods M:N relationships
+        for method_id in body.cooking_info.cooking_method_ids:
+            # Verify cooking method exists
+            method = db.scalar(
+                select(CookingMethod).where(
+                    CookingMethod.id == method_id,
+                    CookingMethod.is_active == True,
+                )
+            )
+            if not method:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid cooking_method_id: {method_id}",
+                )
+            db.add(ProductCookingMethod(product_id=product.id, cooking_method_id=method_id))
+
+        # Create ProductCooking record
+        cooking = ProductCooking(
+            product_id=product.id,
+            uses_oil=body.cooking_info.uses_oil,
+            prep_time_minutes=body.cooking_info.prep_time_minutes,
+            cook_time_minutes=body.cooking_info.cook_time_minutes,
+        )
+        set_created_by(cooking, get_user_id(user), get_user_email(user))
+        db.add(cooking)
+
+    # Phase 3: Sensory Profile
+    if body.sensory_profile:
+        # Flavors
+        for flavor_id in body.sensory_profile.flavor_ids:
+            flavor = db.scalar(
+                select(FlavorProfile).where(
+                    FlavorProfile.id == flavor_id,
+                    FlavorProfile.is_active == True,
+                )
+            )
+            if not flavor:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid flavor_profile_id: {flavor_id}",
+                )
+            db.add(ProductFlavor(product_id=product.id, flavor_profile_id=flavor_id))
+
+        # Textures
+        for texture_id in body.sensory_profile.texture_ids:
+            texture = db.scalar(
+                select(TextureProfile).where(
+                    TextureProfile.id == texture_id,
+                    TextureProfile.is_active == True,
+                )
+            )
+            if not texture:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid texture_profile_id: {texture_id}",
+                )
+            db.add(ProductTexture(product_id=product.id, texture_profile_id=texture_id))
+
+    # Phase 4: Modifications
+    for mod_input in body.modifications:
+        if mod_input.action not in ("remove", "substitute"):
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid modification action: {mod_input.action}. Must be 'remove' or 'substitute'",
+            )
+        modification = ProductModification(
+            tenant_id=user["tenant_id"],
+            product_id=product.id,
+            action=mod_input.action,
+            item=mod_input.item,
+            is_allowed=mod_input.is_allowed,
+            extra_cost_cents=mod_input.extra_cost_cents,
+        )
+        set_created_by(modification, get_user_id(user), get_user_email(user))
+        db.add(modification)
+
+    # Phase 4: Warnings
+    for warn_input in body.warnings:
+        if warn_input.severity not in ("info", "warning", "danger"):
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid warning severity: {warn_input.severity}. Must be 'info', 'warning', or 'danger'",
+            )
+        warning = ProductWarning(
+            tenant_id=user["tenant_id"],
+            product_id=product.id,
+            text=warn_input.text,
+            severity=warn_input.severity,
+        )
+        set_created_by(warning, get_user_id(user), get_user_email(user))
+        db.add(warning)
+
+    # Phase 4: RAG Configuration
+    if body.rag_config:
+        if body.rag_config.risk_level not in ("low", "medium", "high"):
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid risk_level: {body.rag_config.risk_level}. Must be 'low', 'medium', or 'high'",
+            )
+        rag_config = ProductRAGConfig(
+            product_id=product.id,
+            risk_level=body.rag_config.risk_level,
+            custom_disclaimer=body.rag_config.custom_disclaimer,
+            highlight_allergens=body.rag_config.highlight_allergens,
+        )
+        set_created_by(rag_config, get_user_id(user), get_user_email(user))
+        db.add(rag_config)
 
     db.commit()
     db.refresh(product)
@@ -1418,6 +1768,31 @@ def update_product(
 
     update_data = body.model_dump(exclude_unset=True)
 
+    # Handle recipe linkage (propuesta1.md)
+    recipe_id = update_data.pop("recipe_id", None)
+    inherits_from_recipe = update_data.pop("inherits_from_recipe", None)
+
+    # Validate recipe_id if provided
+    if recipe_id is not None:
+        if recipe_id:  # Not None and not 0 (unlinking)
+            from rest_api.models import Recipe
+            recipe = db.scalar(
+                select(Recipe).where(
+                    Recipe.id == recipe_id,
+                    Recipe.tenant_id == user["tenant_id"],
+                    Recipe.is_active == True,
+                )
+            )
+            if not recipe:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid recipe_id",
+                )
+        product.recipe_id = recipe_id if recipe_id else None
+
+    if inherits_from_recipe is not None:
+        product.inherits_from_recipe = inherits_from_recipe
+
     # Handle allergens (new format) - Phase 0
     allergens = update_data.pop("allergens", None)
 
@@ -1434,11 +1809,20 @@ def update_product(
     # Handle branch_prices separately
     branch_prices = update_data.pop("branch_prices", None)
 
+    # Handle canonical model fields separately (Phases 1-4)
+    ingredients = update_data.pop("ingredients", None)
+    dietary_profile = update_data.pop("dietary_profile", None)
+    cooking_info = update_data.pop("cooking_info", None)
+    sensory_profile = update_data.pop("sensory_profile", None)
+    modifications = update_data.pop("modifications", None)
+    warnings = update_data.pop("warnings", None)
+    rag_config = update_data.pop("rag_config", None)
+
     for key, value in update_data.items():
         setattr(product, key, value)
 
     # Set audit fields
-    set_updated_by(product, user.get("user_id"), user.get("email", ""))
+    set_updated_by(product, get_user_id(user), get_user_email(user))
 
     # Update allergens if provided (Phase 0 - new format)
     if allergens is not None:
@@ -1480,7 +1864,7 @@ def update_product(
                 allergen_id=allergen_id,
                 presence_type=presence_type,
             )
-            set_created_by(product_allergen, user.get("user_id"), user.get("email", ""))
+            set_created_by(product_allergen, get_user_id(user), get_user_email(user))
             db.add(product_allergen)
 
             # Track allergens that "contains" for legacy field
@@ -1492,6 +1876,21 @@ def update_product(
 
     # Update branch prices if provided
     if branch_prices is not None:
+        # HIGH-01 FIX: Validate that all branch_ids belong to the user's tenant
+        for bp in branch_prices:
+            branch = db.scalar(
+                select(Branch).where(
+                    Branch.id == bp.branch_id,
+                    Branch.tenant_id == user["tenant_id"],
+                    Branch.is_active == True,
+                )
+            )
+            if not branch:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid branch_id: {bp.branch_id}. Branch does not exist or does not belong to your tenant.",
+                )
+
         # Delete existing branch prices
         db.execute(
             BranchProduct.__table__.delete().where(BranchProduct.product_id == product_id)
@@ -1507,6 +1906,243 @@ def update_product(
                 is_available=bp.is_available,
             )
             db.add(branch_product)
+
+    # Sync allergens from recipe if inherits_from_recipe is True (propuesta1.md)
+    if product.inherits_from_recipe and product.recipe_id:
+        from rest_api.services.recipe_product_sync import sync_product_from_recipe
+        sync_product_from_recipe(db, product, get_user_id(user), get_user_email(user))
+
+    # ==========================================================================
+    # Update Canonical Product Model Data (Phases 1-4)
+    # ==========================================================================
+
+    # Phase 1: Ingredients
+    if ingredients is not None:
+        # Delete existing ProductIngredient records
+        db.execute(
+            ProductIngredient.__table__.delete().where(ProductIngredient.product_id == product_id)
+        )
+        for ing_input in ingredients:
+            ing_id = ing_input.get("ingredient_id") if isinstance(ing_input, dict) else ing_input.ingredient_id
+            is_main = ing_input.get("is_main", False) if isinstance(ing_input, dict) else ing_input.is_main
+            notes = ing_input.get("notes") if isinstance(ing_input, dict) else ing_input.notes
+
+            ingredient = db.scalar(
+                select(Ingredient).where(
+                    Ingredient.id == ing_id,
+                    Ingredient.tenant_id == user["tenant_id"],
+                    Ingredient.is_active == True,
+                )
+            )
+            if not ingredient:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid ingredient_id: {ing_id}",
+                )
+            product_ingredient = ProductIngredient(
+                tenant_id=user["tenant_id"],
+                product_id=product_id,
+                ingredient_id=ing_id,
+                is_main=is_main,
+                notes=notes,
+            )
+            set_created_by(product_ingredient, get_user_id(user), get_user_email(user))
+            db.add(product_ingredient)
+
+    # Phase 2: Dietary Profile
+    if dietary_profile is not None:
+        # Delete existing profile
+        db.execute(
+            ProductDietaryProfile.__table__.delete().where(ProductDietaryProfile.product_id == product_id)
+        )
+        # Get values from dict or object
+        if isinstance(dietary_profile, dict):
+            dietary = ProductDietaryProfile(
+                product_id=product_id,
+                is_vegetarian=dietary_profile.get("is_vegetarian", False),
+                is_vegan=dietary_profile.get("is_vegan", False),
+                is_gluten_free=dietary_profile.get("is_gluten_free", False),
+                is_dairy_free=dietary_profile.get("is_dairy_free", False),
+                is_celiac_safe=dietary_profile.get("is_celiac_safe", False),
+                is_keto=dietary_profile.get("is_keto", False),
+                is_low_sodium=dietary_profile.get("is_low_sodium", False),
+            )
+        else:
+            dietary = ProductDietaryProfile(
+                product_id=product_id,
+                is_vegetarian=dietary_profile.is_vegetarian,
+                is_vegan=dietary_profile.is_vegan,
+                is_gluten_free=dietary_profile.is_gluten_free,
+                is_dairy_free=dietary_profile.is_dairy_free,
+                is_celiac_safe=dietary_profile.is_celiac_safe,
+                is_keto=dietary_profile.is_keto,
+                is_low_sodium=dietary_profile.is_low_sodium,
+            )
+        set_created_by(dietary, get_user_id(user), get_user_email(user))
+        db.add(dietary)
+
+    # Phase 3: Cooking Information
+    if cooking_info is not None:
+        # Delete existing cooking methods
+        db.execute(
+            ProductCookingMethod.__table__.delete().where(ProductCookingMethod.product_id == product_id)
+        )
+        # Delete existing cooking info
+        db.execute(
+            ProductCooking.__table__.delete().where(ProductCooking.product_id == product_id)
+        )
+
+        method_ids = cooking_info.get("cooking_method_ids", []) if isinstance(cooking_info, dict) else cooking_info.cooking_method_ids
+        uses_oil = cooking_info.get("uses_oil", False) if isinstance(cooking_info, dict) else cooking_info.uses_oil
+        prep_time = cooking_info.get("prep_time_minutes") if isinstance(cooking_info, dict) else cooking_info.prep_time_minutes
+        cook_time = cooking_info.get("cook_time_minutes") if isinstance(cooking_info, dict) else cooking_info.cook_time_minutes
+
+        for method_id in method_ids:
+            method = db.scalar(
+                select(CookingMethod).where(
+                    CookingMethod.id == method_id,
+                    CookingMethod.is_active == True,
+                )
+            )
+            if not method:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid cooking_method_id: {method_id}",
+                )
+            db.add(ProductCookingMethod(product_id=product_id, cooking_method_id=method_id))
+
+        cooking = ProductCooking(
+            product_id=product_id,
+            uses_oil=uses_oil,
+            prep_time_minutes=prep_time,
+            cook_time_minutes=cook_time,
+        )
+        set_created_by(cooking, get_user_id(user), get_user_email(user))
+        db.add(cooking)
+
+    # Phase 3: Sensory Profile
+    if sensory_profile is not None:
+        # Delete existing sensory data
+        db.execute(
+            ProductFlavor.__table__.delete().where(ProductFlavor.product_id == product_id)
+        )
+        db.execute(
+            ProductTexture.__table__.delete().where(ProductTexture.product_id == product_id)
+        )
+
+        flavor_ids = sensory_profile.get("flavor_ids", []) if isinstance(sensory_profile, dict) else sensory_profile.flavor_ids
+        texture_ids = sensory_profile.get("texture_ids", []) if isinstance(sensory_profile, dict) else sensory_profile.texture_ids
+
+        for flavor_id in flavor_ids:
+            flavor = db.scalar(
+                select(FlavorProfile).where(
+                    FlavorProfile.id == flavor_id,
+                    FlavorProfile.is_active == True,
+                )
+            )
+            if not flavor:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid flavor_profile_id: {flavor_id}",
+                )
+            db.add(ProductFlavor(product_id=product_id, flavor_profile_id=flavor_id))
+
+        for texture_id in texture_ids:
+            texture = db.scalar(
+                select(TextureProfile).where(
+                    TextureProfile.id == texture_id,
+                    TextureProfile.is_active == True,
+                )
+            )
+            if not texture:
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid texture_profile_id: {texture_id}",
+                )
+            db.add(ProductTexture(product_id=product_id, texture_profile_id=texture_id))
+
+    # Phase 4: Modifications
+    if modifications is not None:
+        # Delete existing modifications
+        db.execute(
+            ProductModification.__table__.delete().where(ProductModification.product_id == product_id)
+        )
+        for mod in modifications:
+            action = mod.get("action") if isinstance(mod, dict) else mod.action
+            item = mod.get("item") if isinstance(mod, dict) else mod.item
+            is_allowed = mod.get("is_allowed", True) if isinstance(mod, dict) else mod.is_allowed
+            extra_cost = mod.get("extra_cost_cents", 0) if isinstance(mod, dict) else mod.extra_cost_cents
+
+            if action not in ("remove", "substitute"):
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid modification action: {action}",
+                )
+            modification = ProductModification(
+                tenant_id=user["tenant_id"],
+                product_id=product_id,
+                action=action,
+                item=item,
+                is_allowed=is_allowed,
+                extra_cost_cents=extra_cost,
+            )
+            set_created_by(modification, get_user_id(user), get_user_email(user))
+            db.add(modification)
+
+    # Phase 4: Warnings
+    if warnings is not None:
+        # Delete existing warnings
+        db.execute(
+            ProductWarning.__table__.delete().where(ProductWarning.product_id == product_id)
+        )
+        for warn in warnings:
+            text = warn.get("text") if isinstance(warn, dict) else warn.text
+            severity = warn.get("severity", "info") if isinstance(warn, dict) else warn.severity
+
+            if severity not in ("info", "warning", "danger"):
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid warning severity: {severity}",
+                )
+            warning = ProductWarning(
+                tenant_id=user["tenant_id"],
+                product_id=product_id,
+                text=text,
+                severity=severity,
+            )
+            set_created_by(warning, get_user_id(user), get_user_email(user))
+            db.add(warning)
+
+    # Phase 4: RAG Configuration
+    if rag_config is not None:
+        # Delete existing RAG config
+        db.execute(
+            ProductRAGConfig.__table__.delete().where(ProductRAGConfig.product_id == product_id)
+        )
+        risk_level = rag_config.get("risk_level", "low") if isinstance(rag_config, dict) else rag_config.risk_level
+        custom_disclaimer = rag_config.get("custom_disclaimer") if isinstance(rag_config, dict) else rag_config.custom_disclaimer
+        highlight_allergens = rag_config.get("highlight_allergens", True) if isinstance(rag_config, dict) else rag_config.highlight_allergens
+
+        if risk_level not in ("low", "medium", "high"):
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid risk_level: {risk_level}",
+            )
+        new_rag_config = ProductRAGConfig(
+            product_id=product_id,
+            risk_level=risk_level,
+            custom_disclaimer=custom_disclaimer,
+            highlight_allergens=highlight_allergens,
+        )
+        set_created_by(new_rag_config, get_user_id(user), get_user_email(user))
+        db.add(new_rag_config)
 
     db.commit()
     db.refresh(product)
@@ -1549,7 +2185,7 @@ def delete_product(
     tenant_id = product.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, product, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, product, get_user_id(user), get_user_email(user))
 
     # Publish delete event
     publish_entity_deleted(
@@ -1558,7 +2194,7 @@ def delete_product(
         entity_id=product_id,
         entity_name=product_name,
         branch_id=branch_id,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -1567,20 +2203,129 @@ def delete_product(
 # =============================================================================
 
 
+def _build_allergen_output(allergen: Allergen, db: Session) -> AllergenOutput:
+    """Build AllergenOutput with cross-reactions (makes N+1 queries - use for single allergen)."""
+    # Get cross-reactions for this allergen
+    cross_reactions = db.execute(
+        select(AllergenCrossReaction, Allergen)
+        .join(Allergen, AllergenCrossReaction.cross_reacts_with_id == Allergen.id)
+        .where(
+            AllergenCrossReaction.allergen_id == allergen.id,
+            AllergenCrossReaction.is_active == True,
+            Allergen.is_active == True,
+        )
+    ).all()
+
+    cross_reaction_infos = [
+        CrossReactionInfo(
+            id=cr.AllergenCrossReaction.id,
+            cross_reacts_with_id=cr.AllergenCrossReaction.cross_reacts_with_id,
+            cross_reacts_with_name=cr.Allergen.name,
+            probability=cr.AllergenCrossReaction.probability,
+            notes=cr.AllergenCrossReaction.notes,
+        )
+        for cr in cross_reactions
+    ]
+
+    return AllergenOutput(
+        id=allergen.id,
+        tenant_id=allergen.tenant_id,
+        name=allergen.name,
+        icon=allergen.icon,
+        description=allergen.description,
+        is_mandatory=allergen.is_mandatory,
+        severity=allergen.severity,
+        is_active=allergen.is_active,
+        cross_reactions=cross_reaction_infos if cross_reaction_infos else None,
+    )
+
+
+def _build_allergen_output_optimized(allergen: Allergen) -> AllergenOutput:
+    """
+    CRIT-ALG-01 FIX: Build AllergenOutput from pre-loaded relationships.
+
+    Use this when allergen was loaded with selectinload(cross_reactions_from).
+    Avoids N+1 queries when listing multiple allergens.
+    """
+    cross_reaction_infos = []
+    # Use pre-loaded relationship
+    for cr in allergen.cross_reactions_from:
+        if cr.is_active and cr.cross_reacts_with and cr.cross_reacts_with.is_active:
+            cross_reaction_infos.append(
+                CrossReactionInfo(
+                    id=cr.id,
+                    cross_reacts_with_id=cr.cross_reacts_with_id,
+                    cross_reacts_with_name=cr.cross_reacts_with.name,
+                    probability=cr.probability,
+                    notes=cr.notes,
+                )
+            )
+
+    return AllergenOutput(
+        id=allergen.id,
+        tenant_id=allergen.tenant_id,
+        name=allergen.name,
+        icon=allergen.icon,
+        description=allergen.description,
+        is_mandatory=allergen.is_mandatory,
+        severity=allergen.severity,
+        is_active=allergen.is_active,
+        cross_reactions=cross_reaction_infos if cross_reaction_infos else None,
+    )
+
+
 @router.get("/allergens", response_model=list[AllergenOutput])
 def list_allergens(
     include_deleted: bool = False,
+    mandatory_only: bool = False,
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ) -> list[AllergenOutput]:
-    """List all allergens for the tenant."""
-    query = select(Allergen).where(Allergen.tenant_id == user["tenant_id"])
+    """List all allergens for the tenant.
+
+    CRIT-ALG-01 FIX: Uses selectinload to prevent N+1 queries when
+    building allergen outputs with cross_reactions.
+    """
+    query = (
+        select(Allergen)
+        .options(
+            # CRIT-ALG-01 FIX: Eager load cross_reactions to prevent N+1
+            selectinload(Allergen.cross_reactions_from)
+            .joinedload(AllergenCrossReaction.cross_reacts_with)
+        )
+        .where(Allergen.tenant_id == user["tenant_id"])
+    )
 
     if not include_deleted:
         query = query.where(Allergen.is_active == True)
 
-    allergens = db.execute(query.order_by(Allergen.name)).scalars().all()
-    return [AllergenOutput.model_validate(a) for a in allergens]
+    if mandatory_only:
+        query = query.where(Allergen.is_mandatory == True)
+
+    allergens = db.execute(query.order_by(Allergen.name)).scalars().unique().all()
+    return [_build_allergen_output_optimized(a) for a in allergens]
+
+
+@router.get("/allergens/{allergen_id}", response_model=AllergenOutput)
+def get_allergen(
+    allergen_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> AllergenOutput:
+    """Get a single allergen by ID with cross-reactions."""
+    allergen = db.scalar(
+        select(Allergen).where(
+            Allergen.id == allergen_id,
+            Allergen.tenant_id == user["tenant_id"],
+            Allergen.is_active == True,
+        )
+    )
+    if not allergen:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Allergen not found",
+        )
+    return _build_allergen_output(allergen, db)
 
 
 @router.post("/allergens", response_model=AllergenOutput, status_code=status.HTTP_201_CREATED)
@@ -1595,11 +2340,11 @@ def create_allergen(
         **body.model_dump(),
     )
     # Set audit fields
-    set_created_by(allergen, user.get("user_id"), user.get("email", ""))
+    set_created_by(allergen, get_user_id(user), get_user_email(user))
     db.add(allergen)
     db.commit()
     db.refresh(allergen)
-    return AllergenOutput.model_validate(allergen)
+    return _build_allergen_output(allergen, db)
 
 
 @router.patch("/allergens/{allergen_id}", response_model=AllergenOutput)
@@ -1628,11 +2373,11 @@ def update_allergen(
         setattr(allergen, key, value)
 
     # Set audit fields
-    set_updated_by(allergen, user.get("user_id"), user.get("email", ""))
+    set_updated_by(allergen, get_user_id(user), get_user_email(user))
 
     db.commit()
     db.refresh(allergen)
-    return AllergenOutput.model_validate(allergen)
+    return _build_allergen_output(allergen, db)
 
 
 @router.delete("/allergens/{allergen_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1665,7 +2410,7 @@ def delete_allergen(
     tenant_id = allergen.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, allergen, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, allergen, get_user_id(user), get_user_email(user))
 
     # Publish delete event (allergens are tenant-wide, no branch_id)
     publish_entity_deleted(
@@ -1673,8 +2418,235 @@ def delete_allergen(
         entity_type="allergen",
         entity_id=allergen_id,
         entity_name=allergen_name,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
+
+
+# =============================================================================
+# Cross-Reaction Endpoints
+# =============================================================================
+
+
+@router.get("/allergens/cross-reactions", response_model=list[CrossReactionOutput])
+def list_cross_reactions(
+    allergen_id: int | None = None,
+    include_deleted: bool = False,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> list[CrossReactionOutput]:
+    """
+    List all cross-reactions for the tenant.
+    Optionally filter by allergen_id to get cross-reactions for a specific allergen.
+    """
+    query = (
+        select(AllergenCrossReaction, Allergen)
+        .join(Allergen, AllergenCrossReaction.cross_reacts_with_id == Allergen.id)
+        .where(AllergenCrossReaction.tenant_id == user["tenant_id"])
+    )
+
+    if not include_deleted:
+        query = query.where(AllergenCrossReaction.is_active == True)
+
+    if allergen_id:
+        query = query.where(AllergenCrossReaction.allergen_id == allergen_id)
+
+    results = db.execute(query.order_by(AllergenCrossReaction.allergen_id)).all()
+
+    # Get allergen names for the primary allergen
+    allergen_names = {}
+    allergen_ids = {r.AllergenCrossReaction.allergen_id for r in results}
+    if allergen_ids:
+        allergens = db.execute(
+            select(Allergen).where(Allergen.id.in_(allergen_ids))
+        ).scalars().all()
+        allergen_names = {a.id: a.name for a in allergens}
+
+    return [
+        CrossReactionOutput(
+            id=r.AllergenCrossReaction.id,
+            tenant_id=r.AllergenCrossReaction.tenant_id,
+            allergen_id=r.AllergenCrossReaction.allergen_id,
+            allergen_name=allergen_names.get(r.AllergenCrossReaction.allergen_id, ""),
+            cross_reacts_with_id=r.AllergenCrossReaction.cross_reacts_with_id,
+            cross_reacts_with_name=r.Allergen.name,
+            probability=r.AllergenCrossReaction.probability,
+            notes=r.AllergenCrossReaction.notes,
+            is_active=r.AllergenCrossReaction.is_active,
+        )
+        for r in results
+    ]
+
+
+@router.post("/allergens/cross-reactions", response_model=CrossReactionOutput, status_code=status.HTTP_201_CREATED)
+def create_cross_reaction(
+    body: CrossReactionCreate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> CrossReactionOutput:
+    """
+    Create a cross-reaction between two allergens.
+    Example: Latex (allergen_id) cross-reacts with Avocado (cross_reacts_with_id).
+    """
+    tenant_id = user["tenant_id"]
+
+    # Validate both allergens exist
+    allergen = db.scalar(
+        select(Allergen).where(
+            Allergen.id == body.allergen_id,
+            Allergen.tenant_id == tenant_id,
+            Allergen.is_active == True,
+        )
+    )
+    if not allergen:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Primary allergen not found",
+        )
+
+    cross_allergen = db.scalar(
+        select(Allergen).where(
+            Allergen.id == body.cross_reacts_with_id,
+            Allergen.tenant_id == tenant_id,
+            Allergen.is_active == True,
+        )
+    )
+    if not cross_allergen:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cross-reaction allergen not found",
+        )
+
+    # Check if cross-reaction already exists
+    existing = db.scalar(
+        select(AllergenCrossReaction).where(
+            AllergenCrossReaction.allergen_id == body.allergen_id,
+            AllergenCrossReaction.cross_reacts_with_id == body.cross_reacts_with_id,
+            AllergenCrossReaction.tenant_id == tenant_id,
+        )
+    )
+    if existing:
+        if existing.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cross-reaction already exists",
+            )
+        # Restore soft-deleted record
+        existing.restore(get_user_id(user) or 0, get_user_email(user))
+        existing.probability = body.probability
+        existing.notes = body.notes
+        db.commit()
+        db.refresh(existing)
+        return CrossReactionOutput(
+            id=existing.id,
+            tenant_id=existing.tenant_id,
+            allergen_id=existing.allergen_id,
+            allergen_name=allergen.name,
+            cross_reacts_with_id=existing.cross_reacts_with_id,
+            cross_reacts_with_name=cross_allergen.name,
+            probability=existing.probability,
+            notes=existing.notes,
+            is_active=existing.is_active,
+        )
+
+    # Create new cross-reaction
+    cross_reaction = AllergenCrossReaction(
+        tenant_id=tenant_id,
+        allergen_id=body.allergen_id,
+        cross_reacts_with_id=body.cross_reacts_with_id,
+        probability=body.probability,
+        notes=body.notes,
+    )
+    set_created_by(cross_reaction, get_user_id(user), get_user_email(user))
+    db.add(cross_reaction)
+    db.commit()
+    db.refresh(cross_reaction)
+
+    return CrossReactionOutput(
+        id=cross_reaction.id,
+        tenant_id=cross_reaction.tenant_id,
+        allergen_id=cross_reaction.allergen_id,
+        allergen_name=allergen.name,
+        cross_reacts_with_id=cross_reaction.cross_reacts_with_id,
+        cross_reacts_with_name=cross_allergen.name,
+        probability=cross_reaction.probability,
+        notes=cross_reaction.notes,
+        is_active=cross_reaction.is_active,
+    )
+
+
+@router.patch("/allergens/cross-reactions/{cross_reaction_id}", response_model=CrossReactionOutput)
+def update_cross_reaction(
+    cross_reaction_id: int,
+    body: CrossReactionUpdate,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> CrossReactionOutput:
+    """Update a cross-reaction's probability or notes."""
+    cross_reaction = db.scalar(
+        select(AllergenCrossReaction).where(
+            AllergenCrossReaction.id == cross_reaction_id,
+            AllergenCrossReaction.tenant_id == user["tenant_id"],
+            AllergenCrossReaction.is_active == True,
+        )
+    )
+    if not cross_reaction:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cross-reaction not found",
+        )
+
+    update_data = body.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(cross_reaction, key, value)
+
+    set_updated_by(cross_reaction, get_user_id(user), get_user_email(user))
+    db.commit()
+    db.refresh(cross_reaction)
+
+    # Get allergen names
+    allergen = db.scalar(select(Allergen).where(Allergen.id == cross_reaction.allergen_id))
+    cross_allergen = db.scalar(select(Allergen).where(Allergen.id == cross_reaction.cross_reacts_with_id))
+
+    return CrossReactionOutput(
+        id=cross_reaction.id,
+        tenant_id=cross_reaction.tenant_id,
+        allergen_id=cross_reaction.allergen_id,
+        allergen_name=allergen.name if allergen else "",
+        cross_reacts_with_id=cross_reaction.cross_reacts_with_id,
+        cross_reacts_with_name=cross_allergen.name if cross_allergen else "",
+        probability=cross_reaction.probability,
+        notes=cross_reaction.notes,
+        is_active=cross_reaction.is_active,
+    )
+
+
+@router.delete("/allergens/cross-reactions/{cross_reaction_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_cross_reaction(
+    cross_reaction_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> None:
+    """Soft delete a cross-reaction. Requires ADMIN role."""
+    if "ADMIN" not in user["roles"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+
+    cross_reaction = db.scalar(
+        select(AllergenCrossReaction).where(
+            AllergenCrossReaction.id == cross_reaction_id,
+            AllergenCrossReaction.tenant_id == user["tenant_id"],
+            AllergenCrossReaction.is_active == True,
+        )
+    )
+    if not cross_reaction:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cross-reaction not found",
+        )
+
+    soft_delete(db, cross_reaction, get_user_id(user), get_user_email(user))
 
 
 # =============================================================================
@@ -1702,6 +2674,28 @@ def list_tables(
     return [TableOutput.model_validate(t) for t in tables]
 
 
+@router.get("/tables/{table_id}", response_model=TableOutput)
+def get_table(
+    table_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(current_user),
+) -> TableOutput:
+    """Get a specific table by ID."""
+    table = db.scalar(
+        select(Table).where(
+            Table.id == table_id,
+            Table.tenant_id == user["tenant_id"],
+            Table.is_active == True,
+        )
+    )
+    if not table:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Table not found",
+        )
+    return TableOutput.model_validate(table)
+
+
 @router.post("/tables", response_model=TableOutput, status_code=status.HTTP_201_CREATED)
 def create_table(
     body: TableCreate,
@@ -1727,7 +2721,7 @@ def create_table(
         **body.model_dump(),
     )
     # Set audit fields
-    set_created_by(table, user.get("user_id"), user.get("email", ""))
+    set_created_by(table, get_user_id(user), get_user_email(user))
     db.add(table)
     db.commit()
     db.refresh(table)
@@ -1760,7 +2754,7 @@ def update_table(
         setattr(table, key, value)
 
     # Set audit fields
-    set_updated_by(table, user.get("user_id"), user.get("email", ""))
+    set_updated_by(table, get_user_id(user), get_user_email(user))
 
     db.commit()
     db.refresh(table)
@@ -1798,7 +2792,7 @@ def delete_table(
     tenant_id = table.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, table, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, table, get_user_id(user), get_user_email(user))
 
     # Publish delete event
     publish_entity_deleted(
@@ -1807,7 +2801,7 @@ def delete_table(
         entity_id=table_id,
         entity_name=table_code,
         branch_id=branch_id,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -1934,7 +2928,7 @@ def create_sector(
         prefix=prefix,
         display_order=(max_order or 0) + 1,
     )
-    set_created_by(sector, user.get("user_id"), user.get("email", ""))
+    set_created_by(sector, get_user_id(user), get_user_email(user))
 
     db.add(sector)
     db.commit()
@@ -1979,7 +2973,7 @@ def delete_sector(
             detail="Cannot delete global sectors",
         )
 
-    soft_delete(db, sector, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, sector, get_user_id(user), get_user_email(user))
 
 
 # =============================================================================
@@ -2123,7 +3117,7 @@ def create_tables_batch(
                 sector=sector.name,
                 status="FREE",
             )
-            set_created_by(table, user.get("user_id"), user.get("email", ""))
+            set_created_by(table, get_user_id(user), get_user_email(user))
             db.add(table)
             created_tables.append(table)
 
@@ -2338,7 +3332,7 @@ def create_staff(
     staff = User(
         tenant_id=user["tenant_id"],
         email=body.email,
-        password=body.password,  # In production, hash this
+        password=hash_password(body.password),
         first_name=body.first_name,
         last_name=body.last_name,
         phone=body.phone,
@@ -2347,7 +3341,7 @@ def create_staff(
         is_active=body.is_active,
     )
     # Set audit fields
-    set_created_by(staff, user.get("user_id"), user.get("email", ""))
+    set_created_by(staff, get_user_id(user), get_user_email(user))
     db.add(staff)
     db.flush()
 
@@ -2419,6 +3413,10 @@ def update_staff(
     update_data = body.model_dump(exclude_unset=True)
     branch_roles = update_data.pop("branch_roles", None)
 
+    # Hash password if provided
+    if "password" in update_data and update_data["password"]:
+        update_data["password"] = hash_password(update_data["password"])
+
     # Validate new branch_roles for MANAGER
     if branch_roles is not None and is_manager and not is_admin:
         for role in branch_roles:
@@ -2443,7 +3441,7 @@ def update_staff(
         setattr(staff, key, value)
 
     # Set audit fields
-    set_updated_by(staff, user.get("user_id"), user.get("email", ""))
+    set_updated_by(staff, get_user_id(user), get_user_email(user))
 
     # Update branch roles if provided
     if branch_roles is not None:
@@ -2497,7 +3495,7 @@ def delete_staff(
     tenant_id = staff.tenant_id
 
     # Soft delete: set is_active=False with audit trail
-    soft_delete(db, staff, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, staff, get_user_id(user), get_user_email(user))
 
     # Publish delete event (staff is tenant-wide, no branch_id)
     publish_entity_deleted(
@@ -2505,7 +3503,7 @@ def delete_staff(
         entity_type="staff",
         entity_id=staff_id,
         entity_name=staff_name,
-        actor_user_id=user.get("user_id"),
+        actor_user_id=get_user_id(user),
     )
 
 
@@ -2966,7 +3964,7 @@ def restore_deleted_entity(
         )
 
     # Restore the entity
-    restore_entity(db, entity, user.get("user_id"), user.get("email", ""))
+    restore_entity(db, entity, get_user_id(user), get_user_email(user))
 
     # Get entity name for response
     entity_name = getattr(entity, 'name', None) or getattr(entity, 'code', None) or getattr(entity, 'email', None) or str(entity_id)
@@ -3177,7 +4175,7 @@ def update_category_exclusions(
     ).scalars().all()
 
     for exc in existing:
-        soft_delete(db, exc, user.get("user_id"), user.get("email", ""))
+        soft_delete(db, exc, get_user_id(user), get_user_email(user))
 
     # Create new exclusions
     for branch_id in body.excluded_branch_ids:
@@ -3186,7 +4184,7 @@ def update_category_exclusions(
             branch_id=branch_id,
             category_id=category_id,
         )
-        set_created_by(exclusion, user.get("user_id"), user.get("email", ""))
+        set_created_by(exclusion, get_user_id(user), get_user_email(user))
         db.add(exclusion)
 
     db.commit()
@@ -3305,7 +4303,7 @@ def update_subcategory_exclusions(
     ).scalars().all()
 
     for exc in existing:
-        soft_delete(db, exc, user.get("user_id"), user.get("email", ""))
+        soft_delete(db, exc, get_user_id(user), get_user_email(user))
 
     # Create new exclusions
     for branch_id in body.excluded_branch_ids:
@@ -3314,7 +4312,7 @@ def update_subcategory_exclusions(
             branch_id=branch_id,
             subcategory_id=subcategory_id,
         )
-        set_created_by(exclusion, user.get("user_id"), user.get("email", ""))
+        set_created_by(exclusion, get_user_id(user), get_user_email(user))
         db.add(exclusion)
 
     db.commit()
@@ -3545,7 +4543,7 @@ async def create_bulk_assignments(
     """
     tenant_id = user["tenant_id"]
     user_id = int(user["sub"])
-    user_email = user.get("email", "")
+    user_email = get_user_email(user)
 
     # Verify branch exists
     branch = db.scalar(
@@ -3676,7 +4674,7 @@ async def delete_bulk_assignments(
     """
     tenant_id = user["tenant_id"]
     user_id = int(user["sub"])
-    user_email = user.get("email", "")
+    user_email = get_user_email(user)
 
     query = select(WaiterSectorAssignment).where(
         WaiterSectorAssignment.tenant_id == tenant_id,
@@ -3716,7 +4714,7 @@ async def delete_assignment(
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
 
-    soft_delete(db, assignment, int(user["sub"]), user.get("email", ""))
+    soft_delete(db, assignment, int(user["sub"]), get_user_email(user))
     db.commit()
 
     return {"message": "Assignment deleted", "id": assignment_id}
@@ -3737,7 +4735,7 @@ async def copy_assignments(
     """
     tenant_id = user["tenant_id"]
     user_id = int(user["sub"])
-    user_email = user.get("email", "")
+    user_email = get_user_email(user)
 
     # Get source assignments
     query = select(WaiterSectorAssignment).where(

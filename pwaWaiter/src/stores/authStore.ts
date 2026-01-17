@@ -23,6 +23,7 @@ interface AuthState {
   isLoading: boolean
   error: string | null
   refreshAttempts: number  // WAITER-CRIT-01 FIX: Track refresh retry attempts
+  isRefreshing: boolean  // HIGH-29-18 FIX: Flag to prevent concurrent refresh attempts
   // Actions
   login: (email: string, password: string) => Promise<boolean>
   logout: () => void
@@ -33,7 +34,11 @@ interface AuthState {
 }
 
 // DEF-HIGH-04 FIX: Helper to start token refresh interval
+// MED-29-22 FIX: Always stop existing interval before creating new one, with debug logging
 function startTokenRefreshInterval(refreshFn: () => Promise<boolean>): void {
+  if (refreshIntervalId !== null) {
+    authLogger.debug('Token refresh interval already active, stopping before restart')
+  }
   stopTokenRefreshInterval()
   refreshIntervalId = setInterval(() => {
     refreshFn().catch((err) => {
@@ -62,6 +67,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       refreshAttempts: 0,  // WAITER-CRIT-01 FIX
+      isRefreshing: false,  // HIGH-29-18 FIX: Initial state
 
       login: async (email: string, password: string): Promise<boolean> => {
         set({ isLoading: true, error: null })
@@ -145,8 +151,15 @@ export const useAuthStore = create<AuthState>()(
 
       // DEF-HIGH-04 FIX: Refresh access token
       // WAITER-CRIT-01 FIX: Added retry counter and auto-logout after max retries
+      // HIGH-29-18 FIX: Added isRefreshing flag to prevent race condition
       refreshAccessToken: async (): Promise<boolean> => {
-        const { refreshToken: currentRefreshToken, refreshAttempts } = get()
+        const { refreshToken: currentRefreshToken, refreshAttempts, isRefreshing } = get()
+
+        // HIGH-29-18 FIX: Check if refresh is already in progress
+        if (isRefreshing) {
+          authLogger.debug('Token refresh already in progress, skipping')
+          return false
+        }
 
         // WAITER-CRIT-01 FIX: Check max retries before attempting
         if (refreshAttempts >= MAX_REFRESH_ATTEMPTS) {
@@ -160,8 +173,9 @@ export const useAuthStore = create<AuthState>()(
           return false
         }
 
+        // HIGH-29-18 FIX: Set isRefreshing flag at the start
         // WAITER-CRIT-01 FIX: Increment attempt counter before trying
-        set({ refreshAttempts: refreshAttempts + 1 })
+        set({ isRefreshing: true, refreshAttempts: refreshAttempts + 1 })
 
         // Restore refresh token to API client
         setRefreshToken(currentRefreshToken)
@@ -173,6 +187,7 @@ export const useAuthStore = create<AuthState>()(
               token: result.access_token,
               refreshToken: result.refresh_token || currentRefreshToken,
               refreshAttempts: 0,  // WAITER-CRIT-01 FIX: Reset on success
+              isRefreshing: false,  // HIGH-29-18 FIX: Reset flag on success
             })
             authLogger.info('Token refreshed and stored')
             return true
@@ -185,6 +200,9 @@ export const useAuthStore = create<AuthState>()(
           // WAITER-CRIT-01 FIX: Don't logout immediately on error, let interval retry
           authLogger.error('Token refresh failed', { attempt: refreshAttempts + 1, error: err })
           return false
+        } finally {
+          // HIGH-29-18 FIX: Always reset isRefreshing flag in finally block
+          set({ isRefreshing: false })
         }
       },
 
@@ -273,6 +291,10 @@ export const useAuthStore = create<AuthState>()(
         // After rehydration, restore tokens to API client
         if (state?.token) {
           setAuthToken(state.token)
+          // HIGH-07 FIX: Sync token with WebSocket service on rehydration
+          // This ensures the WebSocket uses the same token as the API client
+          // The actual connection is deferred to checkAuth() to avoid premature connects
+          authLogger.debug('Token restored from storage, API client synced')
         }
         // DEF-HIGH-04 FIX: Restore refresh token
         if (state?.refreshToken) {

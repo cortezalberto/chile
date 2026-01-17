@@ -82,6 +82,9 @@ def allocate_payment_fifo(
     If diner_id is provided, only allocates to that diner's charges first,
     then to shared charges (diner_id=None), then to other diners' charges.
 
+    SVC-CRIT-02 FIX: Uses SELECT FOR UPDATE to prevent race conditions when
+    multiple payments are processed concurrently for the same check.
+
     Returns the list of allocations created.
     """
     remaining_amount = payment.amount_cents
@@ -89,6 +92,13 @@ def allocate_payment_fifo(
 
     if remaining_amount <= 0:
         return allocations
+
+    # SVC-CRIT-02 FIX: Lock the check row to prevent concurrent allocation issues
+    # This ensures only one payment allocation happens at a time per check
+    from sqlalchemy import text
+    db.execute(
+        select(Check).where(Check.id == payment.check_id).with_for_update()
+    ).scalar_one()
 
     # Get unpaid charges for this check
     # First, calculate how much has already been allocated to each charge
@@ -103,10 +113,12 @@ def allocate_payment_fifo(
 
     # Query charges with their allocated amounts
     # Order: own charges first (if diner_id provided), then shared, then others
+    # SVC-CRIT-02 FIX: Lock charges with FOR UPDATE to prevent concurrent modifications
     base_query = (
         select(Charge, func.coalesce(subquery.c.allocated, 0).label("allocated"))
         .outerjoin(subquery, Charge.id == subquery.c.charge_id)
         .where(Charge.check_id == payment.check_id)
+        .with_for_update()  # Lock charges for concurrent payment safety
     )
 
     if diner_id:
@@ -198,12 +210,28 @@ def get_diner_balance(
 def get_all_diner_balances(
     db: Session,
     check_id: int,
+    tenant_id: int | None = None,
 ) -> list[dict]:
     """
     Get balances for all diners on a check.
 
     Includes a "shared" entry for charges without a diner_id.
+
+    SVC-HIGH-06 FIX: Added optional tenant_id parameter for multi-tenant isolation.
+    When provided, validates that the check belongs to the specified tenant.
+
+    Args:
+        db: Database session
+        check_id: ID of the check to get balances for
+        tenant_id: Optional tenant ID for isolation validation
     """
+    # SVC-HIGH-06 FIX: Validate tenant isolation if tenant_id provided
+    if tenant_id is not None:
+        check = db.scalar(select(Check).where(Check.id == check_id))
+        if check and check.tenant_id != tenant_id:
+            # Return empty list instead of leaking data across tenants
+            return []
+
     # Get all unique diner_ids on this check
     diner_ids = db.execute(
         select(Charge.diner_id)

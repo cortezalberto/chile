@@ -24,6 +24,8 @@ from rest_api.services.soft_delete_service import (
     set_updated_by,
 )
 from shared.auth import current_user_context as current_user
+from rest_api.routers.admin_base import get_user_id, get_user_email
+from sqlalchemy import update
 
 
 router = APIRouter(prefix="/api/admin/promotions", tags=["promotions"])
@@ -106,15 +108,21 @@ class PromotionUpdate(BaseModel):
 
 def _build_promotion_output(promotion: Promotion, db: Session) -> PromotionOutput:
     """Build PromotionOutput with branch_ids and items."""
-    # Get branch IDs
+    # Get branch IDs (only active associations after HIGH-29-03 FIX)
     branch_relations = db.execute(
-        select(PromotionBranch).where(PromotionBranch.promotion_id == promotion.id)
+        select(PromotionBranch).where(
+            PromotionBranch.promotion_id == promotion.id,
+            PromotionBranch.is_active == True,
+        )
     ).scalars().all()
     branch_ids = [pb.branch_id for pb in branch_relations]
 
-    # Get items
+    # Get items (only active items after HIGH-29-04 FIX)
     item_relations = db.execute(
-        select(PromotionItem).where(PromotionItem.promotion_id == promotion.id)
+        select(PromotionItem).where(
+            PromotionItem.promotion_id == promotion.id,
+            PromotionItem.is_active == True,
+        )
     ).scalars().all()
     items = [
         PromotionItemOutput(product_id=pi.product_id, quantity=pi.quantity)
@@ -161,8 +169,11 @@ def list_promotions(
         query = query.where(Promotion.is_active == True)
 
     if branch_id:
-        # Filter to promotions available in this branch
+        # HIGH-29-05 FIX: Filter to promotions available in this branch
+        # Also filter by PromotionBranch.is_active when not include_deleted
         query = query.join(PromotionBranch).where(PromotionBranch.branch_id == branch_id)
+        if not include_deleted:
+            query = query.where(PromotionBranch.is_active == True)
 
     promotions = db.execute(query.order_by(Promotion.name)).scalars().all()
     return [_build_promotion_output(p, db) for p in promotions]
@@ -240,7 +251,7 @@ def create_promotion(
         is_active=body.is_active,
     )
     # Set audit fields
-    set_created_by(promotion, user.get("user_id"), user.get("email", ""))
+    set_created_by(promotion, get_user_id(user), get_user_email(user))
     db.add(promotion)
     db.flush()  # Get promotion ID
 
@@ -292,7 +303,7 @@ def update_promotion(
     update_data = body.model_dump(exclude_unset=True)
 
     # Set audit fields
-    set_updated_by(promotion, user.get("user_id"), user.get("email", ""))
+    set_updated_by(promotion, get_user_id(user), get_user_email(user))
 
     # Handle branch_ids separately
     branch_ids = update_data.pop("branch_ids", None)
@@ -321,10 +332,16 @@ def update_promotion(
                     detail=f"Invalid branch_id: {branch_id}",
                 )
 
-        # Delete existing branch associations
+        # HIGH-29-03 FIX: Soft delete existing branch associations instead of hard delete
         db.execute(
-            PromotionBranch.__table__.delete().where(
-                PromotionBranch.promotion_id == promotion_id
+            update(PromotionBranch)
+            .where(PromotionBranch.promotion_id == promotion_id)
+            .where(PromotionBranch.is_active == True)
+            .values(
+                is_active=False,
+                deleted_at=datetime.utcnow(),
+                deleted_by_id=get_user_id(user),
+                deleted_by_email=get_user_email(user),
             )
         )
 
@@ -354,10 +371,16 @@ def update_promotion(
                     detail=f"Invalid product_id: {item.product_id}",
                 )
 
-        # Delete existing items
+        # HIGH-29-04 FIX: Soft delete existing items instead of hard delete
         db.execute(
-            PromotionItem.__table__.delete().where(
-                PromotionItem.promotion_id == promotion_id
+            update(PromotionItem)
+            .where(PromotionItem.promotion_id == promotion_id)
+            .where(PromotionItem.is_active == True)
+            .values(
+                is_active=False,
+                deleted_at=datetime.utcnow(),
+                deleted_by_id=get_user_id(user),
+                deleted_by_email=get_user_email(user),
             )
         )
 
@@ -403,4 +426,4 @@ def delete_promotion(
         )
 
     # Soft delete - no cascade needed, just mark as inactive
-    soft_delete(db, promotion, user.get("user_id"), user.get("email", ""))
+    soft_delete(db, promotion, get_user_id(user), get_user_email(user))

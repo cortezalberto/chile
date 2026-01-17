@@ -14,6 +14,16 @@ interface PullToRefreshState {
   isRefreshing: boolean
 }
 
+// WAITER-HOOK-MED-02: Status messages for aria-live announcements
+type RefreshStatus = 'idle' | 'pulling' | 'ready' | 'refreshing' | 'done'
+const STATUS_MESSAGES: Record<RefreshStatus, string> = {
+  idle: '',
+  pulling: 'Desliza hacia abajo para actualizar',
+  ready: 'Suelta para actualizar',
+  refreshing: 'Actualizando...',
+  done: 'Actualizacion completada',
+}
+
 /**
  * PWAW-008: Hook for implementing pull-to-refresh gesture
  * Returns props to spread on container and state for UI feedback
@@ -29,8 +39,23 @@ export function usePullToRefresh({
     isRefreshing: false,
   })
 
+  // WAITER-HOOK-MED-02: Track status for aria-live announcements
+  const [status, setStatus] = useState<RefreshStatus>('idle')
+
   const touchStartY = useRef(0)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // WAITER-HOOK-MED-03: Use refs to avoid stale closures in callbacks
+  const onRefreshRef = useRef(onRefresh)
+  const thresholdRef = useRef(threshold)
+  const resistanceRef = useRef(resistance)
+
+  // Keep refs updated with latest values
+  useEffect(() => {
+    onRefreshRef.current = onRefresh
+    thresholdRef.current = threshold
+    resistanceRef.current = resistance
+  }, [onRefresh, threshold, resistance])
 
   const handleTouchStart = useCallback((e: TouchEvent) => {
     // Only enable pull-to-refresh at top of scroll
@@ -39,62 +64,82 @@ export function usePullToRefresh({
 
     touchStartY.current = e.touches[0].clientY
     setState((s) => ({ ...s, isPulling: true }))
+    setStatus('pulling')
   }, [])
 
+  // WAITER-HOOK-MED-03: Using refs to avoid stale closures
   const handleTouchMove = useCallback(
     (e: TouchEvent) => {
-      if (!state.isPulling || state.isRefreshing) return
+      setState((currentState) => {
+        if (!currentState.isPulling || currentState.isRefreshing) return currentState
 
-      const container = containerRef.current
-      if (!container || container.scrollTop > 0) {
-        setState((s) => ({ ...s, isPulling: false, pullDistance: 0 }))
-        return
-      }
+        const container = containerRef.current
+        if (!container || container.scrollTop > 0) {
+          setStatus('idle')
+          return { ...currentState, isPulling: false, pullDistance: 0 }
+        }
 
-      const touchY = e.touches[0].clientY
-      const diff = touchY - touchStartY.current
+        const touchY = e.touches[0].clientY
+        const diff = touchY - touchStartY.current
 
-      // Only allow pulling down
-      if (diff <= 0) {
-        setState((s) => ({ ...s, pullDistance: 0 }))
-        return
-      }
+        // Only allow pulling down
+        if (diff <= 0) {
+          return { ...currentState, pullDistance: 0 }
+        }
 
-      // Apply resistance to make pull feel natural
-      const pullDistance = Math.min(diff / resistance, threshold * 1.5)
-      setState((s) => ({ ...s, pullDistance }))
+        // Apply resistance to make pull feel natural (using ref for latest value)
+        const currentThreshold = thresholdRef.current
+        const currentResistance = resistanceRef.current
+        const pullDistance = Math.min(diff / currentResistance, currentThreshold * 1.5)
 
-      // Prevent default scrolling when pulling
-      if (pullDistance > 0) {
-        e.preventDefault()
-      }
+        // WAITER-HOOK-MED-02: Update status for accessibility announcement
+        setStatus(pullDistance >= currentThreshold ? 'ready' : 'pulling')
+
+        // Prevent default scrolling when pulling
+        if (pullDistance > 0) {
+          e.preventDefault()
+        }
+
+        return { ...currentState, pullDistance }
+      })
     },
-    [state.isPulling, state.isRefreshing, resistance, threshold]
+    [] // WAITER-HOOK-MED-03: Empty deps - using refs for latest values
   )
 
+  // WAITER-HOOK-MED-03: Using refs to avoid stale closures
   const handleTouchEnd = useCallback(async () => {
-    if (!state.isPulling) return
+    // Get current state synchronously to avoid stale closure
+    let shouldRefresh = false
+    let currentThreshold = thresholdRef.current
 
-    if (state.pullDistance >= threshold && !state.isRefreshing) {
-      setState((s) => ({ ...s, isRefreshing: true, pullDistance: threshold }))
+    setState((currentState) => {
+      if (!currentState.isPulling) return currentState
 
+      if (currentState.pullDistance >= currentThreshold && !currentState.isRefreshing) {
+        shouldRefresh = true
+        return { ...currentState, isRefreshing: true, pullDistance: currentThreshold }
+      } else {
+        setStatus('idle')
+        return { isPulling: false, pullDistance: 0, isRefreshing: false }
+      }
+    })
+
+    if (shouldRefresh) {
+      setStatus('refreshing')
       try {
-        await onRefresh()
+        await onRefreshRef.current()
       } finally {
+        setStatus('done')
         setState({
           isPulling: false,
           pullDistance: 0,
           isRefreshing: false,
         })
+        // Reset status after brief delay to allow screen readers to announce
+        setTimeout(() => setStatus('idle'), 1000)
       }
-    } else {
-      setState({
-        isPulling: false,
-        pullDistance: 0,
-        isRefreshing: false,
-      })
     }
-  }, [state.isPulling, state.pullDistance, state.isRefreshing, threshold, onRefresh])
+  }, []) // WAITER-HOOK-MED-03: Empty deps - using refs for latest values
 
   // Attach event listeners
   useEffect(() => {
@@ -117,5 +162,13 @@ export function usePullToRefresh({
     ...state,
     // Progress from 0 to 1 for UI feedback
     progress: Math.min(state.pullDistance / threshold, 1),
+    // WAITER-HOOK-MED-02: Accessibility props for aria-live region
+    a11yProps: {
+      role: 'status' as const,
+      'aria-live': 'polite' as const,
+      'aria-atomic': true,
+      children: STATUS_MESSAGES[status],
+    },
+    statusMessage: STATUS_MESSAGES[status],
   }
 }

@@ -341,6 +341,35 @@ class MercadoPagoPreferenceResponse(BaseModel):
 # =============================================================================
 
 
+class ProductAllergensOutput(BaseModel):
+    """Allergens grouped by presence type for filtering."""
+
+    contains: list["AllergenInfoOutput"] = Field(default_factory=list)
+    may_contain: list["AllergenInfoOutput"] = Field(default_factory=list)
+    free_from: list["AllergenInfoOutput"] = Field(default_factory=list)
+
+
+class ProductDietaryOutput(BaseModel):
+    """Dietary profile for filtering."""
+
+    is_vegetarian: bool = False
+    is_vegan: bool = False
+    is_gluten_free: bool = False
+    is_dairy_free: bool = False
+    is_celiac_safe: bool = False
+    is_keto: bool = False
+    is_low_sodium: bool = False
+
+
+class ProductCookingOutput(BaseModel):
+    """Cooking information for filtering."""
+
+    methods: list[str] = Field(default_factory=list)
+    uses_oil: bool = False
+    prep_time_minutes: int | None = None
+    cook_time_minutes: int | None = None
+
+
 class ProductOutput(BaseModel):
     """Product information for public menu."""
 
@@ -357,6 +386,10 @@ class ProductOutput(BaseModel):
     seal: str | None = None
     allergen_ids: list[int] = Field(default_factory=list)
     is_available: bool = True
+    # Canonical model fields (producto3.md) - optional for backward compatibility
+    allergens: ProductAllergensOutput | None = None
+    dietary: ProductDietaryOutput | None = None
+    cooking: ProductCookingOutput | None = None
 
 
 # =============================================================================
@@ -370,6 +403,28 @@ class AllergenInfoOutput(BaseModel):
     id: int
     name: str
     icon: str | None = None
+
+
+class CrossReactionPublicOutput(BaseModel):
+    """Cross-reaction information for public API."""
+
+    id: int
+    cross_reacts_with_id: int
+    cross_reacts_with_name: str
+    probability: str  # "high", "medium", "low"
+    notes: str | None = None
+
+
+class AllergenPublicOutput(BaseModel):
+    """Allergen with cross-reactions for public API (pwaMenu filters)."""
+
+    id: int
+    name: str
+    icon: str | None = None
+    description: str | None = None
+    is_mandatory: bool = False
+    severity: str = "moderate"
+    cross_reactions: list[CrossReactionPublicOutput] = Field(default_factory=list)
 
 
 class AllergensOutput(BaseModel):
@@ -502,6 +557,157 @@ class MenuOutput(BaseModel):
     branch_name: str
     branch_slug: str
     categories: list[CategoryOutput]
+
+
+# =============================================================================
+# Waiter-Managed Table Flow Schemas (HU-WAITER-MESA)
+# =============================================================================
+
+
+# Types for waiter-managed flow
+SessionOpenedBy = Literal["DINER", "WAITER"]
+RoundSubmittedBy = Literal["DINER", "WAITER"]
+PaymentRegisteredBy = Literal["SYSTEM", "DINER", "WAITER"]
+PaymentCategory = Literal["DIGITAL", "MANUAL"]
+ManualPaymentMethod = Literal["CASH", "CARD_PHYSICAL", "TRANSFER_EXTERNAL", "OTHER_MANUAL"]
+
+
+class WaiterActivateTableRequest(BaseModel):
+    """Request for waiter to activate a table manually."""
+
+    diner_count: int = Field(ge=1, le=20, description="Number of diners at the table")
+    notes: str | None = Field(default=None, max_length=200, description="Optional notes about the table")
+
+
+class WaiterActivateTableResponse(BaseModel):
+    """Response after waiter activates a table."""
+
+    session_id: int
+    table_id: int
+    table_code: str
+    status: SessionStatus
+    opened_at: datetime
+    opened_by: SessionOpenedBy
+    opened_by_waiter_id: int
+    diner_count: int
+
+
+class WaiterRoundItemInput(BaseModel):
+    """Input for a single item in a waiter-submitted round."""
+
+    product_id: int
+    qty: int = Field(ge=1, le=99)
+    notes: str | None = Field(default=None, max_length=200)
+    # Optional: which diner ordered this item (for split billing)
+    diner_index: int | None = Field(default=None, ge=0, description="Index of diner (0-based) for this item")
+
+
+class WaiterSubmitRoundRequest(BaseModel):
+    """Request for waiter to submit a round of orders."""
+
+    items: list[WaiterRoundItemInput] = Field(min_length=1)
+    notes: str | None = Field(default=None, max_length=500, description="General round notes")
+
+
+class WaiterSubmitRoundResponse(BaseModel):
+    """Response after waiter submits a round."""
+
+    session_id: int
+    round_id: int
+    round_number: int
+    status: RoundStatus
+    submitted_by: RoundSubmittedBy
+    submitted_by_waiter_id: int
+    items_count: int
+    total_cents: int
+
+
+class WaiterRequestCheckRequest(BaseModel):
+    """Request for waiter to request the check for a session."""
+
+    notes: str | None = Field(default=None, max_length=200)
+
+
+class WaiterRequestCheckResponse(BaseModel):
+    """Response after waiter requests the check."""
+
+    check_id: int
+    session_id: int
+    total_cents: int
+    paid_cents: int
+    status: CheckStatus
+    items_count: int
+
+
+class ManualPaymentRequest(BaseModel):
+    """
+    Request to register a manual payment by waiter.
+
+    CRITICAL: This flow does NOT use Mercado Pago or any digital payment provider.
+    The waiter physically receives the payment and registers it in the system.
+    """
+
+    check_id: int
+    amount_cents: int = Field(gt=0, description="Payment amount in cents")
+    manual_method: ManualPaymentMethod = Field(description="Payment method: CASH, CARD_PHYSICAL, TRANSFER_EXTERNAL, OTHER_MANUAL")
+    notes: str | None = Field(default=None, max_length=500, description="Optional payment notes")
+
+
+class ManualPaymentResponse(BaseModel):
+    """Response after registering a manual payment."""
+
+    payment_id: int
+    check_id: int
+    amount_cents: int
+    manual_method: ManualPaymentMethod
+    status: PaymentStatus
+    payment_category: PaymentCategory
+    registered_by: PaymentRegisteredBy
+    registered_by_waiter_id: int
+    # Updated check info
+    check_status: CheckStatus
+    check_total_cents: int
+    check_paid_cents: int
+    check_remaining_cents: int
+
+
+class WaiterCloseTableRequest(BaseModel):
+    """Request for waiter to close a table after full payment."""
+
+    force: bool = Field(default=False, description="Force close even if check is not fully paid (ADMIN only)")
+
+
+class WaiterCloseTableResponse(BaseModel):
+    """Response after waiter closes a table."""
+
+    table_id: int
+    table_code: str
+    table_status: TableStatus
+    session_id: int
+    session_status: SessionStatus
+    total_cents: int
+    paid_cents: int
+    closed_at: datetime
+
+
+class WaiterSessionSummaryOutput(BaseModel):
+    """Summary of a session for waiter view with traceability info."""
+
+    session_id: int
+    table_id: int
+    table_code: str
+    status: SessionStatus
+    opened_at: datetime
+    opened_by: SessionOpenedBy
+    opened_by_waiter_id: int | None = None
+    assigned_waiter_id: int | None = None
+    diner_count: int
+    rounds_count: int
+    total_cents: int
+    paid_cents: int
+    check_status: CheckStatus | None = None
+    # Hybrid flow indicator: True if session has both waiter and diner-submitted rounds
+    is_hybrid: bool = False
 
 
 # =============================================================================

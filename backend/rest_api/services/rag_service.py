@@ -9,7 +9,7 @@ from typing import Optional
 
 import httpx
 from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from rest_api.models import KnowledgeDocument, ChatLog, Product, BranchProduct, ProductRAGConfig
 from rest_api.services.product_view import (
@@ -152,9 +152,14 @@ Contexto del menu:
             embedding=embedding,
         )
 
-        self.db.add(doc)
-        self.db.commit()
-        self.db.refresh(doc)
+        # SVC-HIGH-02 FIX: Add try-except with rollback for commit errors
+        try:
+            self.db.add(doc)
+            self.db.commit()
+            self.db.refresh(doc)
+        except Exception as e:
+            self.db.rollback()
+            raise RuntimeError(f"Failed to ingest document: {str(e)}") from e
 
         return doc
 
@@ -251,6 +256,15 @@ Contexto del menu:
 
         return docs_with_scores
 
+    def _get_risk_disclaimer(self, risk_level: str) -> str:
+        """Get appropriate disclaimer based on product risk level."""
+        disclaimers = {
+            "high": "⚠️ IMPORTANTE: Este producto requiere verificación especial con el personal por posibles riesgos para personas con alergias o restricciones dietarias.",
+            "medium": "ℹ️ Nota: Por favor verifica con el personal si tienes alergias o restricciones dietarias específicas.",
+            "low": "",  # No disclaimer for low risk
+        }
+        return disclaimers.get(risk_level, "")
+
     async def generate_answer(
         self,
         question: str,
@@ -262,6 +276,9 @@ Contexto del menu:
         """
         Generate an answer to a question using RAG.
         Returns (answer, sources) where sources is a list of referenced documents.
+
+        Phase 5 enhancement: Respects ProductRAGConfig risk_level for each product
+        and adds appropriate disclaimers to the response.
         """
         start_time = time.time()
 
@@ -273,7 +290,9 @@ Contexto del menu:
             limit=5,
         )
 
-        # Build context from retrieved documents
+        # Build context from retrieved documents and track high-risk products
+        high_risk_products = []
+        medium_risk_products = []
         if similar_docs:
             context_parts = []
             sources = []
@@ -284,7 +303,23 @@ Contexto del menu:
                     "title": doc.title,
                     "score": round(score, 3),
                     "source": doc.source,
+                    "source_id": doc.source_id,
                 })
+
+                # Check risk level for product sources
+                if doc.source == "product" and doc.source_id:
+                    rag_config = self.db.scalar(
+                        select(ProductRAGConfig).where(
+                            ProductRAGConfig.product_id == doc.source_id,
+                            ProductRAGConfig.is_active == True,
+                        )
+                    )
+                    if rag_config:
+                        if rag_config.risk_level == "high":
+                            high_risk_products.append(doc.title)
+                        elif rag_config.risk_level == "medium":
+                            medium_risk_products.append(doc.title)
+
             context = "\n".join(context_parts)
         else:
             context = "No se encontro informacion relevante en la base de conocimiento."
@@ -299,6 +334,13 @@ Contexto del menu:
                 prompt=question,
                 system_prompt=system_prompt,
             )
+
+            # Append risk disclaimers if any high/medium risk products were referenced
+            if high_risk_products:
+                answer += f"\n\n{self._get_risk_disclaimer('high')}"
+            elif medium_risk_products:
+                answer += f"\n\n{self._get_risk_disclaimer('medium')}"
+
         except Exception as e:
             answer = f"Lo siento, no puedo procesar tu pregunta en este momento. Error: {str(e)}"
 
@@ -329,45 +371,58 @@ Contexto del menu:
 
         return answer, sources
 
-    async def ingest_all_products(self, tenant_id: int) -> int:
+    async def ingest_all_products(self, tenant_id: int) -> tuple[int, list[str]]:
         """
         Ingest all active products for a tenant into the knowledge base.
-        Returns the number of documents created.
+        Returns tuple of (count of successful ingestions, list of errors).
+
+        HIGH-09 FIX: Uses eager loading to avoid N+1 queries.
+        SVC-HIGH-01 FIX: Added error handling to continue on individual failures
+        and report all errors at the end.
+        SVC-MED-02 FIX: Only ingests products that have at least one branch
+        with is_available=True.
         """
-        # Get all active products with their branch prices
+        # HIGH-09 FIX: Get all active products with their branch prices in a single query
         products = self.db.execute(
-            select(Product).where(
+            select(Product)
+            .options(selectinload(Product.branch_prices))
+            .where(
                 Product.tenant_id == tenant_id,
                 Product.is_active == True,
             )
         ).scalars().all()
 
         count = 0
+        errors: list[str] = []
+
         for product in products:
-            # Get branch prices
-            branch_prices = self.db.execute(
-                select(BranchProduct).where(
-                    BranchProduct.product_id == product.id,
-                    BranchProduct.is_available == True,
-                )
-            ).scalars().all()
+            try:
+                # HIGH-09 FIX: Use eager-loaded relationship instead of N+1 query
+                branch_prices = [bp for bp in product.branch_prices if bp.is_available]
 
-            if branch_prices:
-                # Check if document already exists
-                existing = self.db.execute(
-                    select(KnowledgeDocument).where(
-                        KnowledgeDocument.tenant_id == tenant_id,
-                        KnowledgeDocument.source == "product",
-                        KnowledgeDocument.source_id == product.id,
-                    )
-                ).scalar_one_or_none()
+                if branch_prices:
+                    # Check if document already exists
+                    existing = self.db.execute(
+                        select(KnowledgeDocument).where(
+                            KnowledgeDocument.tenant_id == tenant_id,
+                            KnowledgeDocument.source == "product",
+                            KnowledgeDocument.source_id == product.id,
+                        )
+                    ).scalar_one_or_none()
 
-                if existing:
-                    # Update existing document
-                    self.db.delete(existing)
-                    self.db.commit()
+                    if existing:
+                        # Update existing document
+                        self.db.delete(existing)
+                        self.db.commit()
 
-                await self.ingest_product(tenant_id, product, list(branch_prices))
-                count += 1
+                    await self.ingest_product(tenant_id, product, list(branch_prices))
+                    count += 1
 
-        return count
+            except Exception as e:
+                # SVC-HIGH-01 FIX: Log error and continue with next product
+                error_msg = f"Failed to ingest product {product.id} ({product.name}): {str(e)}"
+                errors.append(error_msg)
+                # Ensure session is clean for next iteration
+                self.db.rollback()
+
+        return count, errors

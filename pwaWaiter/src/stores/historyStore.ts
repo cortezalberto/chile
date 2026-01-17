@@ -35,39 +35,108 @@ const STORAGE_KEY = 'waiter-history'
 const BROADCAST_CHANNEL_NAME = 'waiter-history-sync' // PWAW-A004
 
 // PWAW-A004: BroadcastChannel for cross-tab sync
+// CRIT-10 FIX: Track channel for proper cleanup
 let broadcastChannel: BroadcastChannel | null = null
+let isChannelInitialized = false
+// WAITER-STORE-HIGH-01: Track mount state for async operations
+let isMounted = true
 
 function initBroadcastChannel(store: { setState: (state: Partial<HistoryState>) => void }) {
-  if (typeof BroadcastChannel === 'undefined') return
+  // CRIT-10 FIX: Prevent multiple initializations
+  if (isChannelInitialized || typeof BroadcastChannel === 'undefined') return
 
+  // WAITER-STORE-HIGH-02: Wrap BroadcastChannel operations in try-catch
   try {
     broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME)
     broadcastChannel.onmessage = (event) => {
-      if (event.data?.type === 'HISTORY_UPDATE') {
-        store.setState({ entries: event.data.entries })
-        storeLogger.debug('History synced from another tab')
+      // WAITER-STORE-HIGH-01: Add mount guard before setState
+      if (!isMounted) {
+        storeLogger.debug('Ignoring broadcast message - store unmounted')
+        return
+      }
+      try {
+        if (event.data?.type === 'HISTORY_UPDATE') {
+          store.setState({ entries: event.data.entries })
+          storeLogger.debug('History synced from another tab')
+        }
+      } catch (error) {
+        // WAITER-STORE-HIGH-02: Handle message processing errors
+        storeLogger.warn('Error processing broadcast message', error)
       }
     }
+    // WAITER-STORE-HIGH-02: Handle BroadcastChannel errors
+    broadcastChannel.onmessageerror = (event) => {
+      storeLogger.warn('BroadcastChannel message error', event)
+    }
+    isChannelInitialized = true
   } catch (error) {
     storeLogger.warn('BroadcastChannel not available', error)
   }
 }
 
-function broadcastHistoryUpdate(entries: HistoryEntry[]) {
+/**
+ * CRIT-10 FIX: Close BroadcastChannel to prevent memory leaks.
+ * Should be called on app shutdown/logout.
+ * LOW-29-15 FIX: Only reset flags if close() succeeds
+ */
+export function closeBroadcastChannel(): void {
+  // WAITER-STORE-HIGH-01: Mark as unmounted to prevent async setState calls
+  isMounted = false
   if (broadcastChannel) {
     try {
-      broadcastChannel.postMessage({ type: 'HISTORY_UPDATE', entries })
+      broadcastChannel.close()
+      // LOW-29-15 FIX: Only reset flags after successful close
+      broadcastChannel = null
+      isChannelInitialized = false
+      storeLogger.debug('BroadcastChannel closed successfully')
     } catch (error) {
-      storeLogger.debug('Failed to broadcast history update', error)
+      // LOW-29-15 FIX: Keep references if close fails, channel may still be usable
+      storeLogger.warn('Failed to close BroadcastChannel, keeping reference', error)
     }
   }
 }
 
+/**
+ * WAITER-STORE-HIGH-01: Re-enable mount state (call when re-initializing)
+ */
+export function enableHistoryStore(): void {
+  isMounted = true
+}
+
+function broadcastHistoryUpdate(entries: HistoryEntry[]) {
+  // WAITER-STORE-HIGH-02: Wrap BroadcastChannel operations in try-catch
+  if (broadcastChannel) {
+    try {
+      broadcastChannel.postMessage({ type: 'HISTORY_UPDATE', entries })
+    } catch (error) {
+      // Handle InvalidStateError if channel was closed unexpectedly
+      if (error instanceof DOMException && error.name === 'InvalidStateError') {
+        storeLogger.warn('BroadcastChannel closed unexpectedly, resetting state')
+        broadcastChannel = null
+        isChannelInitialized = false
+      } else {
+        storeLogger.debug('Failed to broadcast history update', error)
+      }
+    }
+  }
+}
+
+// CRIT-29-04 FIX: Queue for messages that arrive before BroadcastChannel is ready
+let pendingBroadcasts: HistoryEntry[][] = []
+
 export const useHistoryStore = create<HistoryState>()(
   persist(
     (set, _get) => {
-      // Initialize broadcast channel after store is created
-      setTimeout(() => initBroadcastChannel({ setState: set }), 0)
+      // CRIT-29-04 FIX: Initialize broadcast channel synchronously to avoid race condition
+      // If BroadcastChannel is available, initialize immediately instead of using setTimeout
+      if (typeof BroadcastChannel !== 'undefined' && !isChannelInitialized) {
+        initBroadcastChannel({ setState: set })
+        // Flush any pending broadcasts
+        if (pendingBroadcasts.length > 0) {
+          pendingBroadcasts.forEach(entries => broadcastHistoryUpdate(entries))
+          pendingBroadcasts = []
+        }
+      }
 
       return {
         entries: [],

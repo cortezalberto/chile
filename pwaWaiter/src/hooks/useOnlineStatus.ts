@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 interface OnlineStatus {
   isOnline: boolean
@@ -9,6 +9,7 @@ interface OnlineStatus {
 /**
  * Hook to track online/offline status.
  * Provides real-time updates when connection changes.
+ * WAITER-HOOK-MED-01: Fixed setTimeout cleanup on unmount
  */
 export function useOnlineStatus(): OnlineStatus {
   const [isOnline, setIsOnline] = useState(navigator.onLine)
@@ -16,12 +17,21 @@ export function useOnlineStatus(): OnlineStatus {
   const [lastOnlineAt, setLastOnlineAt] = useState<Date | null>(
     navigator.onLine ? new Date() : null
   )
+  // WAITER-HOOK-MED-01: Track timeout for cleanup
+  const wasOfflineTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleOnline = useCallback(() => {
     setIsOnline(true)
     setLastOnlineAt(new Date())
+    // WAITER-HOOK-MED-01: Clear previous timeout before setting new one
+    if (wasOfflineTimeoutRef.current) {
+      clearTimeout(wasOfflineTimeoutRef.current)
+    }
     // Keep wasOffline true for a short period so UI can show "reconnected" message
-    setTimeout(() => setWasOffline(false), 5000)
+    wasOfflineTimeoutRef.current = setTimeout(() => {
+      setWasOffline(false)
+      wasOfflineTimeoutRef.current = null
+    }, 5000)
   }, [])
 
   const handleOffline = useCallback(() => {
@@ -36,6 +46,11 @@ export function useOnlineStatus(): OnlineStatus {
     return () => {
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
+      // WAITER-HOOK-MED-01: Clear timeout on unmount
+      if (wasOfflineTimeoutRef.current) {
+        clearTimeout(wasOfflineTimeoutRef.current)
+        wasOfflineTimeoutRef.current = null
+      }
     }
   }, [handleOnline, handleOffline])
 

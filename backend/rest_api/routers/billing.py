@@ -2,6 +2,9 @@
 Billing router.
 Handles check requests, payments, and table clearing.
 Includes Mercado Pago integration for digital payments.
+
+REC-01 FIX: Uses circuit breaker for Mercado Pago API calls.
+REC-02 FIX: Failed webhooks are queued for retry.
 """
 
 from datetime import datetime, timezone
@@ -31,6 +34,11 @@ from rest_api.services.allocation import (
     allocate_payment_fifo,
     get_all_diner_balances,
 )
+from rest_api.services.circuit_breaker import (
+    mercadopago_breaker,
+    CircuitBreakerError,
+)
+from rest_api.services.webhook_retry import webhook_retry_queue
 from shared.auth import current_user_context, current_table_context, require_roles
 from shared.schemas import (
     RequestCheckResponse,
@@ -46,6 +54,7 @@ from shared.events import (
     get_redis_client,
     publish_to_waiters,
     publish_to_session,
+    publish_to_admin,
     publish_check_event,
     publish_table_event,
     Event,
@@ -93,7 +102,8 @@ async def request_check(
             detail="Session is not active",
         )
 
-    # Check if there's already a check for this session
+    # HIGH-04 FIX: Check if there's already a check for this session (idempotency)
+    # This prevents duplicate checks when network retries occur
     existing_check = db.scalar(
         select(Check).where(
             Check.table_session_id == session_id,
@@ -102,6 +112,7 @@ async def request_check(
     )
 
     if existing_check:
+        # HIGH-04 FIX: Return existing check instead of creating duplicate (idempotent response)
         return RequestCheckResponse(
             check_id=existing_check.id,
             total_cents=existing_check.total_cents,
@@ -141,10 +152,19 @@ async def request_check(
 
     session.status = "PAYING"
 
-    db.commit()
-    db.refresh(check)
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(check)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to commit check request", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create check - please try again",
+        )
 
-    # Publish event
+    # HIGH-02 FIX: Publish event to waiters, admin, and session using centralized pattern
     redis = None
     try:
         redis = await get_redis_client()
@@ -158,11 +178,10 @@ async def request_check(
             actor={"user_id": None, "role": "DINER"},
         )
         await publish_to_waiters(redis, branch_id, event)
+        await publish_to_admin(redis, branch_id, event)  # HIGH-02 FIX: Also notify admin/dashboard
     except Exception as e:
         logger.error("Failed to publish CHECK_REQUESTED event", check_id=check.id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return RequestCheckResponse(
         check_id=check.id,
@@ -188,9 +207,10 @@ async def record_cash_payment(
     """
     require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
 
-    # Find the check
+    # AUDIT FIX: Use SELECT FOR UPDATE to prevent race condition
+    # This locks the check row until the transaction completes
     check = db.scalar(
-        select(Check).where(Check.id == body.check_id)
+        select(Check).where(Check.id == body.check_id).with_for_update()
     )
 
     if not check:
@@ -211,6 +231,21 @@ async def record_cash_payment(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Check is already paid",
+        )
+
+    # HIGH-VALID-02 FIX: Validate payment amount is positive
+    if body.amount_cents <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payment amount must be positive",
+        )
+
+    # AUDIT FIX: Validate payment amount doesn't exceed remaining
+    remaining = check.total_cents - check.paid_cents
+    if body.amount_cents > remaining:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Payment amount ({body.amount_cents}) exceeds remaining ({remaining})",
         )
 
     # Create payment record
@@ -237,16 +272,25 @@ async def record_cash_payment(
     if check.paid_cents >= check.total_cents:
         check.status = "PAID"
 
-    db.commit()
-    db.refresh(payment)
-    db.refresh(check)
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(payment)
+        db.refresh(check)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to commit cash payment", check_id=check.id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to record payment - please try again",
+        )
 
     # Get session for event
     session = db.scalar(
         select(TableSession).where(TableSession.id == check.table_session_id)
     )
 
-    # Publish events
+    # HIGH-02 FIX: Publish events to all relevant channels (waiters, admin, session)
     redis = None
     try:
         redis = await get_redis_client()
@@ -267,6 +311,8 @@ async def record_cash_payment(
             actor={"user_id": int(ctx["sub"]), "role": "WAITER"},
         )
         await publish_to_waiters(redis, check.branch_id, payment_event)
+        await publish_to_admin(redis, check.branch_id, payment_event)  # HIGH-02 FIX: Notify admin
+        await publish_to_session(redis, check.table_session_id, payment_event)  # HIGH-02 FIX: Notify diners
 
         # If check is fully paid
         if check.status == "PAID":
@@ -280,11 +326,11 @@ async def record_cash_payment(
                 actor={"user_id": int(ctx["sub"]), "role": "WAITER"},
             )
             await publish_to_waiters(redis, check.branch_id, paid_event)
+            await publish_to_admin(redis, check.branch_id, paid_event)  # HIGH-02 FIX: Notify admin
+            await publish_to_session(redis, check.table_session_id, paid_event)  # HIGH-02 FIX: Notify diners
     except Exception as e:
         logger.error("Failed to publish payment event", check_id=check.id, payment_id=payment.id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return PaymentResponse(
         payment_id=payment.id,
@@ -365,9 +411,18 @@ async def clear_table(
     session.closed_at = datetime.now(timezone.utc)
     table.status = "FREE"
 
-    db.commit()
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to commit table clear", table_id=table_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear table - please try again",
+        )
 
-    # Publish event
+    # HIGH-02 FIX: Publish event to waiters and admin channels
     redis = None
     try:
         redis = await get_redis_client()
@@ -381,11 +436,10 @@ async def clear_table(
             actor={"user_id": int(ctx["sub"]), "role": "WAITER"},
         )
         await publish_to_waiters(redis, table.branch_id, event)
+        await publish_to_admin(redis, table.branch_id, event)  # HIGH-02 FIX: Notify admin/dashboard
     except Exception as e:
         logger.error("Failed to publish TABLE_CLEARED event", table_id=table_id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ClearTableResponse(table_id=table_id, status="FREE")
 
@@ -564,24 +618,34 @@ async def create_mercadopago_preference(
         "notification_url": settings.mercadopago_notification_url or f"{settings.base_url}/api/billing/mercadopago/webhook",
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://api.mercadopago.com/checkout/preferences",
-            headers={
-                "Authorization": f"Bearer {settings.mercadopago_access_token}",
-                "Content-Type": "application/json",
-            },
-            json=preference_data,
+    # REC-01 FIX: Use circuit breaker to prevent cascading failures
+    try:
+        async with mercadopago_breaker.call():
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.mercadopago.com/checkout/preferences",
+                    headers={
+                        "Authorization": f"Bearer {settings.mercadopago_access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=preference_data,
+                )
+
+                if response.status_code != 201:
+                    logger.error("Mercado Pago preference creation failed", status_code=response.status_code, response=response.text)
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Failed to create Mercado Pago preference",
+                    )
+
+                mp_response = response.json()
+    except CircuitBreakerError as e:
+        logger.warning("Mercado Pago circuit breaker open", retry_after=e.retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Mercado Pago service temporarily unavailable. Please try again in {int(e.retry_after)} seconds.",
+            headers={"Retry-After": str(int(e.retry_after))},
         )
-
-        if response.status_code != 201:
-            logger.error("Mercado Pago preference creation failed", status_code=response.status_code, response=response.text)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Failed to create Mercado Pago preference",
-            )
-
-        mp_response = response.json()
 
     # Create pending payment record
     payment = Payment(
@@ -594,7 +658,17 @@ async def create_mercadopago_preference(
         external_id=mp_response.get("id"),
     )
     db.add(payment)
-    db.commit()
+
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create MP payment record", check_id=check.id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create payment record - please try again",
+        )
 
     return MercadoPagoPreferenceResponse(
         preference_id=mp_response["id"],
@@ -701,19 +775,47 @@ async def mercadopago_webhook(
             detail="Mercado Pago is not configured",
         )
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            f"https://api.mercadopago.com/v1/payments/{payment_id}",
-            headers={
-                "Authorization": f"Bearer {settings.mercadopago_access_token}",
-            },
+    # REC-01 FIX: Use circuit breaker for fetching payment details
+    # REC-02 FIX: Queue for retry on failure
+    try:
+        async with mercadopago_breaker.call():
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"https://api.mercadopago.com/v1/payments/{payment_id}",
+                    headers={
+                        "Authorization": f"Bearer {settings.mercadopago_access_token}",
+                    },
+                )
+
+                if response.status_code != 200:
+                    logger.error("Failed to fetch MP payment", payment_id=payment_id, status_code=response.status_code)
+                    # REC-02 FIX: Queue for retry instead of failing immediately
+                    await webhook_retry_queue.enqueue(
+                        webhook_type="mercadopago",
+                        payload=body,
+                        error=f"Failed to fetch payment: HTTP {response.status_code}",
+                    )
+                    return {"status": "queued_for_retry", "reason": "failed to fetch payment details"}
+
+                mp_payment = response.json()
+    except CircuitBreakerError as e:
+        logger.warning("MP webhook: circuit breaker open, queueing for retry", retry_after=e.retry_after)
+        # REC-02 FIX: Queue webhook for retry when circuit is open
+        await webhook_retry_queue.enqueue(
+            webhook_type="mercadopago",
+            payload=body,
+            error=f"Circuit breaker open: {e}",
         )
-
-        if response.status_code != 200:
-            logger.error("Failed to fetch MP payment", payment_id=payment_id, status_code=response.status_code)
-            raise HTTPException(status_code=502, detail="Failed to fetch payment")
-
-        mp_payment = response.json()
+        return {"status": "queued_for_retry", "reason": "service temporarily unavailable"}
+    except Exception as e:
+        logger.error("MP webhook: unexpected error fetching payment", error=str(e))
+        # REC-02 FIX: Queue for retry on any failure
+        await webhook_retry_queue.enqueue(
+            webhook_type="mercadopago",
+            payload=body,
+            error=str(e),
+        )
+        return {"status": "queued_for_retry", "reason": "unexpected error"}
 
     # Extract check_id from external_reference
     external_ref = mp_payment.get("external_reference", "")
@@ -725,18 +827,19 @@ async def mercadopago_webhook(
     except ValueError:
         return {"status": "ignored", "reason": "invalid check id"}
 
-    # Find the check
-    check = db.scalar(select(Check).where(Check.id == check_id))
+    # CRIT-01 FIX: Use SELECT FOR UPDATE to prevent race condition on concurrent webhooks
+    check = db.scalar(select(Check).where(Check.id == check_id).with_for_update())
     if not check:
         return {"status": "ignored", "reason": "check not found"}
 
     # Find or create payment record
+    # CRIT-01 FIX: Also lock the payment record to prevent double processing
     payment = db.scalar(
         select(Payment).where(
             Payment.check_id == check_id,
             Payment.provider == "MERCADO_PAGO",
             Payment.external_id == str(mp_payment.get("preference_id")),
-        )
+        ).with_for_update()
     )
 
     if not payment:
@@ -774,9 +877,18 @@ async def mercadopago_webhook(
     elif mp_status in ["rejected", "cancelled"]:
         payment.status = "REJECTED"
 
-    db.commit()
-    db.refresh(payment)
-    db.refresh(check)
+    # CRIT-01 FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(payment)
+        db.refresh(check)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to commit MP payment update", check_id=check.id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process payment - please try again",
+        )
 
     # Get session for events
     session = db.scalar(
@@ -836,8 +948,6 @@ async def mercadopago_webhook(
             await publish_to_session(redis, check.table_session_id, event)
     except Exception as e:
         logger.error("Failed to publish MP payment event", check_id=check.id, mp_status=mp_status, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return {"status": "processed", "payment_status": mp_status}

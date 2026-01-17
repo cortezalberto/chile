@@ -10,6 +10,7 @@ This service provides functions to:
 from datetime import datetime
 from typing import TypeVar, Type
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from ..models import (
     AuditMixin,
@@ -84,6 +85,8 @@ def soft_delete(db: Session, entity: T, user_id: int, user_email: str) -> T:
     """
     Perform soft delete on an entity with audit trail.
 
+    SVC-MED-07 FIX: Added try-except with rollback for transaction safety.
+
     Args:
         db: Database session
         entity: The entity to soft delete (must inherit from AuditMixin)
@@ -92,16 +95,25 @@ def soft_delete(db: Session, entity: T, user_id: int, user_email: str) -> T:
 
     Returns:
         The soft-deleted entity
+
+    Raises:
+        Exception: Re-raises any exception after rollback
     """
     entity.soft_delete(user_id, user_email)
-    db.commit()
-    db.refresh(entity)
+    try:
+        db.commit()
+        db.refresh(entity)
+    except Exception:
+        db.rollback()
+        raise
     return entity
 
 
 def restore_entity(db: Session, entity: T, user_id: int, user_email: str) -> T:
     """
     Restore a soft-deleted entity.
+
+    SVC-MED-06 FIX: Added null check and try-except with rollback.
 
     Args:
         db: Database session
@@ -111,10 +123,22 @@ def restore_entity(db: Session, entity: T, user_id: int, user_email: str) -> T:
 
     Returns:
         The restored entity
+
+    Raises:
+        ValueError: If entity is None
+        Exception: Re-raises any exception after rollback
     """
+    # SVC-MED-06 FIX: Null check for entity
+    if entity is None:
+        raise ValueError("Cannot restore None entity")
+
     entity.restore(user_id, user_email)
-    db.commit()
-    db.refresh(entity)
+    try:
+        db.commit()
+        db.refresh(entity)
+    except Exception:
+        db.rollback()
+        raise
     return entity
 
 
@@ -175,10 +199,12 @@ def find_active_entity(db: Session, model_class: Type[T], entity_id: int) -> T |
     Returns:
         The entity if found and active, None otherwise
     """
-    return (
-        db.query(model_class)
-        .filter(model_class.id == entity_id, model_class.is_active == True)
-        .first()
+    # MED-29-09 FIX: Use modern SQLAlchemy 2.0 select() instead of deprecated query() API
+    return db.scalar(
+        select(model_class).where(
+            model_class.id == entity_id,
+            model_class.is_active == True,
+        )
     )
 
 
@@ -194,10 +220,12 @@ def find_deleted_entity(db: Session, model_class: Type[T], entity_id: int) -> T 
     Returns:
         The entity if found and deleted, None otherwise
     """
-    return (
-        db.query(model_class)
-        .filter(model_class.id == entity_id, model_class.is_active == False)
-        .first()
+    # MED-29-09 FIX: Use modern SQLAlchemy 2.0 select() instead of deprecated query() API
+    return db.scalar(
+        select(model_class).where(
+            model_class.id == entity_id,
+            model_class.is_active == False,
+        )
     )
 
 

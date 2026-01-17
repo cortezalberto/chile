@@ -1,4 +1,4 @@
-import { type InputHTMLAttributes, forwardRef } from 'react'
+import { type InputHTMLAttributes, forwardRef, useId } from 'react'
 
 interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   label?: string
@@ -7,7 +7,10 @@ interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(
   ({ label, error, className = '', id, ...props }, ref) => {
-    const inputId = id || label?.toLowerCase().replace(/\s+/g, '-')
+    // WAITER-COMP-MED-02 FIX: Use useId for unique IDs
+    const generatedId = useId()
+    const inputId = id || generatedId
+    const errorId = `${inputId}-error`
 
     return (
       <div className="w-full">
@@ -22,6 +25,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         <input
           ref={ref}
           id={inputId}
+          // WAITER-COMP-MED-02 FIX: aria-describedby linking input to error message
+          aria-describedby={error ? errorId : undefined}
+          aria-invalid={error ? true : undefined}
           className={`
             w-full px-4 py-2.5 bg-neutral-800 border rounded-lg
             text-white placeholder-neutral-500
@@ -33,7 +39,11 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
           `}
           {...props}
         />
-        {error && <p className="mt-1.5 text-sm text-red-500">{error}</p>}
+        {error && (
+          <p id={errorId} className="mt-1.5 text-sm text-red-500" role="alert">
+            {error}
+          </p>
+        )}
       </div>
     )
   }

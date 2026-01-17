@@ -19,7 +19,13 @@ export function ConnectionBanner({ isConnected }: ConnectionBannerProps) {
   }
 
   return (
-    <div className="fixed top-16 left-0 right-0 bg-red-600 text-white p-3 z-50 flex items-center justify-center gap-4 shadow-lg animate-pulse">
+    // WAITER-COMP-MED-04 FIX: aria-live="assertive" for connection status changes
+    <div
+      role="alert"
+      aria-live="assertive"
+      aria-atomic="true"
+      className="fixed top-16 left-0 right-0 bg-red-600 text-white p-3 z-50 flex items-center justify-center gap-4 shadow-lg animate-pulse"
+    >
       <svg
         className="w-5 h-5"
         fill="none"

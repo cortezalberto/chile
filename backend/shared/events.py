@@ -5,6 +5,7 @@ Defines event schema and publishing utilities.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
@@ -61,6 +62,8 @@ class Event:
     All events follow this structure for consistency and easy parsing.
     The 'entity' field contains event-specific data (IDs, etc.).
     The 'actor' field identifies who triggered the event.
+
+    SHARED-HIGH-06 FIX: Added __post_init__ validation for required fields.
     """
 
     type: str
@@ -74,6 +77,39 @@ class Event:
     ts: str | None = None
     v: int = 1  # Schema version for future compatibility
 
+    def __post_init__(self) -> None:
+        """
+        SHARED-HIGH-06 FIX: Validate event fields after initialization.
+        Prevents malformed events from being published to Redis.
+        """
+        # Validate required string fields
+        if not self.type or not isinstance(self.type, str):
+            raise ValueError("Event type must be a non-empty string")
+
+        # Validate required integer fields
+        if not isinstance(self.tenant_id, int) or self.tenant_id <= 0:
+            raise ValueError("Event tenant_id must be a positive integer")
+
+        if not isinstance(self.branch_id, int) or self.branch_id < 0:
+            raise ValueError("Event branch_id must be a non-negative integer")
+
+        # Validate optional integer fields
+        if self.table_id is not None and (not isinstance(self.table_id, int) or self.table_id <= 0):
+            raise ValueError("Event table_id must be a positive integer or None")
+
+        if self.session_id is not None and (not isinstance(self.session_id, int) or self.session_id <= 0):
+            raise ValueError("Event session_id must be a positive integer or None")
+
+        if self.sector_id is not None and (not isinstance(self.sector_id, int) or self.sector_id <= 0):
+            raise ValueError("Event sector_id must be a positive integer or None")
+
+        # Validate dict fields
+        if self.entity is not None and not isinstance(self.entity, dict):
+            raise ValueError("Event entity must be a dict or None")
+
+        if self.actor is not None and not isinstance(self.actor, dict):
+            raise ValueError("Event actor must be a dict or None")
+
     def to_json(self) -> str:
         """Serialize event to JSON string."""
         data = asdict(self)
@@ -84,7 +120,11 @@ class Event:
 
     @classmethod
     def from_json(cls, json_str: str) -> "Event":
-        """Deserialize event from JSON string."""
+        """
+        Deserialize event from JSON string.
+
+        SHARED-HIGH-06 FIX: Validation occurs automatically in __post_init__.
+        """
         data = json.loads(json_str)
         return cls(**data)
 
@@ -133,10 +173,21 @@ def channel_tenant_admin(tenant_id: int) -> str:
 
 # =============================================================================
 # Redis Connection Pool (BACK-HIGH-04)
+# SHARED-CRIT-05 FIX: Added asyncio.Lock for thread-safe singleton initialization
 # =============================================================================
 
 # Global Redis connection pool singleton
 _redis_pool: redis.Redis | None = None
+# SHARED-CRIT-05 FIX: Lock to prevent race condition during pool initialization
+_redis_pool_lock: asyncio.Lock | None = None
+
+
+def _get_pool_lock() -> asyncio.Lock:
+    """Get or create the pool lock (lazy initialization for event loop safety)."""
+    global _redis_pool_lock
+    if _redis_pool_lock is None:
+        _redis_pool_lock = asyncio.Lock()
+    return _redis_pool_lock
 
 
 async def get_redis_pool() -> redis.Redis:
@@ -146,16 +197,27 @@ async def get_redis_pool() -> redis.Redis:
     Uses a connection pool with max_connections=20 for efficient connection reuse.
     This avoids creating a new connection per request, improving performance
     and reducing connection overhead.
+
+    SHARED-CRIT-05 FIX: Uses asyncio.Lock to prevent race condition during
+    concurrent initialization from multiple coroutines.
     """
     global _redis_pool
-    if _redis_pool is None:
-        _redis_pool = redis.from_url(
-            REDIS_URL,
-            max_connections=20,
-            decode_responses=True,
-            socket_connect_timeout=5,  # Connection timeout
-            socket_timeout=5,  # Read/write timeout
-        )
+
+    # Fast path: pool already initialized
+    if _redis_pool is not None:
+        return _redis_pool
+
+    # Slow path: acquire lock and initialize if needed
+    async with _get_pool_lock():
+        # Double-check after acquiring lock (another coroutine may have initialized)
+        if _redis_pool is None:
+            _redis_pool = redis.from_url(
+                REDIS_URL,
+                max_connections=20,
+                decode_responses=True,
+                socket_connect_timeout=5,  # Connection timeout
+                socket_timeout=5,  # Read/write timeout
+            )
     return _redis_pool
 
 
@@ -165,11 +227,14 @@ async def close_redis_pool() -> None:
 
     Should be called during application lifecycle shutdown to cleanly
     release all connections in the pool.
+
+    SHARED-CRIT-05 FIX: Also clears the pool lock for clean restart.
     """
-    global _redis_pool
+    global _redis_pool, _redis_pool_lock
     if _redis_pool is not None:
         await _redis_pool.close()
         _redis_pool = None
+    _redis_pool_lock = None
 
 
 async def get_redis_client() -> redis.Redis:

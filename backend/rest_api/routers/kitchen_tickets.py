@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload, joinedload
 from sqlalchemy import select
 
 from rest_api.db import get_db
@@ -174,27 +174,41 @@ def _build_ticket_output(
     table: Table | None,
     db: Session,
 ) -> KitchenTicketOutput:
-    """Helper to build KitchenTicketOutput from models."""
-    # Get ticket items with product info
-    ticket_items = db.execute(
-        select(KitchenTicketItem, RoundItem, Product)
-        .join(RoundItem, KitchenTicketItem.round_item_id == RoundItem.id)
-        .join(Product, RoundItem.product_id == Product.id)
-        .where(KitchenTicketItem.ticket_id == ticket.id)
-    ).all()
+    """
+    Helper to build KitchenTicketOutput from models.
 
-    item_outputs = [
-        KitchenTicketItemOutput(
-            id=ticket_item.id,
-            round_item_id=ticket_item.round_item_id,
-            product_id=round_item.product_id,
-            product_name=product.name,
-            qty=ticket_item.qty,
-            status=ticket_item.status,
-            notes=round_item.notes,
+    ROUTER-CRIT-02 FIX: Added error handling for database queries.
+    """
+    item_outputs = []
+
+    try:
+        # Get ticket items with product info
+        ticket_items = db.execute(
+            select(KitchenTicketItem, RoundItem, Product)
+            .join(RoundItem, KitchenTicketItem.round_item_id == RoundItem.id)
+            .join(Product, RoundItem.product_id == Product.id)
+            .where(KitchenTicketItem.ticket_id == ticket.id)
+        ).all()
+
+        item_outputs = [
+            KitchenTicketItemOutput(
+                id=ticket_item.id,
+                round_item_id=ticket_item.round_item_id,
+                product_id=round_item.product_id,
+                product_name=product.name,
+                qty=ticket_item.qty,
+                status=ticket_item.status,
+                notes=round_item.notes,
+            )
+            for ticket_item, round_item, product in ticket_items
+        ]
+    except Exception as e:
+        logger.error(
+            "Failed to build ticket items",
+            ticket_id=ticket.id,
+            error=str(e),
         )
-        for ticket_item, round_item, product in ticket_items
-    ]
+        # Continue with empty items list - ticket info is still valuable
 
     return KitchenTicketOutput(
         id=ticket.id,
@@ -236,9 +250,12 @@ def list_pending_tickets(
     if not branch_ids:
         return ListTicketsResponse(stations=[])
 
-    # Build query for pending tickets
+    # CRIT-03 FIX: Build query with eager loading to prevent N+1 queries
     query = (
         select(KitchenTicket)
+        .options(
+            selectinload(KitchenTicket.items).joinedload(KitchenTicketItem.product),
+        )
         .where(
             KitchenTicket.branch_id.in_(branch_ids),
             KitchenTicket.status.in_(["PENDING", "IN_PROGRESS", "READY"]),
@@ -253,23 +270,41 @@ def list_pending_tickets(
         KitchenTicket.created_at.asc(),
     )
 
-    tickets = db.execute(query).scalars().all()
+    tickets = db.execute(query).scalars().unique().all()
+
+    # CRIT-03 FIX: Prefetch all rounds and sessions in batch to avoid N+1
+    round_ids = {t.round_id for t in tickets if t.round_id}
+    rounds_map: dict[int, Round] = {}
+    sessions_map: dict[int, TableSession] = {}
+    tables_map: dict[int, Table] = {}
+
+    if round_ids:
+        rounds = db.execute(
+            select(Round)
+            .options(
+                joinedload(Round.session).joinedload(TableSession.table)
+            )
+            .where(Round.id.in_(round_ids))
+        ).scalars().unique().all()
+
+        for r in rounds:
+            rounds_map[r.id] = r
+            if r.session:
+                sessions_map[r.table_session_id] = r.session
+                if r.session.table:
+                    tables_map[r.session.table_id] = r.session.table
 
     # Group tickets by station
     stations_map: dict[str, list[KitchenTicketOutput]] = {}
 
     for ticket in tickets:
-        # Get round and table info
-        round_obj = db.scalar(select(Round).where(Round.id == ticket.round_id))
+        # Get round and table info from prefetched data
+        round_obj = rounds_map.get(ticket.round_id) if ticket.round_id else None
         if not round_obj:
             continue
 
-        session = db.scalar(
-            select(TableSession).where(TableSession.id == round_obj.table_session_id)
-        )
-        table = db.scalar(
-            select(Table).where(Table.id == session.table_id)
-        ) if session else None
+        session = sessions_map.get(round_obj.table_session_id) if round_obj else None
+        table = tables_map.get(session.table_id) if session else None
 
         ticket_output = _build_ticket_output(ticket, round_obj, table, db)
 
@@ -467,9 +502,7 @@ async def update_ticket_status(
             new_status=new_status,
             error=str(e),
         )
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return _build_ticket_output(ticket, round_obj, table, db)
 

@@ -55,6 +55,9 @@ export function CountBadge({ count, variant = 'orange', pulse = false }: CountBa
 
   return (
     <span
+      // WAITER-COMP-HIGH-02 FIX: aria-live for dynamic count updates
+      aria-live="polite"
+      aria-atomic="true"
       className={`
         inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5
         text-xs font-bold text-white rounded-full

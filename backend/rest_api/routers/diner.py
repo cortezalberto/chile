@@ -7,11 +7,12 @@ Uses table token authentication instead of JWT.
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 
 from rest_api.db import get_db
+from shared.rate_limit import limiter
 from rest_api.models import (
     Table,
     TableSession,
@@ -38,6 +39,7 @@ from shared.schemas import (
     RegisterDinerRequest,
     DinerOutput,
 )
+from fastapi import Header
 from shared.logging import diner_logger as logger
 from shared.events import (
     get_redis_client,
@@ -57,7 +59,9 @@ router = APIRouter(prefix="/api/diner", tags=["diner"])
 
 
 @router.post("/register", response_model=DinerOutput)
+@limiter.limit("20/minute")
 def register_diner(
+    request: Request,
     body: RegisterDinerRequest,
     db: Session = Depends(get_db),
     table_ctx: dict[str, int] = Depends(current_table_context),
@@ -116,8 +120,18 @@ def register_diner(
         local_id=body.local_id,
     )
     db.add(new_diner)
-    db.commit()
-    db.refresh(new_diner)
+
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(new_diner)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to register diner", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register diner - please try again",
+        )
 
     return DinerOutput(
         id=new_diner.id,
@@ -172,10 +186,13 @@ def get_session_diners(
 
 
 @router.post("/rounds/submit", response_model=SubmitRoundResponse)
+@limiter.limit("10/minute")
 async def submit_round(
+    request: Request,
     body: SubmitRoundRequest,
     db: Session = Depends(get_db),
     table_ctx: dict[str, int] = Depends(current_table_context),
+    x_idempotency_key: str | None = Header(None),
 ) -> SubmitRoundResponse:
     """
     Submit a new round of orders.
@@ -184,11 +201,38 @@ async def submit_round(
     a ROUND_SUBMITTED event for waiters and kitchen.
 
     Requires X-Table-Token header with valid table token.
+
+    HIGH-04 FIX: Supports X-Idempotency-Key header to prevent duplicate submissions.
+    If a round with the same idempotency key already exists for this session,
+    returns the existing round instead of creating a duplicate.
     """
     session_id = table_ctx["session_id"]
     table_id = table_ctx["table_id"]
     branch_id = table_ctx["branch_id"]
     tenant_id = table_ctx["tenant_id"]
+
+    # CRIT-IDEMP-01 FIX: Check for existing round with same idempotency key
+    # Uses stored idempotency_key field for reliable duplicate detection
+    if x_idempotency_key:
+        existing_round = db.scalar(
+            select(Round).where(
+                Round.table_session_id == session_id,
+                Round.idempotency_key == x_idempotency_key,
+                Round.status != "CANCELED",
+            )
+        )
+        if existing_round:
+            # Return existing round as idempotent response
+            logger.info("Idempotent round submission detected",
+                       session_id=session_id,
+                       round_id=existing_round.id,
+                       idempotency_key=x_idempotency_key[:8] + "...")
+            return SubmitRoundResponse(
+                session_id=session_id,
+                round_id=existing_round.id,
+                round_number=existing_round.round_number,
+                status=existing_round.status,
+            )
 
     # Verify session exists and is open
     session = db.scalar(
@@ -204,7 +248,20 @@ async def submit_round(
             detail="Session is not active or does not exist",
         )
 
-    # Get next round number for this session
+    # CRIT-29-01 FIX: Use SELECT FOR UPDATE to prevent race condition on concurrent round submissions
+    # Lock the session row to serialize round number assignment
+    locked_session = db.scalar(
+        select(TableSession)
+        .where(TableSession.id == session_id)
+        .with_for_update()
+    )
+    if not locked_session:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session not found",
+        )
+
+    # Get next round number for this session (now safe under lock)
     max_round = db.scalar(
         select(func.max(Round.round_number))
         .where(Round.table_session_id == session_id)
@@ -219,30 +276,46 @@ async def submit_round(
         round_number=next_round_number,
         status="SUBMITTED",
         submitted_at=datetime.now(timezone.utc),
+        # CRIT-IDEMP-01 FIX: Store idempotency key for duplicate detection
+        idempotency_key=x_idempotency_key,
     )
     db.add(new_round)
     db.flush()  # Get the round ID
 
-    # Create round items
-    for item in body.items:
-        # Get product and branch pricing
-        result = db.execute(
-            select(Product, BranchProduct)
-            .join(BranchProduct, Product.id == BranchProduct.product_id)
-            .where(
-                Product.id == item.product_id,
-                BranchProduct.branch_id == branch_id,
-                BranchProduct.is_available == True,
-            )
-        ).first()
+    # REC-03 FIX: Batch fetch all products and branch prices in single queries
+    # instead of N queries per item (prevents N+1 query pattern)
+    product_ids = [item.product_id for item in body.items]
 
-        if not result:
+    # Single query to fetch all products with their branch prices
+    products_query = db.execute(
+        select(Product, BranchProduct)
+        .join(BranchProduct, Product.id == BranchProduct.product_id)
+        .where(
+            Product.id.in_(product_ids),
+            Product.is_active == True,
+            BranchProduct.branch_id == branch_id,
+            BranchProduct.is_available == True,
+        )
+    ).all()
+
+    # Build lookup dict: product_id -> (Product, BranchProduct)
+    product_lookup: dict[int, tuple] = {
+        product.id: (product, branch_product)
+        for product, branch_product in products_query
+    }
+
+    # Validate all products are available before creating any items
+    for item in body.items:
+        if item.product_id not in product_lookup:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Product {item.product_id} not available in this branch",
             )
 
-        product, branch_product = result
+    # REC-03 FIX: Batch create all round items
+    round_items_to_add = []
+    for item in body.items:
+        product, branch_product = product_lookup[item.product_id]
 
         round_item = RoundItem(
             tenant_id=tenant_id,
@@ -253,10 +326,22 @@ async def submit_round(
             unit_price_cents=branch_product.price_cents,
             notes=item.notes,
         )
-        db.add(round_item)
+        round_items_to_add.append(round_item)
 
-    db.commit()
-    db.refresh(new_round)
+    # Add all items in batch
+    db.add_all(round_items_to_add)
+
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(new_round)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to submit round", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to submit order - please try again",
+        )
 
     # Publish event to Redis
     redis = None
@@ -277,9 +362,7 @@ async def submit_round(
     except Exception as e:
         # Log but don't fail the request if Redis is unavailable
         logger.error("Failed to publish ROUND_SUBMITTED event", round_id=new_round.id, session_id=session_id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return SubmitRoundResponse(
         session_id=session_id,
@@ -299,6 +382,8 @@ def get_session_rounds(
     Get all rounds for a session.
 
     Returns the history of orders with their current status.
+
+    AUDIT FIX: Uses batch loading to prevent N+1 queries.
     """
     # Verify session matches token
     if table_ctx["session_id"] != session_id:
@@ -313,14 +398,27 @@ def get_session_rounds(
         .order_by(Round.round_number)
     ).scalars().all()
 
+    if not rounds:
+        return []
+
+    # AUDIT FIX: Batch load all items and products at once instead of per-round
+    round_ids = [r.id for r in rounds]
+
+    # Single query to get all items with their products
+    all_items = db.execute(
+        select(RoundItem, Product)
+        .join(Product, RoundItem.product_id == Product.id)
+        .where(RoundItem.round_id.in_(round_ids))
+    ).all()
+
+    # Group items by round_id
+    items_by_round: dict[int, list[tuple]] = {rid: [] for rid in round_ids}
+    for item, product in all_items:
+        items_by_round[item.round_id].append((item, product))
+
     result = []
     for round_obj in rounds:
-        # Get items for this round
-        items = db.execute(
-            select(RoundItem, Product)
-            .join(Product, RoundItem.product_id == Product.id)
-            .where(RoundItem.round_id == round_obj.id)
-        ).all()
+        items = items_by_round.get(round_obj.id, [])
 
         item_outputs = [
             RoundItemOutput(
@@ -348,7 +446,9 @@ def get_session_rounds(
 
 
 @router.post("/service-call", response_model=ServiceCallOutput)
+@limiter.limit("10/minute")
 async def create_service_call(
+    request: Request,
     body: CreateServiceCallRequest,
     db: Session = Depends(get_db),
     table_ctx: dict[str, int] = Depends(current_table_context),
@@ -377,7 +477,8 @@ async def create_service_call(
             detail="Session is not active",
         )
 
-    # Check for existing open call of the same type
+    # HIGH-04 FIX: Check for existing open call of the same type (idempotency)
+    # This prevents duplicate service calls when network retries occur
     existing_call = db.scalar(
         select(ServiceCall).where(
             ServiceCall.table_session_id == session_id,
@@ -387,7 +488,7 @@ async def create_service_call(
     )
 
     if existing_call:
-        # Return existing call instead of creating duplicate
+        # HIGH-04 FIX: Return existing call instead of creating duplicate (idempotent response)
         return ServiceCallOutput(
             id=existing_call.id,
             type=existing_call.type,
@@ -405,8 +506,18 @@ async def create_service_call(
         status="OPEN",
     )
     db.add(service_call)
-    db.commit()
-    db.refresh(service_call)
+
+    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    try:
+        db.commit()
+        db.refresh(service_call)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create service call", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create service call - please try again",
+        )
 
     # PWAW-C003/C004: Publish event using publish_service_call_event with correct entity structure
     redis = None
@@ -427,9 +538,7 @@ async def create_service_call(
         logger.info("SERVICE_CALL_CREATED published", call_id=service_call.id, call_type=body.type)
     except Exception as e:
         logger.error("Failed to publish SERVICE_CALL_CREATED event", service_call_id=service_call.id, error=str(e))
-    finally:
-        if redis:
-            await redis.close()
+    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ServiceCallOutput(
         id=service_call.id,

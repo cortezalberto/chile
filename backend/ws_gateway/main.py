@@ -27,20 +27,19 @@ from rest_api.models import WaiterSectorAssignment
 # Global connection manager
 manager = ConnectionManager()
 
+# WS-CRIT-05 FIX: Maximum message size to prevent DoS attacks
+# 64KB should be enough for any valid message (heartbeats, acks, etc.)
+MAX_MESSAGE_SIZE = 64 * 1024  # 64KB
 
-def get_waiter_sector_ids(user_id: int, tenant_id: int) -> list[int]:
+
+def _get_waiter_sector_ids_sync(user_id: int, tenant_id: int) -> list[int]:
     """
-    Get the sector IDs assigned to a waiter for today.
-
-    Args:
-        user_id: The waiter's user ID.
-        tenant_id: The tenant ID.
-
-    Returns:
-        List of sector IDs the waiter is assigned to.
+    Synchronous helper to get sector IDs assigned to a waiter.
+    Used internally by get_waiter_sector_ids_async.
     """
-    db: Session = SessionLocal()
-    try:
+    from rest_api.db import get_db_context
+
+    with get_db_context() as db:
         today = date.today()
         assignments = db.execute(
             select(WaiterSectorAssignment.sector_id)
@@ -52,8 +51,49 @@ def get_waiter_sector_ids(user_id: int, tenant_id: int) -> list[int]:
             )
         ).scalars().all()
         return list(set(assignments))  # Unique sector IDs
-    finally:
-        db.close()
+
+
+# WS-CRIT-04 FIX: Timeout for DB lookup to prevent blocking event loop
+DB_LOOKUP_TIMEOUT = 2.0  # seconds
+
+
+async def get_waiter_sector_ids_async(user_id: int, tenant_id: int) -> list[int]:
+    """
+    Get the sector IDs assigned to a waiter for today (async with timeout).
+
+    WS-CRIT-04 FIX: Uses asyncio.to_thread with timeout to prevent blocking.
+
+    Args:
+        user_id: The waiter's user ID.
+        tenant_id: The tenant ID.
+
+    Returns:
+        List of sector IDs the waiter is assigned to.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_get_waiter_sector_ids_sync, user_id, tenant_id),
+            timeout=DB_LOOKUP_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "DB lookup timeout for waiter sectors",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            timeout=DB_LOOKUP_TIMEOUT
+        )
+        return []  # Return empty list on timeout - waiter will receive all branch events
+
+
+def get_waiter_sector_ids(user_id: int, tenant_id: int) -> list[int]:
+    """
+    Get the sector IDs assigned to a waiter for today (sync version).
+
+    CRIT-13 FIX: Uses context manager for proper connection handling.
+
+    Note: Prefer get_waiter_sector_ids_async() in async context.
+    """
+    return _get_waiter_sector_ids_sync(user_id, tenant_id)
 
 
 @asynccontextmanager
@@ -61,6 +101,7 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan handler.
     Starts Redis subscriber on startup.
+    CRIT-06 FIX: Also starts heartbeat cleanup task.
     """
     # Initialize logging
     setup_logging()
@@ -70,13 +111,21 @@ async def lifespan(app: FastAPI):
     # Start Redis subscriber task
     subscriber_task = asyncio.create_task(start_redis_subscriber())
 
+    # CRIT-06 FIX: Start heartbeat cleanup task
+    cleanup_task = asyncio.create_task(start_heartbeat_cleanup())
+
     yield
 
     # Shutdown
     logger.info("Shutting down WebSocket Gateway")
     subscriber_task.cancel()
+    cleanup_task.cancel()
     try:
         await subscriber_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await cleanup_task
     except asyncio.CancelledError:
         pass
 
@@ -85,55 +134,81 @@ async def lifespan(app: FastAPI):
     logger.info("Redis connection pool closed")
 
 
+async def start_heartbeat_cleanup():
+    """
+    CRIT-06 FIX: Periodically clean up stale connections.
+    Runs every 30 seconds to check for connections without recent heartbeats.
+    """
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            cleaned = await manager.cleanup_stale_connections()
+            if cleaned > 0:
+                logger.info("Cleaned up stale connections", count=cleaned)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Error in heartbeat cleanup", error=str(e))
+
+
 async def start_redis_subscriber():
     """
     Start the Redis subscriber that dispatches events to WebSocket clients.
     """
 
     async def on_event(event: dict):
-        """Handle incoming Redis events."""
-        branch_id = event.get("branch_id")
-        session_id = event.get("session_id")
-        sector_id = event.get("sector_id")
-        event_type = event.get("type")
+        """Handle incoming Redis events.
 
-        # Dispatch to sector (waiter assignments) - takes priority over branch
-        if sector_id is not None:
-            sent = await manager.send_to_sector(int(sector_id), event)
-            if sent > 0:
-                logger.debug(
-                    "Dispatched event to sector",
-                    event_type=event_type,
-                    sector_id=sector_id,
-                    clients=sent,
-                )
-            # Also send to branch for managers/admins who may not be assigned to sectors
+        CRIT-WS-11 FIX: Wrapped in try-except to prevent one bad event
+        from breaking the subscriber loop.
+        """
+        try:
+            branch_id = event.get("branch_id")
+            session_id = event.get("session_id")
+            sector_id = event.get("sector_id")
+            event_type = event.get("type")
+
+            # Dispatch to sector (waiter assignments) - takes priority over branch
+            if sector_id is not None:
+                sent = await manager.send_to_sector(int(sector_id), event)
+                if sent > 0:
+                    logger.debug(
+                        "Dispatched event to sector",
+                        event_type=event_type,
+                        sector_id=sector_id,
+                        clients=sent,
+                    )
+
+            # CRIT-WS-10 FIX: Always send to branch when branch_id present
+            # Managers/admins monitoring the branch should always receive events
             if branch_id is not None:
-                # But exclude those who already received via sector
-                # For simplicity, send to branch anyway - clients can dedupe
-                pass
+                sent = await manager.send_to_branch(int(branch_id), event)
+                if sent > 0:
+                    logger.debug(
+                        "Dispatched event to branch",
+                        event_type=event_type,
+                        branch_id=branch_id,
+                        clients=sent,
+                    )
 
-        # Dispatch to branch (waiters/kitchen) - fallback when no sector specified
-        if branch_id is not None and sector_id is None:
-            sent = await manager.send_to_branch(int(branch_id), event)
-            if sent > 0:
-                logger.debug(
-                    "Dispatched event to branch",
-                    event_type=event_type,
-                    branch_id=branch_id,
-                    clients=sent,
-                )
-
-        # Dispatch to session (diners)
-        if session_id is not None:
-            sent = await manager.send_to_session(int(session_id), event)
-            if sent > 0:
-                logger.debug(
-                    "Dispatched event to session",
-                    event_type=event_type,
-                    session_id=session_id,
-                    diners=sent,
-                )
+            # Dispatch to session (diners)
+            if session_id is not None:
+                sent = await manager.send_to_session(int(session_id), event)
+                if sent > 0:
+                    logger.debug(
+                        "Dispatched event to session",
+                        event_type=event_type,
+                        session_id=session_id,
+                        diners=sent,
+                    )
+        except Exception as e:
+            # CRIT-WS-11 FIX: Log but don't crash - continue processing other events
+            logger.error(
+                "Error processing event in on_event callback",
+                event_type=event.get("type"),
+                error=str(e),
+                exc_info=True,
+            )
 
     # Subscribe to all channels
     channels = [
@@ -200,7 +275,7 @@ async def detailed_health_check():
     """
     Detailed health check that verifies Redis connectivity.
     """
-    import redis.asyncio as aioredis
+    from shared.events import get_redis_pool
 
     checks = {
         "service": "ws-gateway",
@@ -211,10 +286,11 @@ async def detailed_health_check():
     all_healthy = True
 
     # Check Redis
+    # REDIS-01 FIX: Use pooled connection instead of creating temporary one
     try:
-        redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await redis_client.ping()
-        await redis_client.close()
+        redis = await get_redis_pool()
+        await redis.ping()
+        # Note: Don't close pooled connection - pool manages lifecycle
         checks["dependencies"]["redis"] = {"status": "healthy"}
     except Exception as e:
         checks["dependencies"]["redis"] = {"status": "unhealthy", "error": str(e)}
@@ -259,6 +335,11 @@ async def waiter_websocket(
         await websocket.close(code=4001, reason=str(e.detail))
         return
 
+    # WS-CRIT-03 FIX: Verify token type is "access" (reject refresh tokens)
+    if claims.get("type") == "refresh":
+        await websocket.close(code=4001, reason="Refresh tokens cannot be used for WebSocket authentication")
+        return
+
     # Extract user info
     user_id = int(claims["sub"])
     tenant_id = int(claims.get("tenant_id", 0))
@@ -270,10 +351,10 @@ async def waiter_websocket(
         await websocket.close(code=4003, reason="Insufficient role")
         return
 
-    # Get today's sector assignments for the waiter
+    # WS-CRIT-04 FIX: Get today's sector assignments with timeout
     sector_ids = []
     if "WAITER" in roles:
-        sector_ids = get_waiter_sector_ids(user_id, tenant_id)
+        sector_ids = await get_waiter_sector_ids_async(user_id, tenant_id)
 
     # Accept and register connection with sector assignments
     await manager.connect(websocket, user_id, branch_ids, sector_ids)
@@ -289,24 +370,72 @@ async def waiter_websocket(
         while True:
             # Wait for messages from client (heartbeat, acks, etc.)
             data = await websocket.receive_text()
+
+            # WS-CRIT-05 FIX: Validate message size to prevent DoS
+            if len(data) > MAX_MESSAGE_SIZE:
+                logger.warning(
+                    "Message size exceeded limit from waiter",
+                    user_id=user_id,
+                    size=len(data),
+                    max_size=MAX_MESSAGE_SIZE,
+                )
+                await websocket.close(code=1009, reason="Message too large")
+                break
+
+            # CRIT-06 FIX: Record heartbeat on any message
+            manager.record_heartbeat(websocket)
             # Handle heartbeats
-            if data == "ping":
+            if data == "ping" or data == '{"type":"ping"}':
                 await websocket.send_text("pong")
             # Handle sector refresh request (when assignments change during shift)
             elif data == "refresh_sectors":
-                new_sector_ids = get_waiter_sector_ids(user_id, tenant_id)
-                manager.update_sectors(websocket, new_sector_ids)
+                # WS-HIGH-05 FIX: Re-validate token before refreshing sectors
+                # This prevents abuse if token was revoked during the session
+                try:
+                    revalidated_claims = verify_jwt(token)
+                    if revalidated_claims.get("type") == "refresh":
+                        await websocket.close(code=4001, reason="Token revoked")
+                        break
+                except HTTPException:
+                    logger.warning(
+                        "Token validation failed on refresh_sectors",
+                        user_id=user_id,
+                    )
+                    await websocket.close(code=4001, reason="Token expired or revoked")
+                    break
+
+                # WS-CRIT-04 FIX: Use async version with timeout
+                new_sector_ids = await get_waiter_sector_ids_async(user_id, tenant_id)
+                await manager.update_sectors(websocket, new_sector_ids)
                 await websocket.send_text(f"sectors_updated:{','.join(map(str, new_sector_ids))}")
+                # WS-HIGH-06 FIX: Enhanced logging for forensics
                 logger.info(
                     "Waiter sectors refreshed",
                     user_id=user_id,
+                    tenant_id=tenant_id,
                     sectors=new_sector_ids,
+                    branches=branch_ids,
+                    roles=roles,
+                )
+            else:
+                # WS-31-MED-04 FIX: Log unknown messages for debugging
+                logger.debug(
+                    "Unknown message from waiter",
+                    user_id=user_id,
+                    message=data[:100] if len(data) > 100 else data,
                 )
 
     except WebSocketDisconnect:
-        logger.info("Waiter disconnected", user_id=user_id)
+        # WS-HIGH-06 FIX: Enhanced logging for forensics
+        logger.info(
+            "Waiter disconnected",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            branches=branch_ids,
+            sectors=sector_ids,
+        )
     finally:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
 
 
 @app.websocket("/ws/kitchen")
@@ -327,6 +456,11 @@ async def kitchen_websocket(
         await websocket.close(code=4001, reason=str(e.detail))
         return
 
+    # WS-CRIT-03 FIX: Verify token type is "access" (reject refresh tokens)
+    if claims.get("type") == "refresh":
+        await websocket.close(code=4001, reason="Refresh tokens cannot be used for WebSocket authentication")
+        return
+
     # Extract user info
     user_id = int(claims["sub"])
     branch_ids = list(claims.get("branch_ids", []))
@@ -345,16 +479,43 @@ async def kitchen_websocket(
         # Keep connection alive
         while True:
             data = await websocket.receive_text()
+
+            # WS-CRIT-05 FIX: Validate message size to prevent DoS
+            if len(data) > MAX_MESSAGE_SIZE:
+                logger.warning(
+                    "Message size exceeded limit from kitchen",
+                    user_id=user_id,
+                    size=len(data),
+                    max_size=MAX_MESSAGE_SIZE,
+                )
+                await websocket.close(code=1009, reason="Message too large")
+                break
+
+            # CRIT-06 FIX: Record heartbeat on any message
+            manager.record_heartbeat(websocket)
             # Handle heartbeat in both plain text and JSON format
             if data == "ping":
                 await websocket.send_text("pong")
             elif data == '{"type":"ping"}':
                 await websocket.send_text('{"type":"pong"}')
+            else:
+                # WS-31-MED-04 FIX: Log unknown messages for debugging
+                logger.debug(
+                    "Unknown message from kitchen",
+                    user_id=user_id,
+                    message=data[:100] if len(data) > 100 else data,
+                )
 
     except WebSocketDisconnect:
-        logger.info("Kitchen disconnected", user_id=user_id)
+        # WS-HIGH-06 FIX: Enhanced logging for forensics
+        logger.info(
+            "Kitchen disconnected",
+            user_id=user_id,
+            branches=branch_ids,
+            roles=roles,
+        )
     finally:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
 
 
 @app.websocket("/ws/admin")
@@ -380,6 +541,11 @@ async def admin_websocket(
         await websocket.close(code=4001, reason=str(e.detail))
         return
 
+    # WS-CRIT-03 FIX: Verify token type is "access" (reject refresh tokens)
+    if claims.get("type") == "refresh":
+        await websocket.close(code=4001, reason="Refresh tokens cannot be used for WebSocket authentication")
+        return
+
     # Extract user info
     user_id = int(claims["sub"])
     branch_ids = list(claims.get("branch_ids", []))
@@ -398,16 +564,43 @@ async def admin_websocket(
         # Keep connection alive
         while True:
             data = await websocket.receive_text()
+
+            # WS-CRIT-05 FIX: Validate message size to prevent DoS
+            if len(data) > MAX_MESSAGE_SIZE:
+                logger.warning(
+                    "Message size exceeded limit from admin",
+                    user_id=user_id,
+                    size=len(data),
+                    max_size=MAX_MESSAGE_SIZE,
+                )
+                await websocket.close(code=1009, reason="Message too large")
+                break
+
+            # CRIT-06 FIX: Record heartbeat on any message
+            manager.record_heartbeat(websocket)
             # Handle heartbeat in both plain text and JSON format
             if data == "ping":
                 await websocket.send_text("pong")
             elif data == '{"type":"ping"}':
                 await websocket.send_text('{"type":"pong"}')
+            else:
+                # WS-31-MED-04 FIX: Log unknown messages for debugging
+                logger.debug(
+                    "Unknown message from admin",
+                    user_id=user_id,
+                    message=data[:100] if len(data) > 100 else data,
+                )
 
     except WebSocketDisconnect:
-        logger.info("Admin disconnected", user_id=user_id)
+        # WS-HIGH-06 FIX: Enhanced logging for forensics
+        logger.info(
+            "Admin disconnected",
+            user_id=user_id,
+            branches=branch_ids,
+            roles=roles,
+        )
     finally:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)
 
 
 @app.websocket("/ws/diner")
@@ -440,7 +633,7 @@ async def diner_websocket(
     await manager.connect(websocket, pseudo_user_id, [branch_id])
 
     # Also register by session for targeted notifications
-    manager.register_session(websocket, session_id)
+    await manager.register_session(websocket, session_id)
 
     logger.info("Diner connected", session_id=session_id, table_id=table_id, branch_id=branch_id)
 
@@ -448,15 +641,42 @@ async def diner_websocket(
         # Keep connection alive
         while True:
             data = await websocket.receive_text()
+
+            # WS-CRIT-05 FIX: Validate message size to prevent DoS
+            if len(data) > MAX_MESSAGE_SIZE:
+                logger.warning(
+                    "Message size exceeded limit from diner",
+                    session_id=session_id,
+                    size=len(data),
+                    max_size=MAX_MESSAGE_SIZE,
+                )
+                await websocket.close(code=1009, reason="Message too large")
+                break
+
+            # CRIT-06 FIX: Record heartbeat on any message
+            manager.record_heartbeat(websocket)
             # Phase 5: Handle JSON heartbeat from frontend
             if data == "ping" or data == '{"type":"ping"}':
                 await websocket.send_text('{"type":"pong"}')
+            else:
+                # WS-31-MED-04 FIX: Log unknown messages for debugging
+                logger.debug(
+                    "Unknown message from diner",
+                    session_id=session_id,
+                    message=data[:100] if len(data) > 100 else data,
+                )
 
     except WebSocketDisconnect:
-        logger.info("Diner disconnected", session_id=session_id)
+        # WS-HIGH-06 FIX: Enhanced logging for forensics
+        logger.info(
+            "Diner disconnected",
+            session_id=session_id,
+            table_id=table_id,
+            branch_id=branch_id,
+        )
     finally:
-        manager.disconnect(websocket)
-        manager.unregister_session(websocket, session_id)
+        await manager.disconnect(websocket)
+        await manager.unregister_session(websocket, session_id)
 
 
 # =============================================================================

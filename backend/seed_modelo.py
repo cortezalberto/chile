@@ -33,6 +33,7 @@ from rest_api.models import (
     Allergen,
     Base,
 )
+from shared.password import hash_password
 
 def seed_modelo():
     """Create complete restaurant model data."""
@@ -113,10 +114,10 @@ def seed_modelo():
         # 3. Create Users
         # ==========================================================================
         users_data = [
-            {"email": "waiter@demo.com", "password": "waiter123", "first_name": "Juan", "last_name": "Mozo", "role": "WAITER"},
-            {"email": "kitchen@demo.com", "password": "kitchen123", "first_name": "María", "last_name": "Cocinera", "role": "KITCHEN"},
-            {"email": "manager@demo.com", "password": "manager123", "first_name": "Carlos", "last_name": "Gerente", "role": "MANAGER"},
-            {"email": "admin@demo.com", "password": "admin123", "first_name": "Admin", "last_name": "Sistema", "role": "ADMIN"},
+            {"email": "waiter@demo.com", "password": hash_password("waiter123"), "first_name": "Juan", "last_name": "Mozo", "role": "WAITER"},
+            {"email": "kitchen@demo.com", "password": hash_password("kitchen123"), "first_name": "María", "last_name": "Cocinera", "role": "KITCHEN"},
+            {"email": "manager@demo.com", "password": hash_password("manager123"), "first_name": "Carlos", "last_name": "Gerente", "role": "MANAGER"},
+            {"email": "admin@demo.com", "password": hash_password("admin123"), "first_name": "Admin", "last_name": "Sistema", "role": "ADMIN"},
         ]
 
         users = []

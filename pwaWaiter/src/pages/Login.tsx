@@ -3,14 +3,26 @@ import { useAuthStore, selectIsLoading, selectAuthError } from '../stores/authSt
 import { Button } from '../components/Button'
 import { Input } from '../components/Input'
 
+// WAITER-PAGE-MED-01: Simple email validation
+const isValidEmail = (email: string): boolean => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
 export function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  // WAITER-PAGE-MED-01: Track touched fields for validation
+  const [touched, setTouched] = useState({ email: false, password: false })
 
   const login = useAuthStore((s) => s.login)
   const isLoading = useAuthStore(selectIsLoading)
   const error = useAuthStore(selectAuthError)
   const clearError = useAuthStore((s) => s.clearError)
+
+  // WAITER-PAGE-MED-01: Compute field-level validation errors
+  const emailError = touched.email && !email ? 'El email es requerido' :
+                     touched.email && !isValidEmail(email) ? 'Email invalido' : undefined
+  const passwordError = touched.password && !password ? 'La contrasena es requerida' : undefined
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -38,10 +50,12 @@ export function LoginPage() {
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              onBlur={() => setTouched((t) => ({ ...t, email: true }))}
               placeholder="tu@email.com"
               autoComplete="email"
               required
               disabled={isLoading}
+              error={emailError}
             />
 
             <Input
@@ -49,15 +63,21 @@ export function LoginPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onBlur={() => setTouched((t) => ({ ...t, password: true }))}
               placeholder="••••••••"
               autoComplete="current-password"
               required
               disabled={isLoading}
+              error={passwordError}
             />
           </div>
 
           {error && (
-            <div className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+            <div
+              className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20"
+              role="alert"
+              aria-live="assertive"
+            >
               <p className="text-sm text-red-500">{error}</p>
             </div>
           )}

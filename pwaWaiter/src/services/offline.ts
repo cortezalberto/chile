@@ -33,11 +33,37 @@ const log = {
   },
 }
 
+// WAITER-SVC-MED-02: Default timeout for IndexedDB operations (30 seconds)
+const IDB_TIMEOUT_MS = 30000
+
+/**
+ * WAITER-SVC-MED-02: Wrap a promise with a timeout
+ * Rejects with TimeoutError if the operation takes longer than the specified time
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = IDB_TIMEOUT_MS, operation: string = 'IndexedDB operation'): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`${operation} timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    promise
+      .then((result) => {
+        clearTimeout(timeoutId)
+        resolve(result)
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId)
+        reject(error)
+      })
+  })
+}
+
 /**
  * Open IndexedDB connection
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  const openPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
 
     request.onerror = () => {
@@ -66,13 +92,17 @@ function openDB(): Promise<IDBDatabase> {
       }
     }
   })
+
+  // WAITER-SVC-MED-02: Apply timeout wrapper
+  return withTimeout(openPromise, IDB_TIMEOUT_MS, 'openDB')
 }
 
 /**
  * Cache tables data for offline access
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function cacheTablesData(tables: TableCard[]): Promise<void> {
-  try {
+  const cachePromise = async (): Promise<void> => {
     const db = await openDB()
     const tx = db.transaction(TABLES_STORE, 'readwrite')
     const store = tx.objectStore(TABLES_STORE)
@@ -97,6 +127,11 @@ export async function cacheTablesData(tables: TableCard[]): Promise<void> {
         reject(tx.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    await withTimeout(cachePromise(), IDB_TIMEOUT_MS, 'cacheTablesData')
   } catch (error) {
     log.error('Error caching tables data', error)
     throw error
@@ -105,9 +140,10 @@ export async function cacheTablesData(tables: TableCard[]): Promise<void> {
 
 /**
  * Retrieve cached tables data
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function getCachedTables(): Promise<TableCard[]> {
-  try {
+  const getPromise = async (): Promise<TableCard[]> => {
     const db = await openDB()
     const tx = db.transaction(TABLES_STORE, 'readonly')
     const store = tx.objectStore(TABLES_STORE)
@@ -126,6 +162,11 @@ export async function getCachedTables(): Promise<TableCard[]> {
         reject(request.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    return await withTimeout(getPromise(), IDB_TIMEOUT_MS, 'getCachedTables')
   } catch (error) {
     log.error('Error retrieving cached tables', error)
     return []
@@ -141,6 +182,7 @@ export function isOfflineMode(): boolean {
 
 /**
  * Queue an action for processing when back online
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function queueAction(
   type: QueuedActionType,
@@ -154,7 +196,7 @@ export async function queueAction(
     retryCount: 0,
   }
 
-  try {
+  const queuePromise = async (): Promise<string> => {
     const db = await openDB()
     const tx = db.transaction(QUEUE_STORE, 'readwrite')
     const store = tx.objectStore(QUEUE_STORE)
@@ -172,6 +214,11 @@ export async function queueAction(
         reject(tx.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    return await withTimeout(queuePromise(), IDB_TIMEOUT_MS, 'queueAction')
   } catch (error) {
     log.error('Error queuing action', error)
     throw error
@@ -180,9 +227,10 @@ export async function queueAction(
 
 /**
  * Get all queued actions
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function getQueuedActions(): Promise<QueuedAction[]> {
-  try {
+  const getPromise = async (): Promise<QueuedAction[]> => {
     const db = await openDB()
     const tx = db.transaction(QUEUE_STORE, 'readonly')
     const store = tx.objectStore(QUEUE_STORE)
@@ -201,6 +249,11 @@ export async function getQueuedActions(): Promise<QueuedAction[]> {
         reject(request.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    return await withTimeout(getPromise(), IDB_TIMEOUT_MS, 'getQueuedActions')
   } catch (error) {
     log.error('Error retrieving queued actions', error)
     return []
@@ -209,9 +262,10 @@ export async function getQueuedActions(): Promise<QueuedAction[]> {
 
 /**
  * Remove an action from the queue (after successful processing)
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 async function removeQueuedAction(actionId: string): Promise<void> {
-  try {
+  const removePromise = async (): Promise<void> => {
     const db = await openDB()
     const tx = db.transaction(QUEUE_STORE, 'readwrite')
     const store = tx.objectStore(QUEUE_STORE)
@@ -229,6 +283,11 @@ async function removeQueuedAction(actionId: string): Promise<void> {
         reject(tx.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    await withTimeout(removePromise(), IDB_TIMEOUT_MS, 'removeQueuedAction')
   } catch (error) {
     log.error('Error removing queued action', error)
     throw error
@@ -237,12 +296,13 @@ async function removeQueuedAction(actionId: string): Promise<void> {
 
 /**
  * Update retry count for a failed action
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 async function updateActionRetryCount(
   actionId: string,
   retryCount: number
 ): Promise<void> {
-  try {
+  const updatePromise = async (): Promise<void> => {
     const db = await openDB()
     const tx = db.transaction(QUEUE_STORE, 'readwrite')
     const store = tx.objectStore(QUEUE_STORE)
@@ -266,6 +326,11 @@ async function updateActionRetryCount(
         reject(tx.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    await withTimeout(updatePromise(), IDB_TIMEOUT_MS, 'updateActionRetryCount')
   } catch (error) {
     log.error('Error updating action retry count', error)
     throw error
@@ -361,9 +426,10 @@ export async function processQueue(): Promise<{
 
 /**
  * Clear all cached data (tables and action queue)
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function clearCache(): Promise<void> {
-  try {
+  const clearPromise = async (): Promise<void> => {
     const db = await openDB()
     const tx = db.transaction([TABLES_STORE, QUEUE_STORE], 'readwrite')
 
@@ -382,6 +448,11 @@ export async function clearCache(): Promise<void> {
         reject(tx.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    await withTimeout(clearPromise(), IDB_TIMEOUT_MS, 'clearCache')
   } catch (error) {
     log.error('Error clearing cache', error)
     throw error
@@ -390,9 +461,10 @@ export async function clearCache(): Promise<void> {
 
 /**
  * Get the count of pending queued actions
+ * WAITER-SVC-MED-02: Wrapped with timeout
  */
 export async function getQueuedActionCount(): Promise<number> {
-  try {
+  const countPromise = async (): Promise<number> => {
     const db = await openDB()
     const tx = db.transaction(QUEUE_STORE, 'readonly')
     const store = tx.objectStore(QUEUE_STORE)
@@ -408,14 +480,25 @@ export async function getQueuedActionCount(): Promise<number> {
         reject(request.error)
       }
     })
+  }
+
+  try {
+    // WAITER-SVC-MED-02: Apply timeout wrapper
+    return await withTimeout(countPromise(), IDB_TIMEOUT_MS, 'getQueuedActionCount')
   } catch (error) {
     log.error('Error getting queued action count', error)
     return 0
   }
 }
 
+// CRIT-29-03 FIX: Guard against duplicate listener registration
+// Track whether listeners are already registered to prevent memory leaks on HMR/re-initialization
+let offlineListenersRegistered = false
+
 // Listen for online/offline events
-if (typeof window !== 'undefined') {
+if (typeof window !== 'undefined' && !offlineListenersRegistered) {
+  offlineListenersRegistered = true
+
   window.addEventListener('online', () => {
     log.info('App is back online')
     // Automatically process queue when back online

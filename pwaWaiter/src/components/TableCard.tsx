@@ -20,9 +20,18 @@ export function TableCard({ table, onClick }: TableCardProps) {
   // Determine if table needs urgent attention
   const isUrgent = hasPendingCalls || hasCheckRequested
 
+  // WAITER-COMP-HIGH-01 FIX: Build aria-label describing table status
+  const statusLabel = statusConfig.label
+  const urgencyInfo = isUrgent ? ', requiere atención urgente' : ''
+  const sessionInfo = hasActiveSession
+    ? `, ${table.open_rounds} ronda${table.open_rounds !== 1 ? 's' : ''} pendiente${table.open_rounds !== 1 ? 's' : ''}, ${table.pending_calls} llamado${table.pending_calls !== 1 ? 's' : ''}`
+    : ', sin sesión activa'
+  const ariaLabel = `Mesa ${formatTableCode(table.code)}, estado: ${statusLabel}${sessionInfo}${urgencyInfo}`
+
   return (
     <button
       onClick={onClick}
+      aria-label={ariaLabel}
       className={`
         relative w-full p-4 rounded-xl border-2 text-left
         bg-neutral-900 hover:bg-neutral-800

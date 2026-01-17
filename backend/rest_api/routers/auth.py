@@ -9,14 +9,24 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from rest_api.db import get_db
-from rest_api.models import User, UserBranchRole
+from rest_api.models import User, UserBranchRole, Branch
 from shared.auth import sign_jwt, sign_refresh_token, verify_refresh_token
+from shared.logging import rest_api_logger as logger, mask_email
 from shared.schemas import LoginRequest, LoginResponse, UserInfo, RefreshTokenRequest
 from shared.settings import settings
-from shared.rate_limit import limiter
+from shared.rate_limit import limiter, email_limiter, set_rate_limit_email
+from shared.password import verify_password, needs_rehash, hash_password
+from shared.token_blacklist import revoke_all_user_tokens
+from shared.auth import current_user_context
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+class LogoutResponse(BaseModel):
+    """Response for logout."""
+    success: bool
+    message: str
 
 
 class TokenRefreshResponse(BaseModel):
@@ -33,6 +43,7 @@ class LoginWithRefreshResponse(LoginResponse):
 
 @router.post("/login", response_model=LoginWithRefreshResponse)
 @limiter.limit("5/minute")
+@email_limiter.limit("5/minute")
 def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)) -> LoginWithRefreshResponse:
     """
     Authenticate a staff member and return access + refresh tokens.
@@ -45,25 +56,41 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)) -
     - email: user's email
 
     The refresh token can be used to obtain new access tokens.
+
+    CRIT-AUTH-02 FIX: Rate limited by both IP (5/min) and email (5/min)
+    to prevent credential stuffing attacks from distributed IPs.
     """
+    # CRIT-AUTH-02 FIX: Set email for email-based rate limiting
+    set_rate_limit_email(request, body.email)
+
     # Find user by email
     user = db.scalar(
         select(User).where(User.email == body.email, User.is_active == True)
     )
 
     if not user:
+        # HIGH-AUTH-05 FIX: Log failed login attempt (user not found)
+        # SHARED-HIGH-02 FIX: Mask email to protect PII
+        logger.warning("LOGIN_FAILED: User not found", email=mask_email(body.email))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # MVP: plain text password comparison
-    # TODO: Use passlib bcrypt in production
-    if user.password != body.password:
+    # Verify password using bcrypt (supports legacy plain-text during migration)
+    if not verify_password(body.password, user.password):
+        # HIGH-AUTH-05 FIX: Log failed login attempt (wrong password)
+        # SHARED-HIGH-02 FIX: Mask email to protect PII
+        logger.warning("LOGIN_FAILED: Invalid password", email=mask_email(body.email), user_id=user.id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+
+    # Rehash password if using legacy plain-text or outdated bcrypt rounds
+    if needs_rehash(user.password):
+        user.password = hash_password(body.password)
+        db.commit()
 
     # Get user's roles and branches
     branch_roles = db.execute(
@@ -74,10 +101,31 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)) -
     roles = sorted({r.role for r in branch_roles})
 
     if not branch_ids:
+        # SHARED-HIGH-02 FIX: Mask email to protect PII
+        logger.warning("LOGIN_FAILED: No branch assignments", email=mask_email(body.email), user_id=user.id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User has no branch assignments",
         )
+
+    # CRIT-AUTH-05 FIX: Validate tenant isolation - all branches must belong to user's tenant
+    branches = db.execute(
+        select(Branch).where(Branch.id.in_(branch_ids))
+    ).scalars().all()
+
+    for branch in branches:
+        if branch.tenant_id != user.tenant_id:
+            logger.error(
+                "SECURITY: Tenant isolation violation detected",
+                user_id=user.id,
+                user_tenant_id=user.tenant_id,
+                branch_id=branch.id,
+                branch_tenant_id=branch.tenant_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Security error: tenant isolation violation",
+            )
 
     # Create access token
     access_token = sign_jwt({
@@ -90,6 +138,10 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)) -
 
     # Create refresh token
     refresh_token = sign_refresh_token(user.id, user.tenant_id)
+
+    # HIGH-AUTH-05 FIX: Log successful login
+    # SHARED-HIGH-02 FIX: Mask email to protect PII
+    logger.info("LOGIN_SUCCESS", email=mask_email(user.email), user_id=user.id, roles=roles, branch_count=len(branch_ids))
 
     return LoginWithRefreshResponse(
         access_token=access_token,
@@ -163,7 +215,7 @@ def refresh_token(request: Request, body: RefreshTokenRequest, db: Session = Dep
 @router.get("/me", response_model=UserInfo)
 def get_current_user(
     db: Session = Depends(get_db),
-    ctx: dict = Depends(__import__("shared.auth", fromlist=["current_user_context"]).current_user_context),
+    ctx: dict = Depends(current_user_context),
 ) -> UserInfo:
     """Get current authenticated user info."""
     return UserInfo(
@@ -173,3 +225,45 @@ def get_current_user(
         branch_ids=ctx["branch_ids"],
         roles=ctx["roles"],
     )
+
+
+@router.post("/logout", response_model=LogoutResponse)
+@limiter.limit("10/minute")
+async def logout(
+    request: Request,
+    ctx: dict = Depends(current_user_context),
+) -> LogoutResponse:
+    """
+    Logout the current user by revoking all their tokens.
+
+    This invalidates:
+    - The current access token
+    - The current refresh token
+    - All other active sessions for this user
+
+    The user will need to login again on all devices.
+
+    HIGH-AUTH-01 FIX: Properly reports success/failure of token revocation.
+    """
+    user_id = int(ctx["sub"])
+    user_email = ctx.get("email", "")
+
+    # Revoke all tokens for this user
+    success = await revoke_all_user_tokens(user_id)
+
+    if success:
+        # HIGH-AUTH-05 FIX: Log successful logout
+        # SHARED-HIGH-02 FIX: Mask email to protect PII
+        logger.info("LOGOUT_SUCCESS", email=mask_email(user_email), user_id=user_id)
+        return LogoutResponse(
+            success=True,
+            message="Logged out successfully. All sessions have been invalidated.",
+        )
+    else:
+        # HIGH-AUTH-01/05 FIX: Log and report failure
+        # SHARED-HIGH-02 FIX: Mask email to protect PII
+        logger.warning("LOGOUT_PARTIAL: Token revocation may have failed", email=mask_email(user_email), user_id=user_id)
+        return LogoutResponse(
+            success=False,
+            message="Logout completed but token revocation may be delayed.",
+        )
