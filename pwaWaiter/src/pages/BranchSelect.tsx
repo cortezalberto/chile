@@ -1,11 +1,18 @@
-import { useAuthStore, selectUser, selectUserBranchIds } from '../stores/authStore'
+import { useEffect } from 'react'
+import { useAuthStore, selectUser, selectAvailableBranches } from '../stores/authStore'
 import { Button } from '../components/Button'
 
 export function BranchSelectPage() {
   const user = useAuthStore(selectUser)
-  const branchIds = useAuthStore(selectUserBranchIds)
+  const availableBranches = useAuthStore(selectAvailableBranches)
   const selectBranch = useAuthStore((s) => s.selectBranch)
+  const fetchBranchNames = useAuthStore((s) => s.fetchBranchNames)
   const logout = useAuthStore((s) => s.logout)
+
+  // Fetch branch names on mount
+  useEffect(() => {
+    fetchBranchNames()
+  }, [fetchBranchNames])
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a] px-4">
@@ -21,10 +28,10 @@ export function BranchSelectPage() {
         {/* Branch selection */}
         <div className="bg-neutral-900 rounded-2xl p-6 border border-neutral-800">
           <div className="space-y-3">
-            {branchIds.map((branchId) => (
+            {availableBranches.map((branch) => (
               <button
-                key={branchId}
-                onClick={() => selectBranch(branchId)}
+                key={branch.id}
+                onClick={() => selectBranch(branch.id, branch.name)}
                 className="
                   w-full p-4 rounded-xl
                   bg-neutral-800 hover:bg-neutral-700
@@ -34,19 +41,16 @@ export function BranchSelectPage() {
                 "
               >
                 <span className="text-lg font-medium text-white">
-                  Sucursal {branchId}
+                  {branch.name}
                 </span>
               </button>
             ))}
           </div>
 
-          {branchIds.length === 0 && (
+          {availableBranches.length === 0 && (
             <div className="text-center py-8">
               <p className="text-neutral-400">
-                No tienes sucursales asignadas.
-              </p>
-              <p className="text-neutral-500 text-sm mt-2">
-                Contacta al administrador.
+                Cargando sucursales...
               </p>
             </div>
           )}

@@ -9,7 +9,7 @@ from rest_api.routers.admin._base import (
     get_db, current_user, Tenant,
     require_admin,
 )
-from rest_api.routers.admin_schemas import TenantOutput, TenantUpdate
+from shared.utils.admin_schemas import TenantOutput, TenantUpdate
 
 
 router = APIRouter(tags=["admin-tenant"])

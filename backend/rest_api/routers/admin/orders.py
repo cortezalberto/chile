@@ -70,6 +70,8 @@ def get_order_stats(
     user: dict = Depends(current_user),
 ) -> OrderStatsOutput:
     """Get order statistics for the dashboard."""
+    # RTR-CRIT-02 FIX: Add tenant_id filter for multi-tenant isolation
+    tenant_id = user["tenant_id"]
     branch_ids = user.get("branch_ids", [])
     if not branch_ids:
         return OrderStatsOutput(total_active=0, pending=0, in_kitchen=0, ready=0)
@@ -84,7 +86,9 @@ def get_order_stats(
 
     active_statuses = ["SUBMITTED", "IN_KITCHEN", "READY"]
 
+    # RTR-CRIT-02 FIX: Filter by tenant_id for multi-tenant isolation
     base_query = select(Round).where(
+        Round.tenant_id == tenant_id,
         Round.branch_id.in_(branch_ids),
         Round.status.in_(active_statuses),
     )
@@ -114,6 +118,8 @@ def get_active_orders(
     Get all active orders (rounds) across branches.
     Includes SUBMITTED, IN_KITCHEN, and READY orders.
     """
+    # RTR-CRIT-02 FIX: Add tenant_id filter for multi-tenant isolation
+    tenant_id = user["tenant_id"]
     branch_ids = user.get("branch_ids", [])
     if not branch_ids:
         return []
@@ -130,6 +136,7 @@ def get_active_orders(
     if status_filter and status_filter in active_statuses:
         active_statuses = [status_filter]
 
+    # RTR-CRIT-02 FIX: Filter by tenant_id for multi-tenant isolation
     rounds = db.execute(
         select(Round)
         .options(
@@ -138,6 +145,7 @@ def get_active_orders(
             joinedload(Round.session).joinedload(TableSession.table),
         )
         .where(
+            Round.tenant_id == tenant_id,
             Round.branch_id.in_(branch_ids),
             Round.status.in_(active_statuses),
         )

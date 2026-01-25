@@ -11,7 +11,8 @@ from rest_api.routers.admin._base import (
     get_user_id, get_user_email, publish_entity_deleted,
     require_admin,
 )
-from rest_api.routers.admin_schemas import SubcategoryOutput, SubcategoryCreate, SubcategoryUpdate
+from shared.utils.validators import validate_image_url
+from shared.utils.admin_schemas import SubcategoryOutput, SubcategoryCreate, SubcategoryUpdate
 
 
 router = APIRouter(tags=["admin-subcategories"])
@@ -28,7 +29,7 @@ def list_subcategories(
     query = select(Subcategory).where(Subcategory.tenant_id == user["tenant_id"])
 
     if not include_deleted:
-        query = query.where(Subcategory.is_active == True)
+        query = query.where(Subcategory.is_active.is_(True))
 
     if category_id:
         query = query.where(Subcategory.category_id == category_id)
@@ -48,7 +49,7 @@ def get_subcategory(
         select(Subcategory).where(
             Subcategory.id == subcategory_id,
             Subcategory.tenant_id == user["tenant_id"],
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         )
     )
     if not subcategory:
@@ -79,6 +80,17 @@ def create_subcategory(
             detail="Invalid category_id",
         )
 
+    # HIGH-04 FIX: Validate image URL to prevent SSRF attacks
+    validated_image = None
+    if body.image:
+        try:
+            validated_image = validate_image_url(body.image)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+
     # Auto-calculate order if not provided
     order = body.order
     if order is None:
@@ -92,7 +104,7 @@ def create_subcategory(
         tenant_id=user["tenant_id"],
         category_id=body.category_id,
         name=body.name,
-        image=body.image,
+        image=validated_image,  # HIGH-04 FIX: Use validated image URL
         order=order,
         is_active=body.is_active,
     )
@@ -115,7 +127,7 @@ def update_subcategory(
         select(Subcategory).where(
             Subcategory.id == subcategory_id,
             Subcategory.tenant_id == user["tenant_id"],
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         )
     )
     if not subcategory:
@@ -125,6 +137,17 @@ def update_subcategory(
         )
 
     update_data = body.model_dump(exclude_unset=True)
+
+    # HIGH-04 FIX: Validate image URL if being updated
+    if "image" in update_data and update_data["image"]:
+        try:
+            update_data["image"] = validate_image_url(update_data["image"])
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+
     for key, value in update_data.items():
         setattr(subcategory, key, value)
 
@@ -146,7 +169,7 @@ def delete_subcategory(
         select(Subcategory).where(
             Subcategory.id == subcategory_id,
             Subcategory.tenant_id == user["tenant_id"],
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         )
     )
     if not subcategory:

@@ -12,8 +12,10 @@ from rest_api.routers.admin._base import (
     UserBranchRole, WaiterSectorAssignment,
     soft_delete, set_created_by,
     get_user_email,
+    require_admin_or_manager,
+    is_admin, validate_branch_access,
 )
-from rest_api.routers.admin_schemas import (
+from shared.utils.admin_schemas import (
     BranchAssignmentOverview, SectorWithWaiters,
     WaiterSectorBulkAssignment, WaiterSectorBulkResult,
     WaiterSectorAssignmentOutput,
@@ -34,15 +36,21 @@ async def get_branch_assignments(
     """
     Get all waiter-sector assignments for a branch on a given date.
     Returns sectors with their assigned waiters and unassigned waiters.
+
+    MANAGER users can only see assignments for their assigned branches.
     """
     tenant_id = user["tenant_id"]
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, branch_id)
 
     # Get branch
     branch = db.scalar(
         select(Branch).where(
             Branch.id == branch_id,
             Branch.tenant_id == tenant_id,
-            Branch.is_active == True,
+            Branch.is_active.is_(True),
         )
     )
     if not branch:
@@ -52,7 +60,7 @@ async def get_branch_assignments(
     sectors = db.execute(
         select(BranchSector).where(
             BranchSector.tenant_id == tenant_id,
-            BranchSector.is_active == True,
+            BranchSector.is_active.is_(True),
             or_(
                 BranchSector.branch_id == branch_id,
                 BranchSector.branch_id.is_(None),  # Global sectors
@@ -84,7 +92,7 @@ async def get_branch_assignments(
         WaiterSectorAssignment.tenant_id == tenant_id,
         WaiterSectorAssignment.branch_id == branch_id,
         WaiterSectorAssignment.assignment_date == assignment_date,
-        WaiterSectorAssignment.is_active == True,
+        WaiterSectorAssignment.is_active.is_(True),
     )
     if shift:
         query = query.where(
@@ -135,11 +143,13 @@ async def get_branch_assignments(
 async def create_bulk_assignments(
     data: WaiterSectorBulkAssignment,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> WaiterSectorBulkResult:
     """
     Create multiple waiter-sector assignments at once.
     Skips duplicates (same waiter+sector+date+shift).
+
+    MANAGER users can only create assignments for their assigned branches.
 
     Expected format:
     {
@@ -156,12 +166,16 @@ async def create_bulk_assignments(
     user_id = int(user["sub"])
     user_email = get_user_email(user)
 
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, data.branch_id)
+
     # Verify branch exists
     branch = db.scalar(
         select(Branch).where(
             Branch.id == data.branch_id,
             Branch.tenant_id == tenant_id,
-            Branch.is_active == True,
+            Branch.is_active.is_(True),
         )
     )
     if not branch:
@@ -171,7 +185,7 @@ async def create_bulk_assignments(
     valid_sectors = db.execute(
         select(BranchSector).where(
             BranchSector.tenant_id == tenant_id,
-            BranchSector.is_active == True,
+            BranchSector.is_active.is_(True),
             or_(
                 BranchSector.branch_id == data.branch_id,
                 BranchSector.branch_id.is_(None),
@@ -199,7 +213,7 @@ async def create_bulk_assignments(
             WaiterSectorAssignment.branch_id == data.branch_id,
             WaiterSectorAssignment.assignment_date == data.assignment_date,
             WaiterSectorAssignment.shift == data.shift,
-            WaiterSectorAssignment.is_active == True,
+            WaiterSectorAssignment.is_active.is_(True),
         )
     ).scalars().all()
     existing_keys = {(a.sector_id, a.waiter_id) for a in existing}
@@ -277,21 +291,27 @@ async def delete_bulk_assignments(
     assignment_date: date,
     shift: str | None = None,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> dict:
     """
     Delete all assignments for a branch on a given date (and optionally shift).
     Useful for clearing a day's assignments before reassigning.
+
+    MANAGER users can only delete assignments for their assigned branches.
     """
     tenant_id = user["tenant_id"]
     user_id = int(user["sub"])
     user_email = get_user_email(user)
 
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, branch_id)
+
     query = select(WaiterSectorAssignment).where(
         WaiterSectorAssignment.tenant_id == tenant_id,
         WaiterSectorAssignment.branch_id == branch_id,
         WaiterSectorAssignment.assignment_date == assignment_date,
-        WaiterSectorAssignment.is_active == True,
+        WaiterSectorAssignment.is_active.is_(True),
     )
     if shift:
         query = query.where(WaiterSectorAssignment.shift == shift)
@@ -310,20 +330,27 @@ async def delete_bulk_assignments(
 async def delete_assignment(
     assignment_id: int,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> dict:
-    """Delete a single waiter-sector assignment."""
+    """Delete a single waiter-sector assignment.
+
+    MANAGER users can only delete assignments from their assigned branches.
+    """
     tenant_id = user["tenant_id"]
 
     assignment = db.scalar(
         select(WaiterSectorAssignment).where(
             WaiterSectorAssignment.id == assignment_id,
             WaiterSectorAssignment.tenant_id == tenant_id,
-            WaiterSectorAssignment.is_active == True,
+            WaiterSectorAssignment.is_active.is_(True),
         )
     )
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, assignment.branch_id)
 
     soft_delete(db, assignment, int(user["sub"]), get_user_email(user))
     db.commit()
@@ -338,22 +365,28 @@ async def copy_assignments(
     to_date: date,
     shift: str | None = None,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> WaiterSectorBulkResult:
     """
     Copy all assignments from one date to another.
     Useful for repeating yesterday's assignments.
+
+    MANAGER users can only copy assignments for their assigned branches.
     """
     tenant_id = user["tenant_id"]
     user_id = int(user["sub"])
     user_email = get_user_email(user)
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, branch_id)
 
     # Get source assignments
     query = select(WaiterSectorAssignment).where(
         WaiterSectorAssignment.tenant_id == tenant_id,
         WaiterSectorAssignment.branch_id == branch_id,
         WaiterSectorAssignment.assignment_date == from_date,
-        WaiterSectorAssignment.is_active == True,
+        WaiterSectorAssignment.is_active.is_(True),
     )
     if shift:
         query = query.where(WaiterSectorAssignment.shift == shift)
@@ -369,7 +402,7 @@ async def copy_assignments(
             WaiterSectorAssignment.tenant_id == tenant_id,
             WaiterSectorAssignment.branch_id == branch_id,
             WaiterSectorAssignment.assignment_date == to_date,
-            WaiterSectorAssignment.is_active == True,
+            WaiterSectorAssignment.is_active.is_(True),
         )
     ).scalars().all()
     existing_keys = {(a.sector_id, a.waiter_id, a.shift) for a in existing}

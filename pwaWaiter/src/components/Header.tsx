@@ -1,11 +1,11 @@
-import { useAuthStore, selectUser, selectSelectedBranchId } from '../stores/authStore'
+import { useAuthStore, selectUser, selectSelectedBranchName } from '../stores/authStore'
 import { useTablesStore, selectWsConnected } from '../stores/tablesStore'
 import { useRetryQueueStore, selectQueueLength } from '../stores/retryQueueStore'
 import { Button } from './Button'
 
 export function Header() {
   const user = useAuthStore(selectUser)
-  const selectedBranchId = useAuthStore(selectSelectedBranchId)
+  const selectedBranchName = useAuthStore(selectSelectedBranchName)
   const logout = useAuthStore((s) => s.logout)
   const wsConnected = useTablesStore(selectWsConnected)
   // WAITER-HIGH-04 FIX: Show pending queue count
@@ -17,9 +17,9 @@ export function Header() {
       <nav className="px-4 py-3 flex items-center justify-between" aria-label="Navegación principal">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-orange-500">Mozo</h1>
-          {selectedBranchId && (
+          {selectedBranchName && (
             <span className="text-sm text-neutral-400">
-              Sucursal {selectedBranchId}
+              {selectedBranchName}
             </span>
           )}
         </div>

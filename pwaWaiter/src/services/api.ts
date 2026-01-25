@@ -649,3 +649,44 @@ export const branchAPI = {
     return request<BranchInfo>(`/admin/branches/${branchId}`)
   },
 }
+
+// =============================================================================
+// COMANDA RÁPIDA: Compact menu types for waiter quick ordering
+// =============================================================================
+
+export interface ProductCompact {
+  id: number
+  name: string
+  description: string | null
+  price_cents: number
+  category_id: number
+  category_name: string
+  subcategory_id: number | null
+  subcategory_name: string | null
+  allergen_icons: string[]
+  is_available: boolean
+}
+
+export interface CategoryCompact {
+  id: number
+  name: string
+  products: ProductCompact[]
+}
+
+export interface MenuCompact {
+  branch_id: number
+  branch_name: string
+  categories: CategoryCompact[]
+  total_products: number
+}
+
+// COMANDA RÁPIDA: API for waiter quick ordering without images
+export const comandaAPI = {
+  /**
+   * Get compact menu for quick order taking (no images).
+   * Optimized for speed and low bandwidth.
+   */
+  async getMenuCompact(branchId: number): Promise<MenuCompact> {
+    return request<MenuCompact>(`/waiter/branches/${branchId}/menu`)
+  },
+}

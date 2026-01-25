@@ -10,7 +10,7 @@ from rest_api.routers.admin._base import (
     restore_entity, get_model_class, find_deleted_entity,
     get_user_id, get_user_email,
 )
-from rest_api.routers.admin_schemas import RestoreOutput
+from shared.utils.admin_schemas import RestoreOutput
 
 
 router = APIRouter(tags=["admin-restore"])

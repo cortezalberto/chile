@@ -13,7 +13,7 @@ from rest_api.routers.admin._base import (
     get_user_id, get_user_email,
     require_admin,
 )
-from rest_api.routers.admin_schemas import (
+from shared.utils.admin_schemas import (
     ExclusionOverview, CategoryExclusionSummary, SubcategoryExclusionSummary,
     ExclusionBulkUpdate,
 )
@@ -33,14 +33,14 @@ def get_exclusions_overview(
     categories = db.execute(
         select(Category).where(
             Category.tenant_id == tenant_id,
-            Category.is_active == True,
+            Category.is_active.is_(True),
         ).order_by(Category.name)
     ).scalars().all()
 
     cat_exclusions = db.execute(
         select(BranchCategoryExclusion).where(
             BranchCategoryExclusion.tenant_id == tenant_id,
-            BranchCategoryExclusion.is_active == True,
+            BranchCategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 
@@ -64,14 +64,14 @@ def get_exclusions_overview(
             joinedload(Subcategory.category)
         ).where(
             Subcategory.tenant_id == tenant_id,
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         ).order_by(Subcategory.name)
     ).scalars().unique().all()
 
     subcat_exclusions = db.execute(
         select(BranchSubcategoryExclusion).where(
             BranchSubcategoryExclusion.tenant_id == tenant_id,
-            BranchSubcategoryExclusion.is_active == True,
+            BranchSubcategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 
@@ -109,7 +109,7 @@ def get_category_exclusions(
         select(Category).where(
             Category.id == category_id,
             Category.tenant_id == user["tenant_id"],
-            Category.is_active == True,
+            Category.is_active.is_(True),
         )
     )
     if not category:
@@ -122,7 +122,7 @@ def get_category_exclusions(
         select(BranchCategoryExclusion).where(
             BranchCategoryExclusion.category_id == category_id,
             BranchCategoryExclusion.tenant_id == user["tenant_id"],
-            BranchCategoryExclusion.is_active == True,
+            BranchCategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 
@@ -147,7 +147,7 @@ def update_category_exclusions(
         select(Category).where(
             Category.id == category_id,
             Category.tenant_id == tenant_id,
-            Category.is_active == True,
+            Category.is_active.is_(True),
         )
     )
     if not category:
@@ -175,7 +175,7 @@ def update_category_exclusions(
         select(BranchCategoryExclusion).where(
             BranchCategoryExclusion.category_id == category_id,
             BranchCategoryExclusion.tenant_id == tenant_id,
-            BranchCategoryExclusion.is_active == True,
+            BranchCategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 
@@ -213,7 +213,7 @@ def get_subcategory_exclusions(
         ).where(
             Subcategory.id == subcategory_id,
             Subcategory.tenant_id == user["tenant_id"],
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         )
     )
     if not subcategory:
@@ -226,7 +226,7 @@ def get_subcategory_exclusions(
         select(BranchSubcategoryExclusion).where(
             BranchSubcategoryExclusion.subcategory_id == subcategory_id,
             BranchSubcategoryExclusion.tenant_id == user["tenant_id"],
-            BranchSubcategoryExclusion.is_active == True,
+            BranchSubcategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 
@@ -255,7 +255,7 @@ def update_subcategory_exclusions(
         ).where(
             Subcategory.id == subcategory_id,
             Subcategory.tenant_id == tenant_id,
-            Subcategory.is_active == True,
+            Subcategory.is_active.is_(True),
         )
     )
     if not subcategory:
@@ -283,7 +283,7 @@ def update_subcategory_exclusions(
         select(BranchSubcategoryExclusion).where(
             BranchSubcategoryExclusion.subcategory_id == subcategory_id,
             BranchSubcategoryExclusion.tenant_id == tenant_id,
-            BranchSubcategoryExclusion.is_active == True,
+            BranchSubcategoryExclusion.is_active.is_(True),
         )
     ).scalars().all()
 

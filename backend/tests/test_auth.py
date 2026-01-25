@@ -3,7 +3,7 @@ Tests for authentication endpoints.
 """
 
 import pytest
-from shared.password import hash_password, verify_password, needs_rehash
+from shared.security.password import hash_password, verify_password, needs_rehash
 
 
 class TestPasswordHashing:

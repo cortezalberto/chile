@@ -10,9 +10,9 @@ from rest_api.routers.admin._base import (
     get_db, current_user, Allergen, AllergenCrossReaction,
     soft_delete, set_created_by, set_updated_by,
     get_user_id, get_user_email, publish_entity_deleted,
-    require_admin,
+    require_admin, require_admin_or_manager,
 )
-from rest_api.routers.admin_schemas import (
+from shared.utils.admin_schemas import (
     AllergenOutput, AllergenCreate, AllergenUpdate,
     CrossReactionInfo, CrossReactionOutput, CrossReactionCreate, CrossReactionUpdate,
 )
@@ -28,8 +28,8 @@ def _build_allergen_output(allergen: Allergen, db: Session) -> AllergenOutput:
         .join(Allergen, AllergenCrossReaction.cross_reacts_with_id == Allergen.id)
         .where(
             AllergenCrossReaction.allergen_id == allergen.id,
-            AllergenCrossReaction.is_active == True,
-            Allergen.is_active == True,
+            AllergenCrossReaction.is_active.is_(True),
+            Allergen.is_active.is_(True),
         )
     ).all()
 
@@ -106,10 +106,10 @@ def list_allergens(
     )
 
     if not include_deleted:
-        query = query.where(Allergen.is_active == True)
+        query = query.where(Allergen.is_active.is_(True))
 
     if mandatory_only:
-        query = query.where(Allergen.is_mandatory == True)
+        query = query.where(Allergen.is_mandatory.is_(True))
 
     allergens = db.execute(query.order_by(Allergen.name)).scalars().unique().all()
     return [_build_allergen_output_optimized(a) for a in allergens]
@@ -126,7 +126,7 @@ def get_allergen(
         select(Allergen).where(
             Allergen.id == allergen_id,
             Allergen.tenant_id == user["tenant_id"],
-            Allergen.is_active == True,
+            Allergen.is_active.is_(True),
         )
     )
     if not allergen:
@@ -141,9 +141,9 @@ def get_allergen(
 def create_allergen(
     body: AllergenCreate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),  # RTR-CRIT-03 FIX: Require ADMIN or MANAGER
 ) -> AllergenOutput:
-    """Create a new allergen."""
+    """Create a new allergen. Requires ADMIN or MANAGER role."""
     allergen = Allergen(
         tenant_id=user["tenant_id"],
         **body.model_dump(),
@@ -160,14 +160,14 @@ def update_allergen(
     allergen_id: int,
     body: AllergenUpdate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),  # RTR-CRIT-03 FIX: Require ADMIN or MANAGER
 ) -> AllergenOutput:
-    """Update an allergen."""
+    """Update an allergen. Requires ADMIN or MANAGER role."""
     allergen = db.scalar(
         select(Allergen).where(
             Allergen.id == allergen_id,
             Allergen.tenant_id == user["tenant_id"],
-            Allergen.is_active == True,
+            Allergen.is_active.is_(True),
         )
     )
     if not allergen:
@@ -198,7 +198,7 @@ def delete_allergen(
         select(Allergen).where(
             Allergen.id == allergen_id,
             Allergen.tenant_id == user["tenant_id"],
-            Allergen.is_active == True,
+            Allergen.is_active.is_(True),
         )
     )
     if not allergen:
@@ -241,7 +241,7 @@ def list_cross_reactions(
     )
 
     if not include_deleted:
-        query = query.where(AllergenCrossReaction.is_active == True)
+        query = query.where(AllergenCrossReaction.is_active.is_(True))
 
     if allergen_id:
         query = query.where(AllergenCrossReaction.allergen_id == allergen_id)
@@ -276,16 +276,16 @@ def list_cross_reactions(
 def create_cross_reaction(
     body: CrossReactionCreate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),  # RTR-CRIT-03 FIX: Require ADMIN or MANAGER
 ) -> CrossReactionOutput:
-    """Create a cross-reaction between two allergens."""
+    """Create a cross-reaction between two allergens. Requires ADMIN or MANAGER role."""
     tenant_id = user["tenant_id"]
 
     allergen = db.scalar(
         select(Allergen).where(
             Allergen.id == body.allergen_id,
             Allergen.tenant_id == tenant_id,
-            Allergen.is_active == True,
+            Allergen.is_active.is_(True),
         )
     )
     if not allergen:
@@ -298,7 +298,7 @@ def create_cross_reaction(
         select(Allergen).where(
             Allergen.id == body.cross_reacts_with_id,
             Allergen.tenant_id == tenant_id,
-            Allergen.is_active == True,
+            Allergen.is_active.is_(True),
         )
     )
     if not cross_allergen:
@@ -368,14 +368,14 @@ def update_cross_reaction(
     cross_reaction_id: int,
     body: CrossReactionUpdate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),  # RTR-CRIT-03 FIX: Require ADMIN or MANAGER
 ) -> CrossReactionOutput:
-    """Update a cross-reaction's probability or notes."""
+    """Update a cross-reaction's probability or notes. Requires ADMIN or MANAGER role."""
     cross_reaction = db.scalar(
         select(AllergenCrossReaction).where(
             AllergenCrossReaction.id == cross_reaction_id,
             AllergenCrossReaction.tenant_id == user["tenant_id"],
-            AllergenCrossReaction.is_active == True,
+            AllergenCrossReaction.is_active.is_(True),
         )
     )
     if not cross_reaction:
@@ -419,7 +419,7 @@ def delete_cross_reaction(
         select(AllergenCrossReaction).where(
             AllergenCrossReaction.id == cross_reaction_id,
             AllergenCrossReaction.tenant_id == user["tenant_id"],
-            AllergenCrossReaction.is_active == True,
+            AllergenCrossReaction.is_active.is_(True),
         )
     )
     if not cross_reaction:

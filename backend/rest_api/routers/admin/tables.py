@@ -10,9 +10,10 @@ from rest_api.routers.admin._base import (
     get_db, current_user, Table, Branch, BranchSector,
     soft_delete, set_created_by, set_updated_by,
     get_user_id, get_user_email, publish_entity_deleted,
-    require_admin,
+    require_admin, require_admin_or_manager,
+    is_admin, validate_branch_access, filter_by_accessible_branches,
 )
-from rest_api.routers.admin_schemas import (
+from shared.utils.admin_schemas import (
     TableOutput, TableCreate, TableUpdate,
     TableBulkCreate, TableBulkResult,
 )
@@ -54,14 +55,21 @@ def list_tables(
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ) -> list[TableOutput]:
-    """List tables, optionally filtered by branch."""
+    """List tables, optionally filtered by branch.
+
+    MANAGER users only see tables from their assigned branches.
+    """
     query = select(Table).where(Table.tenant_id == user["tenant_id"])
 
-    if not include_deleted:
-        query = query.where(Table.is_active == True)
+    # MANAGER branch isolation
+    branch_ids_filter, should_filter = filter_by_accessible_branches(user, branch_id)
+    if should_filter:
+        if not branch_ids_filter:
+            return []  # No access to any branch
+        query = query.where(Table.branch_id.in_(branch_ids_filter))
 
-    if branch_id:
-        query = query.where(Table.branch_id == branch_id)
+    if not include_deleted:
+        query = query.where(Table.is_active.is_(True))
 
     tables = db.execute(query.order_by(Table.branch_id, Table.code)).scalars().all()
     return [TableOutput.model_validate(t) for t in tables]
@@ -73,12 +81,15 @@ def get_table(
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ) -> TableOutput:
-    """Get a specific table by ID."""
+    """Get a specific table by ID.
+
+    MANAGER users can only access tables from their assigned branches.
+    """
     table = db.scalar(
         select(Table).where(
             Table.id == table_id,
             Table.tenant_id == user["tenant_id"],
-            Table.is_active == True,
+            Table.is_active.is_(True),
         )
     )
     if not table:
@@ -86,6 +97,11 @@ def get_table(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Table not found",
         )
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, table.branch_id)
+
     return TableOutput.model_validate(table)
 
 
@@ -93,9 +109,16 @@ def get_table(
 def create_table(
     body: TableCreate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> TableOutput:
-    """Create a new table."""
+    """Create a new table. Requires ADMIN or MANAGER role.
+
+    MANAGER users can only create tables in their assigned branches.
+    """
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, body.branch_id)
+
     branch = db.scalar(
         select(Branch).where(
             Branch.id == body.branch_id,
@@ -124,14 +147,17 @@ def update_table(
     table_id: int,
     body: TableUpdate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> TableOutput:
-    """Update a table."""
+    """Update a table. Requires ADMIN or MANAGER role.
+
+    MANAGER users can only update tables in their assigned branches.
+    """
     table = db.scalar(
         select(Table).where(
             Table.id == table_id,
             Table.tenant_id == user["tenant_id"],
-            Table.is_active == True,
+            Table.is_active.is_(True),
         )
     )
     if not table:
@@ -139,6 +165,10 @@ def update_table(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Table not found",
         )
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, table.branch_id)
 
     update_data = body.model_dump(exclude_unset=True)
     for key, value in update_data.items():
@@ -155,14 +185,17 @@ def update_table(
 def delete_table(
     table_id: int,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_admin_or_manager),
 ) -> None:
-    """Soft delete a table. Requires ADMIN role."""
+    """Soft delete a table. Requires ADMIN or MANAGER role.
+
+    MANAGER users can only delete tables in their assigned branches.
+    """
     table = db.scalar(
         select(Table).where(
             Table.id == table_id,
             Table.tenant_id == user["tenant_id"],
-            Table.is_active == True,
+            Table.is_active.is_(True),
         )
     )
     if not table:
@@ -170,6 +203,10 @@ def delete_table(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Table not found",
         )
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, table.branch_id)
 
     table_code = table.code
     branch_id = table.branch_id
@@ -191,16 +228,23 @@ def delete_table(
 def batch_create_tables(
     body: TableBulkCreate,
     db: Session = Depends(get_db),
-    user: dict = Depends(current_user),
+    user: dict = Depends(require_admin_or_manager),
 ) -> TableBulkResult:
-    """Batch create tables for a branch by sector."""
+    """Batch create tables for a branch by sector. Requires ADMIN or MANAGER role.
+
+    MANAGER users can only create tables in their assigned branches.
+    """
     tenant_id = user["tenant_id"]
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, body.branch_id)
 
     branch = db.scalar(
         select(Branch).where(
             Branch.id == body.branch_id,
             Branch.tenant_id == tenant_id,
-            Branch.is_active == True,
+            Branch.is_active.is_(True),
         )
     )
     if not branch:
@@ -218,7 +262,7 @@ def batch_create_tables(
                 select(BranchSector).where(
                     BranchSector.id == item.sector_id,
                     BranchSector.tenant_id == tenant_id,
-                    BranchSector.is_active == True,
+                    BranchSector.is_active.is_(True),
                 )
             )
             if not sector:

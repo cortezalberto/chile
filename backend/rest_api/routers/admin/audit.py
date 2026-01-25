@@ -8,7 +8,7 @@ from rest_api.routers.admin._base import (
     Depends, HTTPException, status, Session, select,
     get_db, current_user, AuditLog,
 )
-from rest_api.routers.admin_schemas import AuditLogOutput
+from shared.utils.admin_schemas import AuditLogOutput
 
 
 router = APIRouter(tags=["admin-audit"])

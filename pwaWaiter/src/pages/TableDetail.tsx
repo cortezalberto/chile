@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTablesStore, selectSelectedTable } from '../stores/tablesStore'
+import { useAuthStore, selectUser } from '../stores/authStore'
 import { tablesAPI, roundsAPI } from '../services/api'
 import { wsService } from '../services/websocket'
 import { Header } from '../components/Header'
 import { Button } from '../components/Button'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ComandaTab } from '../components/ComandaTab'
 import { TableStatusBadge, RoundStatusBadge } from '../components/StatusBadge'
 import { formatTableCode, formatPrice, formatTime } from '../utils/format'
 // MED-08 FIX: Import WS event constants to avoid magic strings
@@ -14,6 +16,9 @@ import type { TableSessionDetail, RoundDetail, WSEventType, RoundStatus } from '
 interface TableDetailPageProps {
   onBack: () => void
 }
+
+// COMANDA-002: Main tab options
+type MainTab = 'session' | 'comanda'
 
 // PWAW-M003: Round filter options
 type RoundFilterStatus = RoundStatus | 'ALL' | 'PENDING'
@@ -27,9 +32,13 @@ const ROUND_FILTER_OPTIONS: { value: RoundFilterStatus; label: string }[] = [
 export function TableDetailPage({ onBack }: TableDetailPageProps) {
   const table = useTablesStore(selectSelectedTable)
   const clearTable = useTablesStore((s) => s.clearTable)
+  const user = useAuthStore(selectUser)
   const [sessionDetail, setSessionDetail] = useState<TableSessionDetail | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // COMANDA-002: Main tab state
+  const [mainTab, setMainTab] = useState<MainTab>('session')
 
   // PWAW-006: Confirmation dialog state
   const [confirmRoundId, setConfirmRoundId] = useState<number | null>(null)
@@ -44,7 +53,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
 
   // WS-HIGH-05 FIX: Use refs to avoid re-subscription when callbacks change
   const tableIdRef = useRef(table?.table_id)
-  const loadSessionDetailRef = useRef<() => Promise<void>>()
+  const loadSessionDetailRef = useRef<(() => Promise<void>) | undefined>(undefined)
 
   // Load session detail when table is selected
   const loadSessionDetail = useCallback(async () => {
@@ -238,9 +247,45 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
             </h1>
             <TableStatusBadge status={table.status} />
           </div>
+
+          {/* COMANDA-002: Main tabs (Session / Comanda) */}
+          {hasActiveSession && (
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setMainTab('session')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                  mainTab === 'session'
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                }`}
+              >
+                Sesión
+              </button>
+              <button
+                onClick={() => setMainTab('comanda')}
+                className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                  mainTab === 'comanda'
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                }`}
+              >
+                🍽️ Comanda
+              </button>
+            </div>
+          )}
         </div>
 
         {hasActiveSession ? (
+          mainTab === 'comanda' && table.session_id && user?.branch_ids?.[0] ? (
+            // COMANDA-002: Comanda tab content
+            <div className="flex-1 overflow-hidden">
+              <ComandaTab
+                branchId={user.branch_ids[0]}
+                sessionId={table.session_id}
+                onRoundSubmitted={loadSessionDetail}
+              />
+            </div>
+          ) : (
           <div className="space-y-6">
             {/* Session summary */}
             <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
@@ -491,6 +536,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
               </section>
             )}
           </div>
+          )
         ) : (
           <div className="flex flex-col items-center justify-center h-64">
             <p className="text-neutral-400">Sin sesion activa</p>

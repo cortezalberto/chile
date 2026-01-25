@@ -19,11 +19,12 @@ from rest_api.models import (
     CookingMethod,
     FlavorProfile,
     TextureProfile,
+    CuisineType,
     Allergen,
     AllergenCrossReaction,
 )
-from shared.logging import get_logger
-from shared.password import hash_password
+from shared.config.logging import get_logger
+from shared.security.password import hash_password
 
 logger = get_logger(__name__)
 
@@ -125,6 +126,31 @@ def seed_catalogs(db: Session) -> None:
     for texture_data in texture_profiles:
         db.add(TextureProfile(**texture_data))
 
+    # ==========================================================================
+    # Cuisine Types (for Recipes)
+    # ==========================================================================
+    cuisine_types = [
+        {"name": "Argentina", "description": "Cocina tradicional argentina: asados, empanadas, milanesas", "icon": "🇦🇷"},
+        {"name": "Italiana", "description": "Pastas, pizzas, risottos y cocina mediterránea", "icon": "🇮🇹"},
+        {"name": "Mexicana", "description": "Tacos, enchiladas, guacamole y sabores picantes", "icon": "🇲🇽"},
+        {"name": "Japonesa", "description": "Sushi, ramen, tempura y cocina tradicional japonesa", "icon": "🇯🇵"},
+        {"name": "China", "description": "Dim sum, arroz frito, wok y técnicas orientales", "icon": "🇨🇳"},
+        {"name": "Peruana", "description": "Ceviche, lomo saltado, causa y fusión nikkei", "icon": "🇵🇪"},
+        {"name": "Española", "description": "Tapas, paella, tortilla y cocina ibérica", "icon": "🇪🇸"},
+        {"name": "Francesa", "description": "Alta cocina, salsas clásicas y técnicas refinadas", "icon": "🇫🇷"},
+        {"name": "Americana", "description": "Hamburguesas, BBQ, comfort food estadounidense", "icon": "🇺🇸"},
+        {"name": "Tailandesa", "description": "Pad thai, curries, sabores agridulces y picantes", "icon": "🇹🇭"},
+        {"name": "India", "description": "Curries, tandoori, especias aromáticas", "icon": "🇮🇳"},
+        {"name": "Griega", "description": "Gyros, mousaka, ensaladas mediterráneas", "icon": "🇬🇷"},
+        {"name": "Brasileña", "description": "Churrasco, feijoada, cocina tropical", "icon": "🇧🇷"},
+        {"name": "Mediterránea", "description": "Dieta mediterránea, aceite de oliva, pescados", "icon": "🌊"},
+        {"name": "Fusión", "description": "Combinación creativa de diferentes cocinas", "icon": "🌎"},
+        {"name": "Vegana", "description": "Cocina 100% basada en plantas", "icon": "🌱"},
+        {"name": "Saludable", "description": "Opciones bajas en calorías y nutritivas", "icon": "🥗"},
+    ]
+    for cuisine_data in cuisine_types:
+        db.add(CuisineType(**cuisine_data))
+
     db.commit()
     logger.info(
         "Catalogs seeded successfully",
@@ -132,6 +158,7 @@ def seed_catalogs(db: Session) -> None:
         cooking_methods=len(cooking_methods),
         flavor_profiles=len(flavor_profiles),
         texture_profiles=len(texture_profiles),
+        cuisine_types=len(cuisine_types),
     )
 
 

@@ -171,10 +171,14 @@ export type WSEventType =
 export interface WSEvent {
   /** Event type identifier - determines how to process the event */
   type: WSEventType
-  /** Branch where the event occurred - for multi-branch filtering */
-  branch_id: number
-  /** Table that triggered the event */
-  table_id: number
+  /** Branch where the event occurred - for multi-branch filtering
+   * QA-WAITER-HIGH-02 FIX: Made optional as some events (like broadcast) may not have branch_id
+   */
+  branch_id?: number
+  /** Table that triggered the event
+   * QA-WAITER-HIGH-02 FIX: Made optional as some events may not have table_id
+   */
+  table_id?: number
   /** Session ID, present for session-related events */
   session_id?: number
   /** Event-specific payload - structure varies by event type */

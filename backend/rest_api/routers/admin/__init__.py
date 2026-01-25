@@ -42,8 +42,8 @@ from .audit import router as audit_router
 from .restore import router as restore_router
 
 
-# Create the main admin router
-router = APIRouter()
+# Create the main admin router with /api/admin prefix
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 # Include all sub-routers
 # Note: Order matters for route matching - more specific routes first

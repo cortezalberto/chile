@@ -1,40 +1,76 @@
 """
 Category management endpoints.
+
+CLEAN-ARCH: Thin router that delegates to CategoryService.
+Router handles: HTTP concerns, request validation, response formatting.
+Service handles: Business logic, data access via Repository.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
-from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select, func,
-    get_db, current_user, Category, Branch,
-    soft_delete, set_created_by, set_updated_by,
-    get_user_id, get_user_email, publish_entity_deleted,
-    require_admin,
-)
-from rest_api.routers.admin_schemas import CategoryOutput, CategoryCreate, CategoryUpdate
+from shared.infrastructure.db import get_db
+from shared.security.auth import current_user_context as current_user
+
+from shared.utils.admin_schemas import CategoryOutput, CategoryCreate, CategoryUpdate
+from rest_api.routers._common.pagination import Pagination, get_pagination
+from rest_api.services.permissions import PermissionContext
+from rest_api.services.domain import CategoryService
 
 
 router = APIRouter(tags=["admin-categories"])
+
+
+# =============================================================================
+# Endpoints
+# =============================================================================
 
 
 @router.get("/categories", response_model=list[CategoryOutput])
 def list_categories(
     branch_id: int | None = None,
     include_deleted: bool = False,
+    pagination: Pagination = Depends(get_pagination),
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ) -> list[CategoryOutput]:
-    """List categories, optionally filtered by branch."""
-    query = select(Category).where(Category.tenant_id == user["tenant_id"])
+    """
+    List categories, optionally filtered by branch.
+    MANAGER users only see categories from their assigned branches.
+    """
+    ctx = PermissionContext(user)
+    service = CategoryService(db)
 
-    if not include_deleted:
-        query = query.where(Category.is_active == True)
-
+    # Branch filtering based on role
     if branch_id:
-        query = query.where(Category.branch_id == branch_id)
+        ctx.require_branch_access(branch_id)
+        return service.list_by_branch_ordered(
+            tenant_id=ctx.tenant_id,
+            branch_id=branch_id,
+            include_inactive=include_deleted,
+            limit=pagination.limit,
+            offset=pagination.offset,
+        )
 
-    categories = db.execute(query.order_by(Category.order)).scalars().all()
-    return [CategoryOutput.model_validate(c) for c in categories]
+    if not ctx.is_admin:
+        # MANAGER: filter to accessible branches
+        if ctx.branch_ids:
+            return service.list_by_branches(
+                tenant_id=ctx.tenant_id,
+                branch_ids=ctx.branch_ids,
+                include_inactive=include_deleted,
+                limit=pagination.limit,
+                offset=pagination.offset,
+            )
+        return []
+
+    # ADMIN: all categories
+    return service.list_all(
+        tenant_id=ctx.tenant_id,
+        include_inactive=include_deleted,
+        limit=pagination.limit,
+        offset=pagination.offset,
+    )
 
 
 @router.get("/categories/{category_id}", response_model=CategoryOutput)
@@ -43,65 +79,46 @@ def get_category(
     db: Session = Depends(get_db),
     user: dict = Depends(current_user),
 ) -> CategoryOutput:
-    """Get a specific category."""
-    category = db.scalar(
-        select(Category).where(
-            Category.id == category_id,
-            Category.tenant_id == user["tenant_id"],
-            Category.is_active == True,
-        )
-    )
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found",
-        )
-    return CategoryOutput.model_validate(category)
+    """
+    Get a specific category.
+    MANAGER users can only access categories from their assigned branches.
+    """
+    ctx = PermissionContext(user)
+    service = CategoryService(db)
+
+    # Get category (raises NotFoundError if not found)
+    output = service.get_by_id(category_id, ctx.tenant_id)
+
+    # Get raw entity for branch validation
+    entity = service.get_entity(category_id, ctx.tenant_id)
+    if entity:
+        ctx.require_branch_access(entity.branch_id)
+
+    return output
 
 
-@router.post("/categories", response_model=CategoryOutput, status_code=status.HTTP_201_CREATED)
+@router.post("/categories", response_model=CategoryOutput, status_code=201)
 def create_category(
     body: CategoryCreate,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(current_user),
 ) -> CategoryOutput:
-    """Create a new category. Requires ADMIN role."""
-    # Verify branch belongs to tenant
-    branch = db.scalar(
-        select(Branch).where(
-            Branch.id == body.branch_id,
-            Branch.tenant_id == user["tenant_id"],
-        )
-    )
-    if not branch:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid branch_id",
-        )
+    """
+    Create a new category. Requires ADMIN or MANAGER role.
+    MANAGER users can only create categories in their assigned branches.
+    """
+    ctx = PermissionContext(user)
+    ctx.require_management()
+    ctx.require_branch_access(body.branch_id)
 
-    # Auto-calculate order if not provided
-    order = body.order
-    if order is None:
-        max_order = db.scalar(
-            select(func.max(Category.order))
-            .where(Category.branch_id == body.branch_id)
-        ) or 0
-        order = max_order + 1
+    service = CategoryService(db)
 
-    category = Category(
-        tenant_id=user["tenant_id"],
-        branch_id=body.branch_id,
-        name=body.name,
-        icon=body.icon,
-        image=body.image,
-        order=order,
-        is_active=body.is_active,
+    return service.create_with_auto_order(
+        data=body.model_dump(),
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        user_email=ctx.user_email,
     )
-    set_created_by(category, get_user_id(user), get_user_email(user))
-    db.add(category)
-    db.commit()
-    db.refresh(category)
-    return CategoryOutput.model_validate(category)
 
 
 @router.patch("/categories/{category_id}", response_model=CategoryOutput)
@@ -109,64 +126,55 @@ def update_category(
     category_id: int,
     body: CategoryUpdate,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(current_user),
 ) -> CategoryOutput:
-    """Update a category. Requires ADMIN role."""
-    category = db.scalar(
-        select(Category).where(
-            Category.id == category_id,
-            Category.tenant_id == user["tenant_id"],
-            Category.is_active == True,
-        )
+    """
+    Update a category. Requires ADMIN or MANAGER role.
+    MANAGER users can only update categories in their assigned branches.
+    """
+    ctx = PermissionContext(user)
+    ctx.require_management()
+
+    service = CategoryService(db)
+
+    # Validate branch access
+    entity = service.get_entity(category_id, ctx.tenant_id)
+    if entity:
+        service.validate_branch_access(entity, ctx.branch_ids if not ctx.is_admin else None)
+
+    return service.update(
+        entity_id=category_id,
+        data=body.model_dump(exclude_unset=True),
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        user_email=ctx.user_email,
     )
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found",
-        )
-
-    update_data = body.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(category, key, value)
-
-    set_updated_by(category, get_user_id(user), get_user_email(user))
-
-    db.commit()
-    db.refresh(category)
-    return CategoryOutput.model_validate(category)
 
 
-@router.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/categories/{category_id}", status_code=204)
 def delete_category(
     category_id: int,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(current_user),
 ) -> None:
-    """Soft delete a category. Requires ADMIN role."""
-    category = db.scalar(
-        select(Category).where(
-            Category.id == category_id,
-            Category.tenant_id == user["tenant_id"],
-            Category.is_active == True,
-        )
-    )
-    if not category:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Category not found",
-        )
+    """
+    Soft delete a category. Requires ADMIN or MANAGER role.
+    MANAGER users can only delete categories in their assigned branches.
+    """
+    ctx = PermissionContext(user)
+    ctx.require_management()
 
-    category_name = category.name
-    tenant_id = category.tenant_id
-    branch_id = category.branch_id
+    service = CategoryService(db)
 
-    soft_delete(db, category, get_user_id(user), get_user_email(user))
+    # Validate branch access
+    entity = service.get_entity(category_id, ctx.tenant_id)
+    if entity:
+        service.validate_branch_access(entity, ctx.branch_ids if not ctx.is_admin else None)
 
-    publish_entity_deleted(
-        tenant_id=tenant_id,
-        entity_type="category",
+    # Delete (service handles event publishing)
+    service.delete(
         entity_id=category_id,
-        entity_name=category_name,
-        branch_id=branch_id,
-        actor_user_id=get_user_id(user),
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        user_email=ctx.user_email,
     )

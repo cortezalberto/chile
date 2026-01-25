@@ -1,11 +1,19 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { authAPI, setAuthToken, setRefreshToken, setTokenRefreshCallback } from '../services/api'
+import { authAPI, branchAPI, setAuthToken, setRefreshToken, setTokenRefreshCallback } from '../services/api'
 import { wsService } from '../services/websocket'
 import { notificationService } from '../services/notifications'
 import { STORAGE_KEYS } from '../utils/constants'
 import { authLogger } from '../utils/logger'
 import type { User } from '../types'
+// QA-WAITER-HIGH-01 FIX: Import BroadcastChannel cleanup function
+import { closeBroadcastChannel } from './historyStore'
+
+// Branch info for display (fetched from backend)
+export interface BranchOption {
+  id: number
+  name: string
+}
 
 // DEF-HIGH-04 FIX: Token refresh interval (refresh 1 minute before expiry, assuming 15 min tokens)
 const TOKEN_REFRESH_INTERVAL_MS = 14 * 60 * 1000 // 14 minutes
@@ -19,6 +27,8 @@ interface AuthState {
   token: string | null
   refreshToken: string | null  // DEF-HIGH-04 FIX
   selectedBranchId: number | null
+  selectedBranchName: string | null  // Branch name for display
+  availableBranches: BranchOption[]  // Cached branch names for selection
   isAuthenticated: boolean
   isLoading: boolean
   error: string | null
@@ -28,7 +38,8 @@ interface AuthState {
   login: (email: string, password: string) => Promise<boolean>
   logout: () => void
   checkAuth: () => Promise<boolean>
-  selectBranch: (branchId: number) => void
+  selectBranch: (branchId: number, branchName?: string) => void
+  fetchBranchNames: () => Promise<void>  // Fetch branch names for selection screen
   clearError: () => void
   refreshAccessToken: () => Promise<boolean>  // DEF-HIGH-04 FIX
 }
@@ -63,6 +74,8 @@ export const useAuthStore = create<AuthState>()(
       token: null,
       refreshToken: null,  // DEF-HIGH-04 FIX
       selectedBranchId: null,
+      selectedBranchName: null,
+      availableBranches: [],
       isAuthenticated: false,
       isLoading: false,
       error: null,
@@ -114,6 +127,9 @@ export const useAuthStore = create<AuthState>()(
           // Request notification permission
           notificationService.requestPermission()
 
+          // Fetch branch names (needed for BranchSelect screen or auto-select with name)
+          get().fetchBranchNames()
+
           authLogger.info('Login successful', { userId: response.user.id })
           return true
         } catch (err) {
@@ -124,6 +140,8 @@ export const useAuthStore = create<AuthState>()(
             token: null,
             refreshToken: null,
             selectedBranchId: null,
+            selectedBranchName: null,
+            availableBranches: [],
             isAuthenticated: false,
             isLoading: false,
             error: message,
@@ -139,11 +157,15 @@ export const useAuthStore = create<AuthState>()(
         setTokenRefreshCallback(null)
         authAPI.logout()
         wsService.disconnect()
+        // QA-WAITER-HIGH-01 FIX: Clean up BroadcastChannel on logout
+        closeBroadcastChannel()
         set({
           user: null,
           token: null,
           refreshToken: null,  // DEF-HIGH-04 FIX
           selectedBranchId: null,
+          selectedBranchName: null,
+          availableBranches: [],
           isAuthenticated: false,
           error: null,
         })
@@ -243,6 +265,11 @@ export const useAuthStore = create<AuthState>()(
           })
           startTokenRefreshInterval(() => get().refreshAccessToken())
 
+          // Fetch branch names if not already cached (for BranchSelect or Header display)
+          if (get().availableBranches.length === 0) {
+            get().fetchBranchNames()
+          }
+
           return true
         } catch (err) {
           authLogger.warn('Auth check failed', err)
@@ -261,17 +288,53 @@ export const useAuthStore = create<AuthState>()(
             token: null,
             refreshToken: null,
             selectedBranchId: null,
+            selectedBranchName: null,
+            availableBranches: [],
             isAuthenticated: false,
           })
           return false
         }
       },
 
-      selectBranch: (branchId: number) => {
-        const { user } = get()
+      selectBranch: (branchId: number, branchName?: string) => {
+        const { user, availableBranches } = get()
         if (user?.branch_ids.includes(branchId)) {
-          set({ selectedBranchId: branchId })
-          authLogger.info('Branch selected', { branchId })
+          // Use provided name or look up from cached branches
+          const name = branchName || availableBranches.find(b => b.id === branchId)?.name || null
+          set({ selectedBranchId: branchId, selectedBranchName: name })
+          authLogger.info('Branch selected', { branchId, branchName: name })
+        }
+      },
+
+      // Fetch branch names for the selection screen
+      fetchBranchNames: async () => {
+        const { user } = get()
+        if (!user?.branch_ids.length) return
+
+        try {
+          // Fetch branch info for each branch the user has access to
+          const branches = await Promise.all(
+            user.branch_ids.map(async (id) => {
+              try {
+                const branch = await branchAPI.getBranch(id)
+                return { id: branch.id, name: branch.name }
+              } catch (err) {
+                authLogger.warn('Failed to fetch branch info', { branchId: id, error: err })
+                return { id, name: `Sucursal ${id}` }  // Fallback to ID
+              }
+            })
+          )
+          set({ availableBranches: branches })
+
+          // If only one branch, auto-select it with name
+          if (branches.length === 1) {
+            set({
+              selectedBranchId: branches[0].id,
+              selectedBranchName: branches[0].name,
+            })
+          }
+        } catch (err) {
+          authLogger.error('Failed to fetch branch names', err)
         }
       },
 
@@ -279,12 +342,14 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: STORAGE_KEYS.AUTH,
-      version: 2,  // DEF-HIGH-04 FIX: Bump version for new field
+      version: 3,  // Bump version for selectedBranchName
       partialize: (state) => ({
         token: state.token,
         refreshToken: state.refreshToken,  // DEF-HIGH-04 FIX
         user: state.user,
         selectedBranchId: state.selectedBranchId,
+        selectedBranchName: state.selectedBranchName,
+        availableBranches: state.availableBranches,
         isAuthenticated: state.isAuthenticated,
       }),
       onRehydrateStorage: () => (state) => {
@@ -311,5 +376,8 @@ export const selectIsAuthenticated = (state: AuthState) => state.isAuthenticated
 export const selectIsLoading = (state: AuthState) => state.isLoading
 export const selectAuthError = (state: AuthState) => state.error
 export const selectSelectedBranchId = (state: AuthState) => state.selectedBranchId
+export const selectSelectedBranchName = (state: AuthState) => state.selectedBranchName
 const EMPTY_BRANCH_IDS: number[] = []
 export const selectUserBranchIds = (state: AuthState) => state.user?.branch_ids ?? EMPTY_BRANCH_IDS
+const EMPTY_BRANCHES: BranchOption[] = []
+export const selectAvailableBranches = (state: AuthState) => state.availableBranches.length > 0 ? state.availableBranches : EMPTY_BRANCHES

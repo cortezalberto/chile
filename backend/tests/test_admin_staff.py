@@ -4,7 +4,7 @@ Tests for admin staff management endpoints.
 
 import pytest
 from rest_api.models import User
-from shared.password import verify_password
+from shared.security.password import verify_password
 
 
 class TestStaffEndpoints:

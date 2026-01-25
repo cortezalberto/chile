@@ -9,9 +9,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from rest_api.main import app
-from rest_api.db import get_db
+from shared.infrastructure.db import get_db
 from rest_api.models import Base, Tenant, Branch, User, UserBranchRole
-from shared.password import hash_password
+from shared.security.password import hash_password
 
 
 # SQLite in-memory database for testing

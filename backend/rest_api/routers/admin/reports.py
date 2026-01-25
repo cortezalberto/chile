@@ -10,7 +10,7 @@ from rest_api.routers.admin._base import (
     get_db, current_user, Round, RoundItem, Product, Table, TableSession,
     Payment,
 )
-from rest_api.routers.admin_schemas import (
+from shared.utils.admin_schemas import (
     ReportsSummaryOutput, DailySalesOutput, TopProductOutput,
 )
 

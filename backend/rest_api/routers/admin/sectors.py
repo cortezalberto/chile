@@ -11,8 +11,9 @@ from rest_api.routers.admin._base import (
     soft_delete, set_created_by,
     get_user_id, get_user_email,
     require_admin, require_admin_or_manager,
+    is_admin, validate_branch_access, filter_by_accessible_branches,
 )
-from rest_api.routers.admin_schemas import BranchSectorOutput, BranchSectorCreate
+from shared.utils.admin_schemas import BranchSectorOutput, BranchSectorCreate
 
 
 router = APIRouter(tags=["admin-sectors"])
@@ -42,15 +43,39 @@ def list_sectors(
     List sectors available for a branch.
     If branch_id provided, returns global sectors + branch-specific sectors.
     If no branch_id, returns only global sectors.
+
+    MANAGER users can only see sectors from their assigned branches.
     """
     tenant_id = user["tenant_id"]
 
+    # MANAGER branch isolation
+    branch_ids_filter, should_filter = filter_by_accessible_branches(user, branch_id)
+    if should_filter and not branch_ids_filter:
+        # No branch access, return only global sectors
+        query = select(BranchSector).where(
+            BranchSector.tenant_id == tenant_id,
+            BranchSector.is_active.is_(True),
+            BranchSector.branch_id == None,
+        )
+        query = query.order_by(BranchSector.display_order, BranchSector.name)
+        sectors = db.scalars(query).all()
+        return [_sector_to_output(s) for s in sectors]
+
     query = select(BranchSector).where(
         BranchSector.tenant_id == tenant_id,
-        BranchSector.is_active == True,
+        BranchSector.is_active.is_(True),
     )
 
-    if branch_id:
+    if should_filter:
+        # MANAGER: global sectors + sectors from accessible branches
+        query = query.where(
+            or_(
+                BranchSector.branch_id == None,
+                BranchSector.branch_id.in_(branch_ids_filter),
+            )
+        )
+    elif branch_id:
+        # ADMIN with specific branch_id
         query = query.where(
             or_(
                 BranchSector.branch_id == None,
@@ -58,6 +83,7 @@ def list_sectors(
             )
         )
     else:
+        # ADMIN without branch_id - only global sectors
         query = query.where(BranchSector.branch_id == None)
 
     query = query.order_by(BranchSector.display_order, BranchSector.name)
@@ -76,6 +102,8 @@ def create_sector(
     Create a new sector.
     Global sectors (branch_id=None) require ADMIN role.
     Branch-specific sectors require ADMIN or MANAGER role.
+
+    MANAGER users can only create sectors in their assigned branches.
     """
     tenant_id = user["tenant_id"]
     roles = user.get("roles", [])
@@ -92,6 +120,10 @@ def create_sector(
             detail="Admin or Manager role required",
         )
 
+    # MANAGER branch isolation
+    if body.branch_id is not None and not is_admin(user):
+        validate_branch_access(user, body.branch_id)
+
     prefix = body.prefix.upper().strip()
     if not re.match(r'^[A-Z]{2,4}$', prefix):
         raise HTTPException(
@@ -104,7 +136,7 @@ def create_sector(
             BranchSector.tenant_id == tenant_id,
             BranchSector.branch_id == body.branch_id,
             BranchSector.prefix == prefix,
-            BranchSector.is_active == True,
+            BranchSector.is_active.is_(True),
         )
     )
     if existing:
@@ -143,17 +175,19 @@ def create_sector(
 def delete_sector(
     sector_id: int,
     db: Session = Depends(get_db),
-    user: dict = Depends(require_admin),
+    user: dict = Depends(require_admin_or_manager),
 ) -> None:
     """
     Soft delete a sector. Cannot delete global sectors.
-    Requires ADMIN role.
+    Requires ADMIN or MANAGER role.
+
+    MANAGER users can only delete sectors from their assigned branches.
     """
     sector = db.scalar(
         select(BranchSector).where(
             BranchSector.id == sector_id,
             BranchSector.tenant_id == user["tenant_id"],
-            BranchSector.is_active == True,
+            BranchSector.is_active.is_(True),
         )
     )
     if not sector:
@@ -167,5 +201,9 @@ def delete_sector(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete global sectors",
         )
+
+    # MANAGER branch isolation
+    if not is_admin(user):
+        validate_branch_access(user, sector.branch_id)
 
     soft_delete(db, sector, get_user_id(user), get_user_email(user))
