@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .table import TableSession
     from .customer import Diner
     from .order import RoundItem
+    from .user import User
 
 
 class Check(AuditMixin, Base):
@@ -22,9 +23,12 @@ class Check(AuditMixin, Base):
     The bill/check for a table session.
     Tracks total amount, payments, and status.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
+
+    MDL-CRIT-01 FIX: Table renamed from "check" to "app_check" because
+    "CHECK" is a reserved SQL keyword (used for CHECK constraints).
     """
 
-    __tablename__ = "check"
+    __tablename__ = "app_check"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(
@@ -85,7 +89,7 @@ class Payment(AuditMixin, Base):
         BigInteger, ForeignKey("branch.id"), nullable=False, index=True
     )
     check_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("check.id"), nullable=False, index=True
+        BigInteger, ForeignKey("app_check.id"), nullable=False, index=True
     )
     payer_diner_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("diner.id"), index=True
@@ -120,6 +124,10 @@ class Payment(AuditMixin, Base):
     # Relationships
     check: Mapped["Check"] = relationship(back_populates="payments")
     allocations: Mapped[list["Allocation"]] = relationship(back_populates="payment")
+    # MDL-MED-11 FIX: Added relationship for FK
+    payer_diner: Mapped[Optional["Diner"]] = relationship()
+    # MDL-MED-12 FIX: Added relationship for FK
+    registered_by_waiter: Mapped[Optional["User"]] = relationship()
 
     # MDL-LOW-01 FIX: Add __repr__ for consistent debugging
     def __repr__(self) -> str:
@@ -144,7 +152,7 @@ class Charge(AuditMixin, Base):
         BigInteger, ForeignKey("branch.id"), nullable=False, index=True
     )
     check_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("check.id"), nullable=False, index=True
+        BigInteger, ForeignKey("app_check.id"), nullable=False, index=True
     )
     diner_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("diner.id"), index=True

@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import AuditMixin, Base
@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from .table import TableSession
     from .catalog import Product
     from .customer import Diner
-    from .kitchen import KitchenTicket
+    from .kitchen import KitchenTicket, KitchenTicketItem
+    from .user import User
 
 
 class Round(AuditMixin, Base):
@@ -64,8 +65,12 @@ class Round(AuditMixin, Base):
     session: Mapped["TableSession"] = relationship(back_populates="rounds")
     items: Mapped[list["RoundItem"]] = relationship(back_populates="round")
     kitchen_tickets: Mapped[list["KitchenTicket"]] = relationship(back_populates="round")
+    # MDL-MED-16 FIX: Added relationship for FK
+    submitted_by_waiter: Mapped[Optional["User"]] = relationship()
 
     __table_args__ = (
+        # MDL-MED-17 FIX: UniqueConstraint for idempotency per session
+        UniqueConstraint("table_session_id", "idempotency_key", name="uq_round_session_idempotency"),
         # Composite index for kitchen pending rounds query (branch_id + status)
         Index("ix_round_branch_status", "branch_id", "status"),
         # HIGH-03 FIX: Composite index for kitchen queue ordering (status + submitted_at)
@@ -114,5 +119,10 @@ class RoundItem(AuditMixin, Base):
 
     # Relationships
     round: Mapped["Round"] = relationship(back_populates="items")
-    product: Mapped["Product"] = relationship()
+    # MDL-HIGH-05 FIX: Added back_populates for bidirectional relationship
+    product: Mapped["Product"] = relationship(back_populates="round_items")
     diner: Mapped[Optional["Diner"]] = relationship(back_populates="round_items")
+    # MDL-HIGH-06 FIX: Added reverse relationship from KitchenTicketItem
+    kitchen_ticket_items: Mapped[list["KitchenTicketItem"]] = relationship(
+        back_populates="round_item"
+    )

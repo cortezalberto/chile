@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Integer, Text
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Integer, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import AuditMixin, Base
@@ -51,71 +51,102 @@ class CookingMethod(AuditMixin, Base):
     """
     Cooking method catalog.
     Methods: horneado, frito, grillado, crudo, hervido, vapor, salteado, braseado
+    MDL-CRIT-03 FIX: Added tenant_id for multi-tenant isolation.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "cooking_method"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     icon: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_cooking_method_tenant_name"),
+    )
 
 
 class FlavorProfile(AuditMixin, Base):
     """
     Flavor profile catalog.
     Flavors: suave, intenso, dulce, salado, acido, amargo, umami, picante
+    MDL-CRIT-03 FIX: Added tenant_id for multi-tenant isolation.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
-
-    DB-LOW-10 FIX: Added index on name for efficient lookups.
     """
 
     __tablename__ = "flavor_profile"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text)
     icon: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_flavor_profile_tenant_name"),
+    )
 
 
 class TextureProfile(AuditMixin, Base):
     """
     Texture profile catalog.
     Textures: crocante, cremoso, tierno, firme, esponjoso, gelatinoso, granulado
+    MDL-CRIT-03 FIX: Added tenant_id for multi-tenant isolation.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
-
-    DB-LOW-10 FIX: Added index on name for efficient lookups.
     """
 
     __tablename__ = "texture_profile"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text)
     icon: Mapped[Optional[str]] = mapped_column(Text)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_texture_profile_tenant_name"),
+    )
 
 
 class CuisineType(AuditMixin, Base):
     """
     Cuisine type catalog for recipes.
     Types: Argentina, Italiana, Mexicana, Japonesa, China, Peruana, etc.
+    MDL-CRIT-03 FIX: Added tenant_id for multi-tenant isolation.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "cuisine_type"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text)
     icon: Mapped[Optional[str]] = mapped_column(Text)  # Flag emoji
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_cuisine_type_tenant_name"),
+    )
 
-class ProductCookingMethod(Base):
+
+class ProductCookingMethod(AuditMixin, Base):
     """
     Many-to-many relationship between products and cooking methods.
     Composite primary key for efficiency.
     HIGH-08 FIX: Added tenant_id for multi-tenant consistency.
+    MDL-CRIT-02 FIX: Added AuditMixin for soft-delete and audit trail.
+    MDL-HIGH-05b FIX: Added back_populates for bidirectional navigation.
+    Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "product_cooking_method"
@@ -131,6 +162,10 @@ class ProductCookingMethod(Base):
         BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
     )
 
+    # Relationships
+    product: Mapped["Product"] = relationship(back_populates="cooking_methods")
+    cooking_method: Mapped["CookingMethod"] = relationship()
+
     # DB-CRIT-02 FIX: Indexes for M:N query performance
     __table_args__ = (
         Index("ix_product_cooking_method_product", "product_id"),
@@ -138,11 +173,14 @@ class ProductCookingMethod(Base):
     )
 
 
-class ProductFlavor(Base):
+class ProductFlavor(AuditMixin, Base):
     """
     Many-to-many relationship between products and flavor profiles.
     Composite primary key for efficiency.
     HIGH-08 FIX: Added tenant_id for multi-tenant consistency.
+    MDL-CRIT-02 FIX: Added AuditMixin for soft-delete and audit trail.
+    MDL-HIGH-05b FIX: Added back_populates for bidirectional navigation.
+    Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "product_flavor"
@@ -158,6 +196,10 @@ class ProductFlavor(Base):
         BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
     )
 
+    # Relationships
+    product: Mapped["Product"] = relationship(back_populates="flavors")
+    flavor_profile: Mapped["FlavorProfile"] = relationship()
+
     # DB-CRIT-02 FIX: Indexes for M:N query performance
     __table_args__ = (
         Index("ix_product_flavor_product", "product_id"),
@@ -165,11 +207,14 @@ class ProductFlavor(Base):
     )
 
 
-class ProductTexture(Base):
+class ProductTexture(AuditMixin, Base):
     """
     Many-to-many relationship between products and texture profiles.
     Composite primary key for efficiency.
     HIGH-08 FIX: Added tenant_id for multi-tenant consistency.
+    MDL-CRIT-02 FIX: Added AuditMixin for soft-delete and audit trail.
+    MDL-HIGH-05b FIX: Added back_populates for bidirectional navigation.
+    Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "product_texture"
@@ -184,6 +229,10 @@ class ProductTexture(Base):
     tenant_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
     )
+
+    # Relationships
+    product: Mapped["Product"] = relationship(back_populates="textures")
+    texture_profile: Mapped["TextureProfile"] = relationship()
 
     # DB-CRIT-02 FIX: Indexes for M:N query performance
     __table_args__ = (

@@ -39,7 +39,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # Disable dangerous browser features
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
         # Remove server header if present
-        response.headers.pop("server", None)
+        if "server" in response.headers:
+            del response.headers["server"]
 
         # HIGH-MID-01 FIX: Add Content-Security-Policy header
         # Allow self and configured origins for scripts/styles/connect

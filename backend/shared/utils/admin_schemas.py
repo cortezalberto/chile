@@ -462,6 +462,7 @@ class TableUpdate(BaseModel):
     code: str | None = None
     capacity: int | None = None
     sector: str | None = None
+    sector_id: int | None = None  # FK to BranchSector for waiter notifications
     status: str | None = None
     is_active: bool | None = None
 

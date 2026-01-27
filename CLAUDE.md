@@ -80,17 +80,22 @@ cd backend && python -m pytest tests/test_auth.py -v        # Single test file
 
 ```
 Tenant (Restaurant)
+  ├── CookingMethod, FlavorProfile, TextureProfile, CuisineType (tenant-scoped catalogs)
+  ├── IngredientGroup → Ingredient → SubIngredient (tenant-scoped)
   └── Branch (N)
         ├── Category (N) → Subcategory (N) → Product (N)
         ├── BranchSector (N) → Table (N) → TableSession → Diner (N)
         │                   → WaiterSectorAssignment (daily waiter assignments)
         │                   → Round → RoundItem → KitchenTicket
-        ├── Check → Charge → Allocation (FIFO) ← Payment
+        ├── Check (table: app_check) → Charge → Allocation (FIFO) ← Payment
         └── ServiceCall
 
 User ←→ UserBranchRole (M:N with Branch, roles: WAITER/KITCHEN/MANAGER/ADMIN)
 Product ←→ BranchProduct (per-branch pricing in cents)
 Product ←→ ProductAllergen (M:N with presence_type + risk_level)
+Product ←→ ProductCookingMethod, ProductFlavor, ProductTexture (M:N with back_populates + AuditMixin)
+Product ←→ RoundItem (1:N via round_items back_populates)
+RoundItem ←→ KitchenTicketItem (1:N via kitchen_ticket_items back_populates)
 Recipe ←→ RecipeAllergen (M:N) - Kitchen technical sheets, can link to Products
 Allergen ←→ AllergenCrossReaction (self-referential M:N for cross-reactions)
 
@@ -98,6 +103,15 @@ Customer ←→ Diner (1:N via customer_id - links visits to registered customer
          └── device_ids[], preferences, metrics, GDPR consent, AI personalization
 Diner: device_id, device_fingerprint (cross-session tracking)
      └── implicit_preferences (JSON: allergens, dietary, cooking filters)
+
+Key Constraints (Jan 2026 Refactoring):
+  - UniqueConstraint: Category(branch_id, name), Subcategory(category_id, name)
+  - UniqueConstraint: Ingredient(tenant_id, name), IngredientGroup(tenant_id, name)
+  - UniqueConstraint: CookingMethod/FlavorProfile/TextureProfile/CuisineType(tenant_id, name)
+  - UniqueConstraint: Round(table_session_id, idempotency_key)
+  - CheckConstraint: Promotion(start_date <= end_date), price_cents >= 0
+  - CheckConstraint: Payment/Allocation(amount_cents > 0), PromotionItem(quantity > 0)
+  - Composite Indexes: Diner(session_id, customer_id), AuditLog(tenant_id, entity_type)
 ```
 
 ### Clean Architecture (Backend)
@@ -920,11 +934,12 @@ export function closeBroadcastChannel(): void {
 
 - **UI language**: Spanish
 - **Code comments**: English
-- **Theme**: VS Code Light with blue (#0078d4) accent
+- **Theme**: Finexy Dashboard with orange (#f97316) accent
 - **IDs**: `crypto.randomUUID()` in frontend, BigInteger in backend
 - **Prices**: Stored as cents (e.g., $125.50 = 12550)
 - **Logging**: Use centralized `utils/logger.ts`, never direct console.*
 - **Naming**: Frontend camelCase, backend snake_case
+- **SQL Reserved Words**: Avoid SQL reserved keywords for table names. Example: `Check` model uses `__tablename__ = "app_check"` (not "check")
 
 ---
 
@@ -1125,20 +1140,20 @@ backend/
 │   │   ├── middlewares.py # Security middlewares
 │   │   └── cors.py        # CORS configuration
 │   ├── models/            # SQLAlchemy ORM models (modular by domain)
-│   │   ├── __init__.py    # Re-exports all 47 models
+│   │   ├── __init__.py    # Re-exports all 52 models (47 entities + 5 M:N tables)
 │   │   ├── base.py        # Base, AuditMixin
 │   │   ├── tenant.py      # Tenant, Branch
 │   │   ├── user.py        # User, UserBranchRole
 │   │   ├── catalog.py     # Category, Subcategory, Product, BranchProduct
 │   │   ├── allergen.py    # Allergen, ProductAllergen, AllergenCrossReaction
 │   │   ├── ingredient.py  # IngredientGroup, Ingredient, SubIngredient, ProductIngredient
-│   │   ├── product_profile.py  # 12 dietary/cooking/flavor profile models
+│   │   ├── product_profile.py  # 12 dietary/cooking/flavor profile models (M:N tables have AuditMixin)
 │   │   ├── sector.py      # BranchSector, WaiterSectorAssignment
 │   │   ├── table.py       # Table, TableSession
 │   │   ├── customer.py    # Customer, Diner
 │   │   ├── order.py       # Round, RoundItem
 │   │   ├── kitchen.py     # KitchenTicket, KitchenTicketItem, ServiceCall
-│   │   ├── billing.py     # Check, Payment, Charge, Allocation
+│   │   ├── billing.py     # Check (table: app_check), Payment, Charge, Allocation
 │   │   ├── knowledge.py   # KnowledgeDocument, ChatLog (RAG)
 │   │   ├── promotion.py   # Promotion, PromotionBranch, PromotionItem
 │   │   ├── exclusion.py   # BranchCategoryExclusion, BranchSubcategoryExclusion
@@ -1317,6 +1332,8 @@ All models inherit from `AuditMixin`:
 - `is_active` flag (default True, indexed)
 - Timestamps: `created_at`, `updated_at`, `deleted_at`
 - User tracking: `created_by_id/email`, `updated_by_id/email`, `deleted_by_id/email`
+
+**Note:** M:N junction tables (`ProductCookingMethod`, `ProductFlavor`, `ProductTexture`) also have `AuditMixin` for audit trail consistency.
 
 ```python
 # rest_api/services/crud/soft_delete.py
@@ -1551,6 +1568,151 @@ View active order/session details when clicking on a table in `/branches/tables`
 - [RESULTADOS_QA.md](RESULTADOS_QA.md): QA test results
 - [QA_TRAZA_WEBSOCKET_2026-01-18.md](QA_TRAZA_WEBSOCKET_2026-01-18.md): WebSocket QA trace (sector filtering, notifications)
 
+### Agile Documentation (IA-Native)
+- [agile/politicas.md](agile/politicas.md): **Policy Tickets governance** - 22 tickets defining AI autonomy levels
+- [agile/historias/historias_usuario.md](agile/historias/historias_usuario.md): **152 user stories** with technical specifications
+- [agile/historias/plantilla.md](agile/historias/plantilla.md): User story template with governance integration
+- [agile/historias/refactorizacion.md](agile/historias/refactorizacion.md): HU→PT mapping matrix
+
+### Multi-Agent Skills System
+- [agile/skills/README.md](agile/skills/README.md): **Skills architecture** - Agent system design
+- [agile/skills/MULTIAGENT_GUIDE.md](agile/skills/MULTIAGENT_GUIDE.md): **Multi-agent operations** - Coordination patterns
+- [agile/skills/dispatcher.md](agile/skills/dispatcher.md): Router agent for task distribution
+
+**Available Skills by Autonomy Level:**
+| Level | Skills | Purpose |
+|-------|--------|---------|
+| 🔴 CRÍTICO | `critico/auth-analyst.md` | Analysis only, no code modification |
+| 🟠 ALTO | `_base/alto.md` (template) | Supervised code proposals |
+| 🟡 MEDIO | `medio/kitchen-dev.md` | Implementation with checkpoints |
+| 🟢 BAJO | `bajo/catalog-dev.md` | Autonomous implementation |
+
+---
+
+## IA-Native Governance Framework
+
+This project uses the **IA-Native Framework** with Policy Tickets to govern AI-assisted development.
+
+### Principle
+
+> "Delegar ejecución no transfiere responsabilidad. La IA ejecuta; el humano responde."
+
+### Autonomy Levels
+
+| Level | Autonomy | AI Can | AI Cannot |
+|-------|----------|--------|-----------|
+| 🔴 **CRÍTICO** | análisis-solamente | Analyze, document, suggest, generate tests | Write production code, create PRs |
+| 🟠 **ALTO** | código-supervisado | Propose changes (human reviews line-by-line) | Auto-commit or merge |
+| 🟡 **MEDIO** | código-con-review | Write code with checkpoints per feature | Skip peer review |
+| 🟢 **BAJO** | código-autónomo | Full implementation, auto-merge if CI passes | Skip tests |
+
+### Domain Risk Classification
+
+```
+🔴 CRÍTICO (35 HU - 23%): Auth, Staff, Allergens, Billing, Security
+🟠 ALTO (15 HU - 10%): Products, WebSocket Events, Rate Limiting, Token Blacklist
+🟡 MEDIO (53 HU - 35%): Orders, Kitchen, Waiter, Diner, Tables, Customer Loyalty
+🟢 BAJO (49 HU - 32%): Categories, Sectors, Recipes, Ingredients, Promotions, Public, Audit
+```
+
+### Policy Ticket Reference
+
+Before working on any feature, consult the corresponding Policy Ticket in [agile/politicas.md](agile/politicas.md):
+
+| Domain | Policy Ticket | Risk Level |
+|--------|---------------|------------|
+| Auth/JWT | PT-AUTH-001 | CRÍTICO |
+| Rate Limiting | PT-AUTH-002 | CRÍTICO |
+| Staff Management | PT-STAFF-001 | CRÍTICO |
+| Allergens | PT-ALLERGEN-001 | CRÍTICO |
+| Billing/Payments | PT-BILLING-001, PT-BILLING-002 | CRÍTICO |
+| Products | PT-PRODUCT-001 | ALTO |
+| WebSocket Events | PT-EVENTS-001 | ALTO |
+| Token Blacklist | PT-BLACKLIST-001 | ALTO |
+| Orders/Rounds | PT-ORDERS-001 | MEDIO |
+| Kitchen | PT-KITCHEN-001 | MEDIO |
+| Waiter | PT-WAITER-001 | MEDIO |
+| Diner | PT-DINER-001 | MEDIO |
+| Tables | PT-TABLES-001 | MEDIO |
+| Customer Loyalty | PT-CUSTOMER-001 | MEDIO |
+| Categories | PT-CATEGORY-001 | BAJO |
+| Sectors/Tables | PT-SECTOR-001 | BAJO |
+| Recipes | PT-RECIPE-001 | BAJO |
+| Ingredients | PT-INGREDIENT-001 | BAJO |
+| Promotions | PT-PROMOTION-001 | BAJO |
+| Public Endpoints | PT-PUBLIC-001 | BAJO |
+| Audit | PT-AUDIT-001 | BAJO |
+
+### AI Behavior Guidelines
+
+**For CRÍTICO domains:**
+- Read and analyze only
+- Generate tests in sandbox/test environments
+- Document findings and suggestions
+- NEVER modify production code directly
+
+**For ALTO domains:**
+- Propose changes with full context
+- Wait for human line-by-line review
+- Include rationale for each change
+
+**For MEDIO domains:**
+- Implement with checkpoints
+- Request review after each feature completion
+- Document all decisions made
+
+**For BAJO domains:**
+- Full autonomy with passing CI
+- Self-approve if tests pass
+- Follow existing patterns in codebase
+
+### User Story Reference
+
+For detailed technical specifications of any endpoint, consult [agile/historias/historias_usuario.md](agile/historias/historias_usuario.md). Each story includes:
+- YAML metadata with endpoint, roles, implementation file
+- Request/Response JSON schemas
+- Validation tables with error codes
+- Business logic steps
+- SQL data models
+- WebSocket events (if applicable)
+
+### Multi-Agent Operations
+
+Use the **Task tool** with specialized skills for complex implementations:
+
+```typescript
+// Single agent - Use skill directly
+Task({
+  prompt: `
+    Skill: agile/skills/bajo/catalog-dev.md
+    Tarea: Implementar HU-CAT-003 (Crear Categoría)
+  `,
+  subagent_type: "general-purpose"
+})
+
+// Parallel agents - Multiple Task calls in ONE message
+const [result1, result2] = await Promise.all([
+  Task({ prompt: "Skill: catalog-dev...", run_in_background: true }),
+  Task({ prompt: "Skill: kitchen-dev...", run_in_background: true })
+])
+
+// Sequential with context passing
+const modelResult = await Task({ prompt: "Create model..." });
+const serviceResult = await Task({
+  prompt: `Context: ${modelResult}\nCreate service using the model...`
+});
+```
+
+**Coordination Patterns:**
+| Pattern | When to Use | Example |
+|---------|-------------|---------|
+| Sequential | Dependencies between tasks | Model → Service → Router |
+| Parallel | Independent tasks | Document multiple modules |
+| Hierarchical | Complex features | Supervisor + workers |
+| Cross-review | Quality/Security | Developer → Security review |
+
+See [MULTIAGENT_GUIDE.md](agile/skills/MULTIAGENT_GUIDE.md) for detailed examples.
+
 ---
 
 ## Common Issues
@@ -1608,6 +1770,14 @@ All builds verified passing:
 - **pwaWaiter**: Build passes ✅
 
 **977+ defects fixed** across 22 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete details.
+
+**Database Model Refactoring (Jan 26, 2026):**
+- 28 model inconsistencies fixed across 11 files
+- Added `tenant_id` to 5 catalog tables for multi-tenant isolation
+- Added 8 UniqueConstraints for data integrity
+- Added 7 missing relationships for FK navigation
+- Added 10+ composite indexes for query performance
+- See [terrible.md](terrible.md) for detailed audit report
 
 ---
 

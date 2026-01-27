@@ -53,11 +53,13 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-# CORS configuration
-configure_cors(app)
-
 # Security middlewares (headers, content-type validation)
+# NOTE: Register BEFORE CORS - middlewares execute in reverse order
 register_middlewares(app)
+
+# CORS configuration - MUST be registered LAST to execute FIRST
+# This ensures preflight OPTIONS requests are handled before other middlewares
+configure_cors(app)
 
 # =============================================================================
 # Register Routers

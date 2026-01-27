@@ -34,6 +34,8 @@ ALLOWED_HEADERS = [
     "Content-Type",
     "X-Table-Token",
     "X-Request-ID",
+    "X-Requested-With",  # CSRF protection header from pwaMenu
+    "X-Device-Id",  # Customer recognition header
     "Accept",
     "Accept-Language",
     "Cache-Control",
@@ -59,6 +61,10 @@ def configure_cors(app: FastAPI) -> None:
     Production: Set ALLOWED_ORIGINS env var (comma-separated).
     Development: Uses default localhost ports automatically.
     """
+    # DEV-CORS-FIX: Use short max_age in development to avoid preflight cache issues
+    # Production should use longer max_age (600) for performance
+    max_age = 0 if settings.environment == "development" else 600
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=get_cors_origins(),
@@ -66,4 +72,5 @@ def configure_cors(app: FastAPI) -> None:
         allow_methods=ALLOWED_METHODS,
         allow_headers=ALLOWED_HEADERS,
         expose_headers=["X-Request-ID"],
+        max_age=max_age,
     )

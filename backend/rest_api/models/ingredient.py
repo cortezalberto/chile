@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Index, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import AuditMixin, Base
@@ -19,24 +19,33 @@ class IngredientGroup(AuditMixin, Base):
     """
     Classification group for ingredients.
     Groups: proteina, vegetal, lacteo, cereal, condimento, otro
+    MDL-HIGH-07 FIX: Added tenant_id for multi-tenant isolation.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
     __tablename__ = "ingredient_group"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tenant.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     icon: Mapped[Optional[str]] = mapped_column(Text)
 
     # Relationships
     ingredients: Mapped[list["Ingredient"]] = relationship(back_populates="group")
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_ingredient_group_tenant_name"),
+    )
+
 
 class Ingredient(AuditMixin, Base):
     """
     Ingredient catalog entry.
     Ingredients can be simple (e.g., tomato) or processed (e.g., mayonnaise with sub-ingredients).
+    MDL-HIGH-07 FIX: Added UniqueConstraint for tenant+name.
     Inherits: is_active, created_at, updated_at, deleted_at, *_by_id/email from AuditMixin.
     """
 
@@ -57,6 +66,10 @@ class Ingredient(AuditMixin, Base):
     group: Mapped[Optional["IngredientGroup"]] = relationship(back_populates="ingredients")
     sub_ingredients: Mapped[list["SubIngredient"]] = relationship(back_populates="ingredient", cascade="all, delete-orphan")
     product_ingredients: Mapped[list["ProductIngredient"]] = relationship(back_populates="ingredient")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_ingredient_tenant_name"),
+    )
 
 
 class SubIngredient(AuditMixin, Base):

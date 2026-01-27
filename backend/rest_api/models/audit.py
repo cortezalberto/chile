@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import BigInteger, ForeignKey, Text
+from sqlalchemy import BigInteger, ForeignKey, Index, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import AuditMixin, Base
@@ -45,3 +45,9 @@ class AuditLog(AuditMixin, Base):
     # Metadata
     ip_address: Mapped[Optional[str]] = mapped_column(Text)
     user_agent: Mapped[Optional[str]] = mapped_column(Text)
+
+    # MDL-MED-18 FIX: Composite indexes for common audit queries
+    __table_args__ = (
+        Index("ix_audit_log_tenant_entity_type", "tenant_id", "entity_type"),
+        Index("ix_audit_log_tenant_entity_id", "tenant_id", "entity_id"),
+    )

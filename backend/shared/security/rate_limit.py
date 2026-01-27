@@ -67,24 +67,10 @@ return {count, ttl}
 
 # Cached script SHA for performance
 _rate_limit_script_sha: str | None = None
-# CRIT-LOCK-01 FIX: Lock to prevent race condition on script SHA initialization
-# Threading lock at module level (NOT inside function) to ensure single instance
-import threading
-_script_lock_init = threading.Lock()  # Module-level threading lock
-_rate_limit_script_lock: asyncio.Lock | None = None
-
-
-def _get_script_lock() -> asyncio.Lock:
-    """
-    CRIT-LOCK-01 FIX: Get or create the script lock (lazy initialization for event loop safety).
-    Uses double-check pattern with module-level threading.Lock to prevent multiple asyncio.Lock instances.
-    """
-    global _rate_limit_script_lock
-    if _rate_limit_script_lock is None:
-        with _script_lock_init:  # Use module-level lock
-            if _rate_limit_script_lock is None:
-                _rate_limit_script_lock = asyncio.Lock()
-    return _rate_limit_script_lock
+# CRIT-LOCK-02 FIX: Use threading.Lock instead of asyncio.Lock to avoid event loop issues
+# asyncio.Lock gets attached to one event loop and fails when used from another
+# (e.g., when asyncio.run() creates a new loop in check_email_rate_limit_sync)
+_script_sha_lock = threading.Lock()  # Module-level threading lock for script SHA
 
 
 def _get_rate_limit_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -137,42 +123,49 @@ async def check_email_rate_limit(email: str, fail_closed: bool = True) -> None:
         key = f"ratelimit:login:{email}"  # REDIS-HIGH-01: Standardized prefix
 
         # REDIS-HIGH-06 FIX: Use Lua script for atomic operation
-        # SHARED-RATELIMIT-01 FIX: Protected with asyncio.Lock to prevent race condition
-        async with _get_script_lock():
-            try:
-                # Try to use cached script SHA first (faster)
-                if _rate_limit_script_sha:
-                    result = await redis.evalsha(
-                        _rate_limit_script_sha,
-                        1,  # Number of keys
-                        key,
-                        LOGIN_RATE_LIMIT,
-                        LOGIN_RATE_WINDOW,
-                    )
-                else:
-                    # First call - load script and cache SHA
-                    _rate_limit_script_sha = await redis.script_load(RATE_LIMIT_LUA_SCRIPT)
-                    result = await redis.evalsha(
-                        _rate_limit_script_sha,
-                        1,
-                        key,
-                        LOGIN_RATE_LIMIT,
-                        LOGIN_RATE_WINDOW,
-                    )
-            except Exception as script_error:
-                # Script may have been flushed from Redis, re-register
-                if "NOSCRIPT" in str(script_error):
-                    logger.debug("Lua script cache miss, re-registering")
-                    _rate_limit_script_sha = await redis.script_load(RATE_LIMIT_LUA_SCRIPT)
-                    result = await redis.evalsha(
-                        _rate_limit_script_sha,
-                        1,
-                        key,
-                        LOGIN_RATE_LIMIT,
-                        LOGIN_RATE_WINDOW,
-                    )
-                else:
-                    raise  # Re-raise other exceptions
+        # CRIT-LOCK-02 FIX: Use threading.Lock to protect script SHA caching
+        # This avoids asyncio event loop issues when called from sync wrapper
+        with _script_sha_lock:
+            current_sha = _rate_limit_script_sha
+
+        try:
+            # Try to use cached script SHA first (faster)
+            if current_sha:
+                result = await redis.evalsha(
+                    current_sha,
+                    1,  # Number of keys
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
+                )
+            else:
+                # First call - load script and cache SHA
+                new_sha = await redis.script_load(RATE_LIMIT_LUA_SCRIPT)
+                with _script_sha_lock:
+                    _rate_limit_script_sha = new_sha
+                result = await redis.evalsha(
+                    new_sha,
+                    1,
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
+                )
+        except Exception as script_error:
+            # Script may have been flushed from Redis, re-register
+            if "NOSCRIPT" in str(script_error):
+                logger.debug("Lua script cache miss, re-registering")
+                new_sha = await redis.script_load(RATE_LIMIT_LUA_SCRIPT)
+                with _script_sha_lock:
+                    _rate_limit_script_sha = new_sha
+                result = await redis.evalsha(
+                    new_sha,
+                    1,
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
+                )
+            else:
+                raise  # Re-raise other exceptions
 
         count, ttl = result
 
@@ -224,55 +217,99 @@ async def check_email_rate_limit(email: str, fail_closed: bool = True) -> None:
 
 def check_email_rate_limit_sync(email: str, fail_closed: bool = True) -> None:
     """
-    Synchronous wrapper for check_email_rate_limit.
-    Safe to call from sync endpoints.
+    Synchronous rate limit check using sync Redis client.
+    Safe to call from sync endpoints without event loop issues.
 
-    CRIT-01 FIX: Use thread pool to properly block when in async context,
-    instead of asyncio.ensure_future which returns immediately.
-    SHARED-MED-01 FIX: Reuse module-level executor instead of creating per-call.
-    REDIS-CRIT-01 FIX: Fail-closed by default on errors.
+    CRIT-LOCK-03 FIX: Completely rewritten to use sync Redis client directly,
+    avoiding asyncio event loop conflicts that occur when using asyncio.run()
+    with a Redis pool created in a different event loop.
 
     Args:
         email: The email address to check.
         fail_closed: If True, deny access on Redis errors.
     """
+    global _rate_limit_script_sha
+
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # CRIT-01 FIX: Use thread pool to run async check synchronously
-            # SHARED-MED-01 FIX: Reuse module-level executor
-            executor = _get_rate_limit_executor()
-            future = executor.submit(
-                asyncio.run, check_email_rate_limit(email, fail_closed)
-            )
-            try:
-                future.result(timeout=5.0)  # 5 second timeout
-            except concurrent.futures.TimeoutError:
-                logger.error("Rate limit check timed out", email=email)
-                if fail_closed:
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                        detail="Verificación de seguridad expiró. Intente nuevamente.",
-                        headers={"Retry-After": "5"},
-                    )
-        else:
-            loop.run_until_complete(check_email_rate_limit(email, fail_closed))
-    except HTTPException:
-        raise  # Re-raise rate limit/service unavailable exceptions
-    except RuntimeError:
-        # No event loop, try creating one
+        from shared.infrastructure.events import get_redis_sync_client
+
+        redis_client = get_redis_sync_client()
+        key = f"ratelimit:login:{email}"
+
+        # Use Lua script for atomic INCR + EXPIRE
+        with _script_sha_lock:
+            current_sha = _rate_limit_script_sha
+
         try:
-            asyncio.run(check_email_rate_limit(email, fail_closed))
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error("Rate limit check failed in sync wrapper", error=str(e))
-            if fail_closed:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Error de verificación. Intente nuevamente.",
-                    headers={"Retry-After": "5"},
+            if current_sha:
+                result = redis_client.evalsha(
+                    current_sha,
+                    1,
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
                 )
+            else:
+                # First call - load script and cache SHA
+                new_sha = redis_client.script_load(RATE_LIMIT_LUA_SCRIPT)
+                with _script_sha_lock:
+                    _rate_limit_script_sha = new_sha
+                result = redis_client.evalsha(
+                    new_sha,
+                    1,
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
+                )
+        except Exception as script_error:
+            if "NOSCRIPT" in str(script_error):
+                logger.debug("Lua script cache miss (sync), re-registering")
+                new_sha = redis_client.script_load(RATE_LIMIT_LUA_SCRIPT)
+                with _script_sha_lock:
+                    _rate_limit_script_sha = new_sha
+                result = redis_client.evalsha(
+                    new_sha,
+                    1,
+                    key,
+                    LOGIN_RATE_LIMIT,
+                    LOGIN_RATE_WINDOW,
+                )
+            else:
+                raise
+
+        count, ttl = result
+
+        if count > LOGIN_RATE_LIMIT:
+            retry_time = _format_retry_time(ttl)
+            logger.warning(
+                "Rate limit exceeded for email",
+                email=email,
+                count=count,
+                limit=LOGIN_RATE_LIMIT,
+                ttl=ttl,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Demasiados intentos de login. Intente nuevamente en {retry_time}.",
+                headers={"Retry-After": str(ttl)},
+            )
+
+    except HTTPException:
+        raise  # Re-raise rate limit exceptions
+
+    except Exception as e:
+        logger.error(
+            "Rate limit check failed (sync) - applying fail-closed policy",
+            email=email,
+            error=str(e),
+            fail_closed=fail_closed,
+        )
+        if fail_closed:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Error de verificación. Intente nuevamente en unos segundos.",
+                headers={"Retry-After": "5"},
+            )
 
 
 def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:

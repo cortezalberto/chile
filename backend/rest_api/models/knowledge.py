@@ -36,7 +36,8 @@ class KnowledgeDocument(AuditMixin, Base):
     source: Mapped[Optional[str]] = mapped_column(Text)  # "product", "menu", "faq", etc.
     source_id: Mapped[Optional[int]] = mapped_column(BigInteger)  # Reference to source entity
 
-    # Vector embedding (1536 dimensions for nomic-embed-text)
+    # MDL-MED-19 FIX: Corrected comment (768 dimensions, not 1536)
+    # Vector embedding (768 dimensions for nomic-embed-text)
     embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=True)
 
 

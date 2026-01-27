@@ -17,11 +17,12 @@ if TYPE_CHECKING:
     from .ingredient import ProductIngredient
     from .product_profile import (
         ProductDietaryProfile, ProductCooking, ProductModification,
-        ProductWarning, ProductRAGConfig
+        ProductWarning, ProductRAGConfig, ProductCookingMethod, ProductFlavor, ProductTexture
     )
     from .promotion import PromotionItem
     from .exclusion import BranchCategoryExclusion, BranchSubcategoryExclusion
     from .recipe import Recipe
+    from .order import RoundItem
 
 
 class Category(AuditMixin, Base):
@@ -52,6 +53,8 @@ class Category(AuditMixin, Base):
     )
 
     __table_args__ = (
+        # MDL-HIGH-06 FIX: UniqueConstraint to prevent duplicate names in same branch
+        UniqueConstraint("branch_id", "name", name="uq_category_branch_name"),
         # Composite index for catalog queries (branch_id + is_active)
         Index("ix_category_branch_active", "branch_id", "is_active"),
     )
@@ -84,6 +87,8 @@ class Subcategory(AuditMixin, Base):
     )
 
     __table_args__ = (
+        # MDL-HIGH-06 FIX: UniqueConstraint to prevent duplicate names in same category
+        UniqueConstraint("category_id", "name", name="uq_subcategory_category_name"),
         # Composite index for catalog queries (category_id + is_active)
         Index("ix_subcategory_category_active", "category_id", "is_active"),
     )
@@ -111,8 +116,9 @@ class Product(AuditMixin, Base):
     subcategory_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("subcategory.id"), index=True
     )
-    featured: Mapped[bool] = mapped_column(Boolean, default=False)
-    popular: Mapped[bool] = mapped_column(Boolean, default=False)
+    # MDL-LOW-20 FIX: Added index for featured product queries
+    featured: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    popular: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     badge: Mapped[Optional[str]] = mapped_column(Text)  # "Nuevo", "Popular", etc.
     # MDL-LOW-04 FIX: Added migration timeline for deprecated fields
     # DEPRECATED (v2.0): Use ProductDietaryProfile instead (Phase 2)
@@ -166,6 +172,20 @@ class Product(AuditMixin, Base):
     promotion_items: Mapped[list["PromotionItem"]] = relationship(
         back_populates="product"
     )
+    # MDL-HIGH-05 FIX: Added reverse relationship from RoundItem
+    round_items: Mapped[list["RoundItem"]] = relationship(
+        back_populates="product"
+    )
+    # MDL-HIGH-05b FIX: Added reverse relationships from M:N profile tables
+    cooking_methods: Mapped[list["ProductCookingMethod"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
+    )
+    flavors: Mapped[list["ProductFlavor"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
+    )
+    textures: Mapped[list["ProductTexture"]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
+    )
 
     # MED-01 FIX: Add __repr__ for debugging
     def __repr__(self) -> str:
@@ -193,7 +213,8 @@ class BranchProduct(AuditMixin, Base):
         BigInteger, ForeignKey("product.id"), nullable=False, index=True
     )
     price_cents: Mapped[int] = mapped_column(Integer, nullable=False)
-    is_available: Mapped[bool] = mapped_column(Boolean, default=True)
+    # MDL-LOW-21 FIX: Added index for availability queries
+    is_available: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
     # Relationships
     branch: Mapped["Branch"] = relationship(back_populates="branch_products")

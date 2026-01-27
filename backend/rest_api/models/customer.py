@@ -67,7 +67,8 @@ class Customer(AuditMixin, Base):
 
     # === AI Segmentation ===
     # Segment: "new", "occasional", "regular", "vip", "at_risk", "churned"
-    segment: Mapped[Optional[str]] = mapped_column(Text, default="new")
+    # MDL-LOW-22 FIX: Added index for segment-based queries
+    segment: Mapped[Optional[str]] = mapped_column(Text, default="new", index=True)
     # Churn risk score: 0.0 (loyal) to 1.0 (high risk)
     churn_risk_score: Mapped[Optional[float]] = mapped_column(Float)
     # Predicted next visit (AI-calculated)
@@ -164,4 +165,7 @@ class Diner(AuditMixin, Base):
         Index("ix_diner_session_local_id", "session_id", "local_id"),
         # MED-CONS-03: Unique constraint for idempotency (prevents duplicate diners)
         UniqueConstraint("session_id", "local_id", name="uq_diner_session_local_id"),
+        # MDL-HIGH-08 FIX: Composite indexes for customer recognition queries
+        Index("ix_diner_session_customer", "session_id", "customer_id"),
+        Index("ix_diner_customer_device", "customer_id", "device_id"),
     )

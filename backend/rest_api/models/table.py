@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from .kitchen import ServiceCall
     from .billing import Check
     from .customer import Diner
+    from .user import User
 
 
 class Table(AuditMixin, Base):
@@ -111,6 +112,14 @@ class TableSession(AuditMixin, Base):
     service_calls: Mapped[list["ServiceCall"]] = relationship(back_populates="session")
     checks: Mapped[list["Check"]] = relationship(back_populates="session")
     diners: Mapped[list["Diner"]] = relationship(back_populates="session")
+    # MDL-MED-14 FIX: Added relationship for FK
+    assigned_waiter: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[assigned_waiter_id]
+    )
+    # MDL-MED-15 FIX: Added relationship for FK
+    opened_by_waiter: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[opened_by_waiter_id]
+    )
 
     # MDL-LOW-01 FIX: Add __repr__ for consistent debugging
     def __repr__(self) -> str:

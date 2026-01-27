@@ -15,6 +15,7 @@ from .base import AuditMixin, Base
 if TYPE_CHECKING:
     from .order import Round, RoundItem
     from .table import TableSession
+    from .user import User
 
 
 class KitchenTicket(AuditMixin, Base):
@@ -88,13 +89,15 @@ class KitchenTicketItem(AuditMixin, Base):
         BigInteger, ForeignKey("round_item.id"), nullable=False, index=True
     )
     qty: Mapped[int] = mapped_column(Integer, nullable=False)  # May be partial qty
+    # MDL-HIGH-01 FIX: Added index for frequent status queries
     status: Mapped[str] = mapped_column(
-        Text, default="PENDING"
+        Text, default="PENDING", index=True
     )  # PENDING, IN_PROGRESS, READY
 
     # Relationships
     ticket: Mapped["KitchenTicket"] = relationship(back_populates="items")
-    round_item: Mapped["RoundItem"] = relationship()
+    # MDL-HIGH-06 FIX: Added back_populates for bidirectional relationship
+    round_item: Mapped["RoundItem"] = relationship(back_populates="kitchen_ticket_items")
 
 
 class ServiceCall(AuditMixin, Base):
@@ -122,12 +125,15 @@ class ServiceCall(AuditMixin, Base):
     # BACK-CRIT-03 FIX: Add index for frequent status queries
     status: Mapped[str] = mapped_column(Text, default="OPEN", index=True)  # OPEN, ACKED, CLOSED
     acked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # MDL-CRIT-04 FIX: Added index for performance on user queries
     acked_by_user_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("app_user.id")
+        BigInteger, ForeignKey("app_user.id"), index=True
     )
 
     # Relationships
     session: Mapped["TableSession"] = relationship(back_populates="service_calls")
+    # MDL-MED-13 FIX: Added relationship for FK
+    acked_by: Mapped[Optional["User"]] = relationship()
 
     __table_args__ = (
         # Composite index for waiter pending service calls query (branch_id + status)

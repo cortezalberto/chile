@@ -35,8 +35,10 @@ class Promotion(AuditMixin, Base):
     description: Mapped[Optional[str]] = mapped_column(Text)
     price_cents: Mapped[int] = mapped_column(Integer, nullable=False)  # Promotional price
     image: Mapped[Optional[str]] = mapped_column(Text)
-    start_date: Mapped[str] = mapped_column(Text, nullable=False)  # "2024-01-01"
-    end_date: Mapped[str] = mapped_column(Text, nullable=False)  # "2024-12-31"
+    # MDL-LOW-23: Dates stored as ISO strings (YYYY-MM-DD format)
+    # Future consideration: migrate to Date type for better validation
+    start_date: Mapped[str] = mapped_column(Text, nullable=False, index=True)  # "2024-01-01"
+    end_date: Mapped[str] = mapped_column(Text, nullable=False, index=True)  # "2024-12-31"
     start_time: Mapped[str] = mapped_column(Text, default="00:00")  # "09:00"
     end_time: Mapped[str] = mapped_column(Text, default="23:59")  # "23:00"
     promotion_type_id: Mapped[Optional[str]] = mapped_column(Text)  # Reference to frontend type
