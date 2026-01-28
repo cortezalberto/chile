@@ -171,7 +171,7 @@ class RoundOutput(BaseModel):
 class UpdateRoundStatusRequest(BaseModel):
     """Request to update round status (kitchen/waiter)."""
 
-    status: Literal["IN_KITCHEN", "READY", "SERVED"]
+    status: Literal["SUBMITTED", "IN_KITCHEN", "READY", "SERVED"]
 
 
 # =============================================================================

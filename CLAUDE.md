@@ -4,6 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## Table of Contents
+
+- [Project Overview](#project-overview)
+- [Quick Start Commands](#quick-start-commands)
+- [Architecture](#architecture)
+- [Core Patterns](#core-patterns)
+- [Test Users](#test-users)
+- [Conventions](#conventions)
+- [Security Configuration](#security-configuration)
+- [Load Optimization](#load-optimization-400-users)
+- [Infrastructure](#infrastructure)
+- [Key Features](#key-features)
+- [Documentation](#documentation)
+- [IA-Native Governance Framework](#ia-native-governance-framework)
+- [Common Issues](#common-issues)
+- [QA Status](#qa-status-january-2026)
+- [Key Architecture Modules](#key-architecture-modules)
+- [WebSocket Gateway Utilities](#websocket-gateway-utilities)
+
+---
+
 ## Project Overview
 
 **Integrador** is a restaurant management system monorepo with four main components:
@@ -35,7 +56,16 @@ Each project has its own documentation:
 ## Quick Start Commands
 
 ```bash
+# =============================================================================
+# First-time setup (copy .env.example files)
+# =============================================================================
+cp backend/.env.example backend/.env                  # Backend config
+cp Dashboard/.env.example Dashboard/.env              # Dashboard config
+cp pwaMenu/.env.example pwaMenu/.env                  # pwaMenu config
+
+# =============================================================================
 # Backend (requires Docker Desktop running)
+# =============================================================================
 docker compose -f devOps/docker-compose.yml up -d    # Start PostgreSQL + Redis
 cd backend && pip install -r requirements.txt         # Install Python deps
 cd backend && python -m uvicorn rest_api.main:app --reload --port 8000      # REST API
@@ -51,25 +81,50 @@ cd backend && ..\devOps\start.ps1
 # Unix/Mac: Start everything (run from backend directory)
 cd backend && ../devOps/start.sh
 
+# =============================================================================
+# Frontend Development
+# =============================================================================
 # Dashboard
+cd Dashboard && npm install      # Install deps (first time)
 cd Dashboard && npm run dev      # Dev server (port 5177)
-cd Dashboard && npm run test     # Vitest (100 tests)
-cd Dashboard && npm test -- src/stores/branchStore.test.ts  # Single test file
+cd Dashboard && npm run lint     # ESLint
+cd Dashboard && npm run build    # Production build
 
 # pwaMenu
+cd pwaMenu && npm install        # Install deps (first time)
 cd pwaMenu && npm run dev        # Dev server (port 5176)
-cd pwaMenu && npm run test       # Vitest (108 tests)
-cd pwaMenu && npm test -- src/hooks/useDebounce.test.ts     # Single test file
+cd pwaMenu && npm run lint       # ESLint
+cd pwaMenu && npm run build      # Production build
 
 # pwaWaiter
+cd pwaWaiter && npm install      # Install deps (first time)
 cd pwaWaiter && npm run dev      # Dev server (port 5178)
+cd pwaWaiter && npm run lint     # ESLint
+cd pwaWaiter && npm run build    # Production build
+
+# =============================================================================
+# Testing
+# =============================================================================
+# Dashboard tests
+cd Dashboard && npm run test                                  # Watch mode
+cd Dashboard && npm test -- src/stores/branchStore.test.ts    # Single file
+cd Dashboard && npm run test:coverage                         # Coverage report
+
+# pwaMenu tests
+cd pwaMenu && npm run test                                    # Watch mode
+cd pwaMenu && npm test -- src/hooks/useDebounce.test.ts       # Single file
+cd pwaMenu && npm run test:coverage                           # Coverage report
+
+# pwaWaiter tests
+cd pwaWaiter && npm run test                                  # Watch mode
+cd pwaWaiter && npm run test:run                              # Single run
+
+# Backend tests
+cd backend && python -m pytest tests/ -v                      # All tests
+cd backend && python -m pytest tests/test_auth.py -v          # Single file
 
 # Type checking (all frontends)
 npx tsc --noEmit
-
-# Backend tests
-cd backend && python -m pytest tests/ -v                    # All tests
-cd backend && python -m pytest tests/test_auth.py -v        # Single test file
 ```
 
 ---
@@ -245,7 +300,7 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
 
 Events:
   # Round lifecycle
-  ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
+  ROUND_PENDING, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
   # Service calls
   SERVICE_CALL_CREATED, SERVICE_CALL_ACKED, SERVICE_CALL_CLOSED
   # Billing
@@ -273,6 +328,16 @@ Close codes:
 - Events with `sector_id` → sent only to waiters assigned to that sector
 - Events without `sector_id` → sent to all waiters in branch
 - ADMIN/MANAGER always receive all branch events
+
+**Round Event Routing:**
+| Event | Admin | Kitchen | Waiters | Diners |
+|-------|-------|---------|---------|--------|
+| `ROUND_PENDING` | ✅ | ❌ | ✅ | ❌ |
+| `ROUND_SUBMITTED` | ✅ | ✅ | ✅ | ❌ |
+| `ROUND_IN_KITCHEN` | ✅ | ✅ | ✅ | ✅ |
+| `ROUND_READY` | ✅ | ✅ | ✅ | ✅ |
+| `ROUND_SERVED` | ✅ | ✅ | ✅ | ✅ |
+| `ROUND_CANCELED` | ✅ | ✅ | ✅ | ✅ |
 
 ### WebSocket Gateway Architecture
 
@@ -807,6 +872,119 @@ useEffect(() => {
 }, [])  // Empty deps - subscribe once
 ```
 
+### Dashboard WebSocket Resilience (QA-AUDIT Jan 2026)
+
+**Non-Recoverable Close Codes:**
+```typescript
+// websocket.ts - Don't retry on permanent auth errors
+const NON_RECOVERABLE_CLOSE_CODES = new Set([
+  4001, // AUTH_FAILED - needs re-login
+  4003, // FORBIDDEN - insufficient role
+])
+
+// In onclose handler:
+if (NON_RECOVERABLE_CLOSE_CODES.has(event.code)) {
+  this.onMaxReconnectReached?.()  // Notify UI
+  return  // Don't schedule reconnect
+}
+```
+
+**Memory Leak Prevention:**
+```typescript
+// Clean up empty Sets when unsubscribing
+return () => {
+  const listeners = this.listeners.get(eventType)
+  listeners?.delete(callback)
+  if (listeners?.size === 0) {
+    this.listeners.delete(eventType)  // Prevent memory leak
+  }
+}
+```
+
+### TableStore Event Handling (QA-AUDIT Jan 2026)
+
+**Timeout Tracking Pattern:**
+```typescript
+// Track timeouts per entity to prevent multiple pending timeouts
+const blinkTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+
+const scheduleBinkClear = (tableId: string) => {
+  // Clear existing timeout for this table
+  const existing = blinkTimeouts.get(tableId)
+  if (existing) clearTimeout(existing)
+
+  // Schedule new timeout
+  const timeoutId = setTimeout(() => {
+    blinkTimeouts.delete(tableId)
+    // ... update state
+  }, 1500)
+  blinkTimeouts.set(tableId, timeoutId)
+}
+```
+
+**Debounce API Calls:**
+```typescript
+// Prevent duplicate API calls with debounce
+const pendingFetches = new Map<string, ReturnType<typeof setTimeout>>()
+
+case 'TABLE_STATUS_CHANGED':
+  const existing = pendingFetches.get(tableId)
+  if (existing) clearTimeout(existing)
+
+  const timeout = setTimeout(() => {
+    pendingFetches.delete(tableId)
+    tableAPI.get(event.table_id).then(/* update state */)
+  }, 100)  // 100ms debounce
+  pendingFetches.set(tableId, timeout)
+```
+
+**Event Validation:**
+```typescript
+// Validate table_id before processing
+if (event.table_id === undefined || event.table_id === null) {
+  return  // Skip events without table_id
+}
+const tableId = String(event.table_id)
+if (tableId === 'undefined' || tableId === 'null' || tableId === '') {
+  return  // Skip invalid string conversions
+}
+```
+
+### Kitchen/Orders Role Verification
+
+```typescript
+// Kitchen.tsx - Verify role access
+const userRoles = useAuthStore(selectUserRoles)
+const canAccessKitchen = userRoles.includes('KITCHEN') ||
+                         userRoles.includes('ADMIN') ||
+                         userRoles.includes('MANAGER')
+
+if (!canAccessKitchen) {
+  return <AccessDeniedPage />
+}
+```
+
+### Logout Infinite Loop Prevention (CRIT-FIX)
+
+**When this happens:** If user's JWT is expired and the logout endpoint returns 401, the API client's automatic retry-on-401 logic (which calls `onTokenExpired` → `logout()`) triggers another logout request, creating an infinite loop.
+
+**Affected frontends:** Dashboard (`api.ts`), pwaWaiter (`api.ts`)
+
+```typescript
+// In api.ts - authAPI.logout() must disable retry on 401
+// Otherwise: expired token → 401 → onTokenExpired → logout() → 401 → infinite loop
+async logout(): Promise<void> {
+  try {
+    // Pass false to disable retry on 401
+    await fetchAPI('/api/auth/logout', { method: 'POST' }, false)
+  } catch {
+    // Ignore errors - token might already be invalid
+  } finally {
+    setAuthToken(null)
+  }
+}
+```
+
 ### Backend WebSocket Patterns
 
 ```python
@@ -1273,6 +1451,19 @@ ALLOWED_ORIGINS=https://menu.restaurant.com,https://admin.restaurant.com,https:/
 
 When adding new origins in development, update `DEFAULT_CORS_ORIGINS` in `backend/rest_api/main.py`.
 
+### Frontend Environment Variables
+
+Each frontend requires specific environment variables in their `.env` file:
+
+| Frontend | Variable | Default | Description |
+|----------|----------|---------|-------------|
+| All | `VITE_API_URL` | `http://localhost:8000` | Backend REST API URL |
+| All | `VITE_WS_URL` | `ws://localhost:8001` | WebSocket Gateway URL |
+| pwaMenu | `VITE_BRANCH_SLUG` | - | Branch identifier for QR code flow (required) |
+| pwaWaiter | `VITE_VAPID_PUBLIC_KEY` | - | Push notification VAPID key |
+
+**Important:** `VITE_BRANCH_SLUG` must match a valid `slug` in the `branch` table for pwaMenu to work with table sessions.
+
 ---
 
 ## Key Features
@@ -1506,31 +1697,99 @@ Orders go through Dashboard before reaching kitchen:
 
 | Status | Description | Who can advance? | Next status |
 |--------|-------------|------------------|-------------|
-| `PENDING` | New order from pwaMenu/waiter | ADMIN/MANAGER | `IN_KITCHEN` |
-| `IN_KITCHEN` | Sent to kitchen | **KITCHEN only** | `READY` |
+| `PENDING` | New order from pwaMenu/waiter | ADMIN/MANAGER | `SUBMITTED` |
+| `SUBMITTED` | Manager sent to kitchen | ADMIN/MANAGER | `IN_KITCHEN` |
+| `IN_KITCHEN` | Kitchen working on order | **KITCHEN only** | `READY` |
 | `READY` | Kitchen finished | ADMIN/MANAGER/WAITER | `SERVED` |
 | `SERVED` | Delivered to table | - | - |
 
 **Key behavior:**
-- `ROUND_SUBMITTED` event does NOT go to kitchen channel (only to admin/waiters)
-- Only `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_SERVED` notify kitchen
+- `ROUND_PENDING` event: Client creates order → only to admin channel (Tables view)
+- `ROUND_SUBMITTED` event: Manager sends to kitchen → to admin AND kitchen channels
+- Only `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_SERVED` notify diners (session channel)
 - Dashboard cannot change `IN_KITCHEN` → `READY` (must wait for kitchen)
-- Files: `kitchen.py:178-193` (role validation), `TableSessionModal.tsx:147-181` (UI buttons)
+- Files: `kitchen/rounds.py` (status transitions), `TableSessionModal.tsx` (UI buttons)
+
+**Kitchen View (2 columns):**
+- Only shows "Nuevos" (SUBMITTED) and "En Cocina" (IN_KITCHEN) columns
+- READY rounds are removed from kitchen view and handled by Dashboard/waiters
+- File: `Kitchen.tsx`
 
 ### Table Status Animation (Dashboard)
 
 Tables show visual feedback for order states:
 
-| Event | Table Status | Animation |
-|-------|--------------|-----------|
-| `TABLE_SESSION_STARTED` (QR scan) | `ocupada` (red) | None |
-| `ROUND_SUBMITTED` (order placed) | `ocupada` (red) | **Blink (yellow pulse)** |
-| Admin advances status | `ocupada` (red) | Blink stops |
+| Event | Table Status | Order Status | Animation |
+|-------|--------------|--------------|-----------|
+| `TABLE_SESSION_STARTED` (QR scan) | `ocupada` (red) | `none` | Blue blink |
+| `ROUND_PENDING` (client order) | `ocupada` (red) | `pending` | Yellow pulse |
+| `ROUND_SUBMITTED` (sent to kitchen) | `ocupada` (red) | `submitted` | Blue blink |
+| `ROUND_IN_KITCHEN` (kitchen working) | `ocupada` (red) | `in_kitchen` | Blue blink |
+| `ROUND_READY` (kitchen finished) | `ocupada` (red) | `ready` | Blue blink |
+| `ROUND_SERVED` (delivered) | `pedido_cumplido` | `served` | Blue blink |
+| `TABLE_CLEARED` (session ended) | `libre` (green) | `none` | Blue blink |
 
-- `hasNewOrder` field on `RestaurantTable` triggers blink animation
-- `clearNewOrderFlag(tableId)` stops animation when admin handles order
-- CSS animation: `animate-pulse-warning` in `index.css`
-- Files: `tableStore.ts:329-361`, `Tables.tsx:123-127`
+**Order Status Badge Colors:**
+| Status | Badge Color | Label |
+|--------|-------------|-------|
+| `pending` | Yellow | "Pendiente" |
+| `submitted` | Blue | "En Cocina" |
+| `in_kitchen` | Blue | "En Cocina" |
+| `ready` | Green | "Listo" |
+| `served` | Gray | "Servido" |
+
+**Badge Contrast:** All order status badges use solid backgrounds (`bg-*-400`) with black bold text for accessibility.
+
+**Order Status Priority (Multi-Round):**
+When a table has multiple rounds, the aggregate status is calculated with these rules:
+
+1. **Ready + Not Ready = Combined:** If ANY round is `ready` AND any is NOT ready (pending/submitted/in_kitchen),
+   show "Listo + Cocina" to alert waiter that items are ready for pickup
+2. **All Pending:** If ALL rounds are `pending` (none ready), show "Pendiente"
+3. **Otherwise:** Show the "worst" (lowest priority) status from remaining rounds
+
+| Priority | Statuses | Display | Badge Color |
+|----------|----------|---------|-------------|
+| 0 (highest) | `ready` + any not ready | "Listo + Cocina" | Black |
+| 1 | `pending` (all) | "Pendiente" | Yellow |
+| 2 | `submitted`, `in_kitchen` | "En Cocina" | Blue |
+| 3 | `ready` (all) | "Listo" | Green |
+| 4 | `served` | "Servido" | Gray |
+| 5 | `none` | No badge | - |
+
+**Example Scenarios:**
+| Rounds | Aggregate Status | Reason |
+|--------|------------------|--------|
+| 1 ready + 1 pending | Listo + Cocina | Ready items + more coming |
+| 1 ready + 1 in_kitchen | Listo + Cocina | Ready items + more in kitchen |
+| 2 pending | Pendiente | All pending |
+| 1 pending + 1 submitted | Pendiente | None ready yet |
+| 2 submitted | En Cocina | All in kitchen |
+| 2 ready | Listo | All ready |
+
+**Combined Status:** When a table has at least one round `ready` AND at least one round NOT ready
+(pending/submitted/in_kitchen), the status shows "Listo + Cocina" with a black badge (`bg-gray-800`, white text).
+This alerts the waiter that some items are ready for pickup while more orders are still pending.
+
+**State Persistence on Navigation:**
+When `fetchTables` is called, it preserves WebSocket-updated state (`orderStatus`, `roundStatuses`,
+`hasNewOrder`, `statusChanged`) from existing tables. This prevents losing order status when
+navigating between Dashboard views.
+
+**Animation Classes:**
+- `animate-pulse-warning`: Yellow pulse for new orders (`hasNewOrder`)
+- `animate-pulse-urgent`: Purple pulse for check requested
+- `animate-status-blink`: Blue blink for status changes (auto-clears after 1.5s)
+
+**Key Fields on `RestaurantTable`:**
+- `orderStatus`: Current order/round status (`'none' | 'pending' | 'submitted' | 'in_kitchen' | 'ready_with_kitchen' | 'ready' | 'served'`)
+- `statusChanged`: Triggers blink animation on status change
+- `hasNewOrder`: Triggers persistent warning pulse for new orders
+
+**Files:**
+- `tableStore.ts`: WebSocket event handlers that update `orderStatus` and trigger `statusChanged`
+- `Tables.tsx`: `TableCard` component displays order status badge below capacity
+- `index.css`: CSS animations (`pulse-warning`, `pulse-urgent`, `status-blink`)
 
 ### Table Session Modal (Dashboard)
 
@@ -1737,6 +1996,14 @@ Run `npx tsc --noEmit` to see current errors.
 - Verify CORS origins include your frontend port
 - Backend accepts both `"ping"` and `{"type":"ping"}` formats
 
+### WebSocket disconnects every ~30 seconds
+If Dashboard WebSocket connections disconnect repeatedly after ~30 seconds with "stale connection cleanup":
+1. **Check JWT token expiration** - access tokens last 15 minutes
+2. **Refresh the Dashboard page** to get a new JWT token
+3. The WebSocket reconnects with the same (possibly expired) token, causing auth failure
+4. Heartbeat mechanism: client sends ping every 30s, server has 60s timeout, cleanup runs every 30s
+5. Check WS Gateway logs for `tracked_connections=0` which indicates no valid connections
+
 ### uvicorn not in PATH (Windows PowerShell)
 If `uvicorn` is not recognized in PowerShell, use `python -m uvicorn` instead:
 ```bash
@@ -1769,7 +2036,18 @@ All builds verified passing:
 - **pwaMenu**: 108 Vitest tests ✅
 - **pwaWaiter**: Build passes ✅
 
-**977+ defects fixed** across 22 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete details.
+**980+ defects fixed** across 23 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete details.
+
+**WebSocket Integration Audit (Jan 28, 2026):**
+- CRIT-01: Fixed race condition on WS reconnection (duplicate connections)
+- CRIT-02: Fixed multiple setTimeout tracking with Maps
+- HIGH-06: Added branch filtering in Kitchen page
+- HIGH-07: Added ROUND_CANCELED event handler
+- HIGH-09: Added role verification in Kitchen page
+- MED-01: Fixed memory leak from empty listener Sets
+- MED-04: Limited roundStatuses growth (cleanup when all served)
+- MED-06: Added table_id validation in events
+- MED-08: Added debounce for TABLE_STATUS_CHANGED API calls
 
 **Database Model Refactoring (Jan 26, 2026):**
 - 28 model inconsistencies fixed across 11 files

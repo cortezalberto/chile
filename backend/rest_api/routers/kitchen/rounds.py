@@ -28,6 +28,7 @@ from shared.config.logging import kitchen_logger as logger
 from shared.infrastructure.events import (
     get_redis_client,
     publish_round_event,
+    ROUND_SUBMITTED,
     ROUND_IN_KITCHEN,
     ROUND_READY,
     ROUND_SERVED,
@@ -43,10 +44,12 @@ def get_pending_rounds(
     ctx: dict[str, Any] = Depends(current_user_context),
 ) -> list[RoundOutput]:
     """
-    Get all pending rounds for the kitchen.
+    Get all active rounds for the kitchen.
 
-    Returns rounds with status SUBMITTED or IN_KITCHEN,
+    Returns rounds with status SUBMITTED, IN_KITCHEN, or READY,
     ordered by submission time (oldest first).
+
+    Note: PENDING rounds are NOT visible in kitchen (only in Tables).
 
     Requires KITCHEN, MANAGER, or ADMIN role.
     """
@@ -67,7 +70,7 @@ def get_pending_rounds(
         )
         .where(
             Round.branch_id.in_(branch_ids),
-            Round.status.in_(["SUBMITTED", "IN_KITCHEN"]),
+            Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
         )
         .order_by(Round.submitted_at.asc())
     ).scalars().unique().all()
@@ -150,11 +153,14 @@ async def update_round_status(
         )
 
     # Validate status transition
-    # PENDING: Round received from diner, waiting for admin/manager to send to kitchen
-    # SUBMITTED: Legacy status (kept for backwards compatibility)
+    # PENDING: Round received from diner, visible in Tables only
+    # SUBMITTED: Admin sent to kitchen, visible in Kitchen "Nuevo"
+    # IN_KITCHEN: Cook is preparing, visible in Kitchen "En Cocina"
+    # READY: Cook finished, visible in Kitchen "Listo" AND Tables "Listo"
+    # SERVED: Delivered to customer
     valid_transitions = {
-        "PENDING": ["IN_KITCHEN"],     # Admin/Manager sends to kitchen
-        "SUBMITTED": ["IN_KITCHEN"],   # Legacy: direct to kitchen
+        "PENDING": ["SUBMITTED"],      # Admin/Manager sends to kitchen "Nuevo"
+        "SUBMITTED": ["IN_KITCHEN"],   # Kitchen starts preparing
         "IN_KITCHEN": ["READY"],       # Kitchen marks as ready
         "READY": ["SERVED"],           # Admin/Manager/Waiter confirms delivery
     }
@@ -176,16 +182,24 @@ async def update_round_status(
         )
 
     # Role-based transition restrictions
+    # SUBMITTED -> IN_KITCHEN: KITCHEN starts preparing
+    if current_status == "SUBMITTED" and new_status == "IN_KITCHEN":
+        if "KITCHEN" not in user_roles and not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo cocina puede comenzar a preparar el pedido",
+            )
+
     # IN_KITCHEN -> READY: Only KITCHEN can mark as ready
     if current_status == "IN_KITCHEN" and new_status == "READY":
-        if "KITCHEN" not in user_roles:
+        if "KITCHEN" not in user_roles and not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo cocina puede marcar el pedido como listo",
             )
 
-    # PENDING/SUBMITTED -> IN_KITCHEN: Only ADMIN/MANAGER can send to kitchen
-    if current_status in ["PENDING", "SUBMITTED"] and new_status == "IN_KITCHEN":
+    # PENDING -> SUBMITTED: Only ADMIN/MANAGER can send to kitchen
+    if current_status == "PENDING" and new_status == "SUBMITTED":
         if not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -195,6 +209,9 @@ async def update_round_status(
     # Update status
     # ROUTER-HIGH-02 FIX: Add error handling for commit
     round_obj.status = new_status
+    # Set submitted_at when sending to kitchen
+    if new_status == "SUBMITTED" and round_obj.submitted_at is None:
+        round_obj.submitted_at = datetime.now(timezone.utc)
     # HIGH-KITCHEN-01 FIX: Store session/table info before commit since we'll re-query after
     # This avoids the need for db.refresh() which invalidates relationships
     pre_commit_session = round_obj.session
@@ -221,6 +238,7 @@ async def update_round_status(
 
     # Publish event
     event_type_map = {
+        "SUBMITTED": ROUND_SUBMITTED,
         "IN_KITCHEN": ROUND_IN_KITCHEN,
         "READY": ROUND_READY,
         "SERVED": ROUND_SERVED,

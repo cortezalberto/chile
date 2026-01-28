@@ -9,6 +9,7 @@ from __future__ import annotations
 import redis.asyncio as redis
 
 from .event_types import (
+    ROUND_PENDING,
     ROUND_SUBMITTED,
     ROUND_IN_KITCHEN,
     ROUND_READY,
@@ -66,9 +67,11 @@ async def publish_round_event(
     )
 
     # Determine routing based on event type
-    to_kitchen = event_type in [ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
+    # ROUND_PENDING: Only to admin (Dashboard Tables) - not to kitchen
+    # ROUND_SUBMITTED: Admin sent to kitchen - to kitchen "Nuevo" and admin
+    to_kitchen = event_type in [ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
     to_session = event_type in [ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
-    to_admin = event_type in [ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
+    to_admin = event_type in [ROUND_PENDING, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
 
     await _publish_with_routing(
         redis_client=redis_client,

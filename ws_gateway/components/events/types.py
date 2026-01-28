@@ -39,6 +39,7 @@ class EventType(str, Enum):
     """
 
     # Round lifecycle events
+    ROUND_PENDING = "ROUND_PENDING"
     ROUND_SUBMITTED = "ROUND_SUBMITTED"
     ROUND_IN_KITCHEN = "ROUND_IN_KITCHEN"
     ROUND_READY = "ROUND_READY"
@@ -250,6 +251,7 @@ class WebSocketEvent:
     def is_round_event(self) -> bool:
         """Check if this is a round lifecycle event."""
         return self.event_type in {
+            EventType.ROUND_PENDING.value,
             EventType.ROUND_SUBMITTED.value,
             EventType.ROUND_IN_KITCHEN.value,
             EventType.ROUND_READY.value,

@@ -53,7 +53,7 @@ from shared.infrastructure.events import (
     get_redis_client,
     publish_round_event,
     publish_service_call_event,
-    ROUND_SUBMITTED,
+    ROUND_PENDING,
     SERVICE_CALL_CREATED,
 )
 
@@ -224,7 +224,7 @@ async def submit_round(
     Submit a new round of orders.
 
     Creates a new round with the specified items and publishes
-    a ROUND_SUBMITTED event for waiters and kitchen.
+    a ROUND_PENDING event for admin/manager to review and send to kitchen.
 
     Requires X-Table-Token header with valid table token.
 
@@ -377,12 +377,13 @@ async def submit_round(
         )
 
     # Publish event to Redis
+    # ROUND_PENDING: Client created order, visible in Tables only (not Kitchen)
     redis = None
     try:
         redis = await get_redis_client()
         await publish_round_event(
             redis_client=redis,
-            event_type=ROUND_SUBMITTED,
+            event_type=ROUND_PENDING,
             tenant_id=tenant_id,
             branch_id=branch_id,
             table_id=table_id,
@@ -393,9 +394,10 @@ async def submit_round(
             actor_role="DINER",
             sector_id=sector_id,  # FIX: Send to assigned waiter's sector
         )
+        logger.info("ROUND_PENDING published", round_id=new_round.id, session_id=session_id, table_id=table_id, branch_id=branch_id, sector_id=sector_id)
     except Exception as e:
         # Log but don't fail the request if Redis is unavailable
-        logger.error("Failed to publish ROUND_SUBMITTED event", round_id=new_round.id, session_id=session_id, error=str(e))
+        logger.error("Failed to publish ROUND_PENDING event", round_id=new_round.id, session_id=session_id, error=str(e))
     # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return SubmitRoundResponse(
