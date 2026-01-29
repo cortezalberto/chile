@@ -1243,6 +1243,204 @@ async def close_table(
 
 
 # =============================================================================
+# Table Session Detail (Dashboard Integration)
+# =============================================================================
+
+
+class RoundItemDetailOutput(BaseModel):
+    """Detailed round item info for Dashboard TableSessionModal."""
+    id: int
+    product_id: int
+    product_name: str
+    category_name: Optional[str] = None
+    qty: int
+    unit_price_cents: int
+    notes: Optional[str] = None
+    diner_id: Optional[int] = None
+    diner_name: Optional[str] = None
+    diner_color: Optional[str] = None
+
+
+class RoundDetailOutput(BaseModel):
+    """Detailed round info for Dashboard TableSessionModal."""
+    id: int
+    round_number: int
+    status: str
+    created_at: datetime
+    submitted_at: Optional[datetime] = None
+    items: list[RoundItemDetailOutput] = []
+
+
+class DinerDetailOutput(BaseModel):
+    """Diner info for Dashboard TableSessionModal."""
+    id: int
+    session_id: int
+    name: str
+    color: str
+    local_id: Optional[str] = None
+    joined_at: datetime
+    device_id: Optional[str] = None
+
+
+class TableSessionDetailOutput(BaseModel):
+    """Complete session detail for Dashboard TableSessionModal."""
+    session_id: int
+    table_id: int
+    table_code: str
+    status: str
+    opened_at: datetime
+    diners: list[DinerDetailOutput] = []
+    rounds: list[RoundDetailOutput] = []
+    check_status: Optional[str] = None
+    total_cents: int = 0
+    paid_cents: int = 0
+
+
+@router.get("/tables/{table_id}/session", response_model=TableSessionDetailOutput)
+def get_table_session_detail(
+    table_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> TableSessionDetailOutput:
+    """
+    Get detailed session info for a table (Dashboard TableSessionModal).
+
+    Returns the active session with diners, rounds, and items.
+    Used by Dashboard to show session details when clicking on a table.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the table
+    table = db.scalar(
+        select(Table)
+        .where(
+            Table.id == table_id,
+            Table.tenant_id == tenant_id,
+            Table.is_active.is_(True),
+        )
+    )
+
+    if not table:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Table {table_id} not found",
+        )
+
+    # Verify branch access
+    if table.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No access to this branch",
+        )
+
+    # Find active session with all related data
+    session = db.scalar(
+        select(TableSession)
+        .options(
+            selectinload(TableSession.diners),
+            selectinload(TableSession.rounds)
+            .selectinload(Round.items)
+            .joinedload(RoundItem.product)
+            .joinedload(Product.category),
+        )
+        .where(
+            TableSession.table_id == table_id,
+            TableSession.status.in_(["OPEN", "PAYING"]),
+        )
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No active session for table {table_id}",
+        )
+
+    # Get check info if exists
+    check = db.scalar(
+        select(Check)
+        .where(
+            Check.table_session_id == session.id,
+            Check.tenant_id == tenant_id,
+            Check.is_active.is_(True),
+        )
+    )
+
+    # Build diner lookup for round items
+    diner_lookup = {d.id: d for d in (session.diners or [])}
+
+    # Build diners output
+    diners_output = [
+        DinerDetailOutput(
+            id=d.id,
+            session_id=d.session_id,
+            name=d.name,
+            color=d.color or "#666",
+            local_id=d.local_id,
+            joined_at=d.joined_at,
+            device_id=d.device_id,
+        )
+        for d in (session.diners or [])
+    ]
+
+    # Build rounds output with items
+    rounds_output = []
+    total_cents = 0
+
+    for round_obj in sorted(session.rounds or [], key=lambda r: r.round_number):
+        items_output = []
+        for item in (round_obj.items or []):
+            diner = diner_lookup.get(item.diner_id) if item.diner_id else None
+            product = item.product
+            category = product.category if product else None
+
+            items_output.append(
+                RoundItemDetailOutput(
+                    id=item.id,
+                    product_id=item.product_id,
+                    product_name=product.name if product else "Unknown",
+                    category_name=category.name if category else None,
+                    qty=item.qty,
+                    unit_price_cents=item.unit_price_cents,
+                    notes=item.notes,
+                    diner_id=item.diner_id,
+                    diner_name=diner.name if diner else None,
+                    diner_color=diner.color if diner else None,
+                )
+            )
+
+            # Sum total from non-canceled rounds
+            if round_obj.status not in ["DRAFT", "CANCELED"]:
+                total_cents += item.unit_price_cents * item.qty
+
+        rounds_output.append(
+            RoundDetailOutput(
+                id=round_obj.id,
+                round_number=round_obj.round_number,
+                status=round_obj.status,
+                created_at=round_obj.created_at,
+                submitted_at=round_obj.submitted_at,
+                items=items_output,
+            )
+        )
+
+    return TableSessionDetailOutput(
+        session_id=session.id,
+        table_id=table.id,
+        table_code=table.code,
+        status=session.status,
+        opened_at=session.opened_at,
+        diners=diners_output,
+        rounds=rounds_output,
+        check_status=check.status if check else None,
+        total_cents=check.total_cents if check else total_cents,
+        paid_cents=check.paid_cents if check else 0,
+    )
+
+
+# =============================================================================
 # Comanda Rápida - Menu for Waiter
 # =============================================================================
 

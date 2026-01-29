@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTablesStore, selectSelectedTable } from '../stores/tablesStore'
 import { useAuthStore, selectUser } from '../stores/authStore'
-import { tablesAPI, roundsAPI } from '../services/api'
+import { tablesAPI, roundsAPI, serviceCallsAPI } from '../services/api'
 import { wsService } from '../services/websocket'
 import { Header } from '../components/Header'
 import { Button } from '../components/Button'
@@ -47,6 +47,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
   // WAITER-PAGE-MED-02: Loading state for actions
   const [isMarkingServed, setIsMarkingServed] = useState(false)
   const [isClearingTable, setIsClearingTable] = useState(false)
+  // QA-FIX: Loading state for resolving service calls
+  const [isResolvingCall, setIsResolvingCall] = useState(false)
 
   // PWAW-M003: Round filter state
   const [roundFilter, setRoundFilter] = useState<RoundFilterStatus>('ALL')
@@ -91,6 +93,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     // MED-08 FIX: Use WS event constants instead of magic strings
     // Events that should trigger a refresh for this table
     const relevantEvents: WSEventType[] = [
+      WS_EVENT_TYPES.ROUND_PENDING,  // New round created by customer
       WS_EVENT_TYPES.ROUND_SUBMITTED,
       WS_EVENT_TYPES.ROUND_IN_KITCHEN,
       WS_EVENT_TYPES.ROUND_READY,
@@ -147,6 +150,20 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     setConfirmRoundNumber(null)
   }
 
+  // QA-FIX: Handle resolving a service call
+  const handleResolveServiceCall = async (callId: number) => {
+    setIsResolvingCall(true)
+    try {
+      await serviceCallsAPI.resolve(callId)
+      // The WebSocket event SERVICE_CALL_CLOSED will update the state
+      // and reload session detail automatically
+    } catch (err) {
+      console.error('Failed to resolve service call:', err)
+    } finally {
+      setIsResolvingCall(false)
+    }
+  }
+
   // Calculate round subtotal
   const getRoundSubtotal = (round: RoundDetail): number => {
     return round.items.reduce((sum, item) => sum + item.unit_price_cents * item.qty, 0)
@@ -159,9 +176,9 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
 
     switch (roundFilter) {
       case 'PENDING':
-        // Pending includes SUBMITTED and IN_KITCHEN
+        // Include PENDING (new from customer), SUBMITTED, and IN_KITCHEN
         return sessionDetail.rounds.filter(
-          (r) => r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN'
+          (r) => r.status === 'PENDING' || r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN'
         )
       case 'READY':
         return sessionDetail.rounds.filter((r) => r.status === 'READY')
@@ -179,19 +196,25 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
     const rounds = sessionDetail.rounds
     return {
       ALL: rounds.length,
-      PENDING: rounds.filter((r) => r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN').length,
+      // Include PENDING status in the count
+      PENDING: rounds.filter((r) => r.status === 'PENDING' || r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN').length,
       READY: rounds.filter((r) => r.status === 'READY').length,
       SERVED: rounds.filter((r) => r.status === 'SERVED').length,
     }
   }, [sessionDetail?.rounds])
 
+  // Check if there are rounds ready to pickup
+  const hasReadyRounds = useMemo(() => {
+    return sessionDetail?.rounds.some((r) => r.status === 'READY') ?? false
+  }, [sessionDetail?.rounds])
+
   if (!table) {
     return (
-      <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
+      <div className="min-h-screen bg-white flex flex-col">
         <Header />
         <main className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <p className="text-neutral-400 mb-4">Mesa no encontrada</p>
+            <p className="text-gray-500 mb-4">Mesa no encontrada</p>
             <Button onClick={onBack}>Volver</Button>
           </div>
         </main>
@@ -215,7 +238,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
+    <div className="min-h-screen bg-white flex flex-col">
       <Header />
 
       <main className="flex-1 p-4 overflow-auto">
@@ -223,7 +246,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
         <div className="mb-6">
           <button
             onClick={onBack}
-            className="flex items-center gap-2 text-neutral-400 hover:text-white mb-4"
+            className="flex items-center gap-2 text-gray-500 hover:text-gray-900 mb-4"
           >
             <svg
               className="w-5 h-5"
@@ -242,7 +265,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
           </button>
 
           <div className="flex items-center justify-between">
-            <h1 className="text-3xl font-bold text-white">
+            <h1 className="text-3xl font-bold text-gray-900">
               Mesa {formatTableCode(table.code)}
             </h1>
             <TableStatusBadge status={table.status} />
@@ -255,8 +278,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                 onClick={() => setMainTab('session')}
                 className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
                   mainTab === 'session'
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                    ? 'bg-orange-500 text-gray-900'
+                    : 'bg-white text-gray-500 hover:bg-gray-100'
                 }`}
               >
                 Sesión
@@ -265,8 +288,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                 onClick={() => setMainTab('comanda')}
                 className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
                   mainTab === 'comanda'
-                    ? 'bg-orange-500 text-white'
-                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                    ? 'bg-orange-500 text-gray-900'
+                    : 'bg-white text-gray-500 hover:bg-gray-100'
                 }`}
               >
                 🍽️ Comanda
@@ -288,19 +311,19 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
           ) : (
           <div className="space-y-6">
             {/* Session summary */}
-            <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
-              <h2 className="text-lg font-semibold text-neutral-300 mb-3">
+            <section className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-700 mb-3">
                 Resumen de sesion
               </h2>
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-neutral-800 rounded-lg p-3">
-                  <p className="text-sm text-neutral-400">Rondas pendientes</p>
+                <div className="bg-white rounded-lg p-3">
+                  <p className="text-sm text-gray-500">Rondas pendientes</p>
                   <p className="text-2xl font-bold text-orange-500">
                     {table.open_rounds}
                   </p>
                 </div>
-                <div className="bg-neutral-800 rounded-lg p-3">
-                  <p className="text-sm text-neutral-400">Llamados pendientes</p>
+                <div className="bg-white rounded-lg p-3">
+                  <p className="text-sm text-gray-500">Llamados pendientes</p>
                   <p className="text-2xl font-bold text-red-500">
                     {table.pending_calls}
                   </p>
@@ -308,10 +331,10 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
               </div>
               {/* Total from session detail */}
               {sessionDetail && (
-                <div className="mt-4 pt-4 border-t border-neutral-800">
+                <div className="mt-4 pt-4 border-t border-gray-200">
                   <div className="flex justify-between items-center">
-                    <span className="text-neutral-400">Total consumido</span>
-                    <span className="text-xl font-bold text-white">
+                    <span className="text-gray-500">Total consumido</span>
+                    <span className="text-xl font-bold text-gray-900">
                       {formatPrice(sessionDetail.total_cents)}
                     </span>
                   </div>
@@ -319,22 +342,68 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
               )}
             </section>
 
-            {/* Service calls alert */}
+            {/* Service calls alert - QA-FIX: Made interactive for resolution */}
             {table.pending_calls > 0 && (
               <section className="bg-red-500/10 rounded-xl p-4 border border-red-500/30">
                 <h2 className="text-lg font-semibold text-red-500 mb-2 flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
                   Llamados pendientes
                 </h2>
-                <p className="text-neutral-300">
+                <p className="text-gray-700 mb-3">
                   Esta mesa tiene {table.pending_calls} llamado{table.pending_calls !== 1 ? 's' : ''} sin atender.
                 </p>
+                {/* Show resolve button for each active service call */}
+                {table.activeServiceCallIds && table.activeServiceCallIds.length > 0 ? (
+                  <div className="space-y-2">
+                    {table.activeServiceCallIds.map((callId) => (
+                      <button
+                        key={callId}
+                        onClick={() => handleResolveServiceCall(callId)}
+                        disabled={isResolvingCall}
+                        className="w-full py-2 px-4 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                      >
+                        {isResolvingCall ? (
+                          <>
+                            <div className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full" />
+                            Marcando...
+                          </>
+                        ) : (
+                          <>
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            Marcar como atendido
+                          </>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  // Fallback when we don't have call IDs (e.g., page loaded before WS events)
+                  <p className="text-gray-500 text-sm italic">
+                    Las llamadas se actualizarán automáticamente.
+                  </p>
+                )}
+              </section>
+            )}
+
+            {/* Ready rounds alert - Go to kitchen to pickup */}
+            {hasReadyRounds && (
+              <section className="bg-green-500/10 rounded-xl p-4 border border-green-500/30 animate-pulse">
+                <div className="flex items-center gap-2 text-green-600">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span className="font-medium">
+                    ¡Pedido listo! Recoger en cocina
+                  </span>
+                </div>
               </section>
             )}
 
             {/* PWAW-002: Rounds detail */}
             {isLoading ? (
-              <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
+              <section className="bg-gray-50 rounded-xl p-4 border border-gray-200">
                 <div className="flex justify-center py-8">
                   <div className="animate-spin w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full" />
                 </div>
@@ -351,8 +420,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                 </Button>
               </section>
             ) : sessionDetail && sessionDetail.rounds.length > 0 ? (
-              <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
-                <h2 className="text-lg font-semibold text-neutral-300 mb-3">
+              <section className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-700 mb-3">
                   Detalle de rondas ({sessionDetail.rounds.length})
                 </h2>
 
@@ -367,15 +436,15 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                         onClick={() => setRoundFilter(option.value)}
                         className={`flex-shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
                           isActive
-                            ? 'bg-orange-500 text-white'
-                            : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                            ? 'bg-orange-500 text-gray-900'
+                            : 'bg-white text-gray-500 hover:bg-gray-100'
                         }`}
                       >
                         {option.label}
                         {count > 0 && (
                           <span
                             className={`ml-1 px-1.5 py-0.5 rounded-full text-xs ${
-                              isActive ? 'bg-orange-600' : 'bg-neutral-700'
+                              isActive ? 'bg-orange-600' : 'bg-gray-300'
                             }`}
                           >
                             {count}
@@ -388,23 +457,23 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
 
                 <div className="space-y-4">
                   {filteredRounds.length === 0 ? (
-                    <p className="text-neutral-500 text-center py-4">
+                    <p className="text-gray-400 text-center py-4">
                       No hay rondas con este filtro
                     </p>
                   ) : filteredRounds.map((round) => (
                     <div
                       key={round.id}
-                      className="bg-neutral-800 rounded-lg p-3 border border-neutral-700"
+                      className="bg-white rounded-lg p-3 border border-gray-200"
                     >
                       {/* Round header */}
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
-                          <span className="text-white font-medium">
+                          <span className="text-gray-900 font-medium">
                             Ronda {round.round_number}
                           </span>
                           <RoundStatusBadge status={round.status} size="sm" />
                         </div>
-                        <span className="text-neutral-400 text-sm">
+                        <span className="text-gray-500 text-sm">
                           {round.submitted_at ? formatTime(round.submitted_at) : ''}
                         </span>
                       </div>
@@ -418,7 +487,7 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                           >
                             <div className="flex-1">
                               <div className="flex items-center gap-2">
-                                <span className="text-white">
+                                <span className="text-gray-900">
                                   {item.qty}x {item.product_name}
                                 </span>
                                 {item.diner_name && (
@@ -436,12 +505,12 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                                 )}
                               </div>
                               {item.notes && (
-                                <p className="text-neutral-500 text-xs mt-0.5">
+                                <p className="text-gray-400 text-xs mt-0.5">
                                   {item.notes}
                                 </p>
                               )}
                             </div>
-                            <span className="text-neutral-400 ml-2">
+                            <span className="text-gray-500 ml-2">
                               {formatPrice(item.unit_price_cents * item.qty)}
                             </span>
                           </div>
@@ -449,8 +518,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                       </div>
 
                       {/* Round footer */}
-                      <div className="flex items-center justify-between pt-2 border-t border-neutral-700">
-                        <span className="text-neutral-400 text-sm">
+                      <div className="flex items-center justify-between pt-2 border-t border-gray-200">
+                        <span className="text-gray-500 text-sm">
                           Subtotal: {formatPrice(getRoundSubtotal(round))}
                         </span>
                         {round.status === 'READY' && (
@@ -468,8 +537,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                 </div>
               </section>
             ) : sessionDetail ? (
-              <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
-                <p className="text-neutral-500 text-center">
+              <section className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <p className="text-gray-400 text-center">
                   No hay rondas en esta sesion
                 </p>
               </section>
@@ -477,8 +546,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
 
             {/* Diners */}
             {sessionDetail && sessionDetail.diners.length > 0 && (
-              <section className="bg-neutral-900 rounded-xl p-4 border border-neutral-800">
-                <h2 className="text-lg font-semibold text-neutral-300 mb-3">
+              <section className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-700 mb-3">
                   Comensales ({sessionDetail.diners.length})
                 </h2>
                 <div className="flex flex-wrap gap-2">
@@ -508,11 +577,11 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
                 <h2 className="text-lg font-semibold text-purple-500 mb-2">
                   Estado de cuenta
                 </h2>
-                <p className="text-neutral-300">
+                <p className="text-gray-700">
                   Estado: <span className="font-medium">{table.check_status}</span>
                 </p>
                 {sessionDetail && (
-                  <div className="mt-2 text-neutral-300">
+                  <div className="mt-2 text-gray-700">
                     <p>
                       Total: <span className="font-medium">{formatPrice(sessionDetail.total_cents)}</span>
                     </p>
@@ -539,8 +608,8 @@ export function TableDetailPage({ onBack }: TableDetailPageProps) {
           )
         ) : (
           <div className="flex flex-col items-center justify-center h-64">
-            <p className="text-neutral-400">Sin sesion activa</p>
-            <p className="text-neutral-500 text-sm mt-2">
+            <p className="text-gray-500">Sin sesion activa</p>
+            <p className="text-gray-400 text-sm mt-2">
               La mesa esta disponible
             </p>
           </div>

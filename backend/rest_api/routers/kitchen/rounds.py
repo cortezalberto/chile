@@ -59,9 +59,10 @@ def get_pending_rounds(
     if not branch_ids:
         return []
 
-    # Get pending rounds with eager loading to avoid N+1 queries
+    # Get active rounds with eager loading to avoid N+1 queries
     # - selectinload for items (one-to-many collection)
     # - joinedload for session->table chain (many-to-one)
+    # Includes PENDING (waiting for manager authorization) so kitchen can see incoming orders
     rounds = db.execute(
         select(Round)
         .options(
@@ -70,7 +71,7 @@ def get_pending_rounds(
         )
         .where(
             Round.branch_id.in_(branch_ids),
-            Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
+            Round.status.in_(["PENDING", "SUBMITTED", "IN_KITCHEN", "READY"]),
         )
         .order_by(Round.submitted_at.asc())
     ).scalars().unique().all()

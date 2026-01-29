@@ -429,6 +429,7 @@ class SectorAssignmentRepository:
                 user_id=user_id,
                 tenant_id=tenant_id,
                 error=str(e),
+                exc_info=True,
             )
             return []
 

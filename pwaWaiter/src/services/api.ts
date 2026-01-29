@@ -307,11 +307,33 @@ export const authAPI = {
   },
 }
 
-// Tables API
+// Tables API - Transform snake_case to camelCase for service call IDs
+interface TableCardResponse {
+  table_id: number
+  code: string
+  status: TableCard['status']
+  session_id: number | null
+  open_rounds: number
+  pending_calls: number
+  check_status: TableCard['check_status']
+  active_service_call_ids?: number[]
+}
+
 export const tablesAPI = {
   async getTables(branchId: number): Promise<TableCard[]> {
     // The endpoint returns an array directly, not wrapped in { tables: ... }
-    return request<TableCard[]>(`/waiter/tables?branch_id=${branchId}`)
+    const response = await request<TableCardResponse[]>(`/waiter/tables?branch_id=${branchId}`)
+    // Map snake_case to camelCase
+    return response.map((t) => ({
+      table_id: t.table_id,
+      code: t.code,
+      status: t.status,
+      session_id: t.session_id,
+      open_rounds: t.open_rounds,
+      pending_calls: t.pending_calls,
+      check_status: t.check_status,
+      activeServiceCallIds: t.active_service_call_ids ?? [],
+    }))
   },
 
   async getTable(tableId: number): Promise<TableCard> {

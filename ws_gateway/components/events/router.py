@@ -44,6 +44,11 @@ class ConnectionManagerProtocol(Protocol):
         self, branch_id: int, event: dict, tenant_id: int | None = None
     ) -> int: ...
 
+    async def send_to_kitchen(
+        self, branch_id: int, event: dict, tenant_id: int | None = None
+    ) -> int: ...
+
+
 
 @dataclass
 class RoutingResult:
@@ -104,10 +109,12 @@ class EventRouter:
     - to_kitchen: Flag to also send to kitchen staff
 
     Event types and their routing (from event_types.py):
+    - ROUND_PENDING: admins + ALL branch waiters (bypasses sector filter)
     - ROUND_SUBMITTED: admins + waiters (NO kitchen)
     - ROUND_IN_KITCHEN: admins + waiters + kitchen + session
     - ROUND_READY: admins + waiters + kitchen + session
     - ROUND_SERVED: admins + waiters + session
+    - TABLE_SESSION_STARTED: admins + ALL branch waiters + session
     - SERVICE_CALL_*: admins + waiters (sector targeted)
     - PAYMENT_*: admins + session
     - TABLE_*: admins + session
@@ -146,6 +153,13 @@ class EventRouter:
         "ENTITY_UPDATED",
         "ENTITY_DELETED",
         "CASCADE_DELETE",
+    })
+
+    # Events that should go to ALL branch waiters (bypass sector filtering)
+    # These are high-priority notifications that all waiters need to see
+    BRANCH_WIDE_WAITER_EVENTS = frozenset({
+        "ROUND_PENDING",  # New order - all assigned waiters should be aware
+        "TABLE_SESSION_STARTED",  # New session - waiters need to know
     })
 
     def __init__(self, manager: ConnectionManagerProtocol):
@@ -210,7 +224,24 @@ class EventRouter:
                 # Waiter routing (unless admin-only event)
                 if not admin_only:
                     try:
-                        if sector_id is not None:
+                        # Check if this event should go to ALL waiters in branch
+                        # (bypass sector filtering for high-priority notifications)
+                        branch_wide = event_type in self.BRANCH_WIDE_WAITER_EVENTS
+
+                        if branch_wide:
+                            # Always send to all branch waiters for high-priority events
+                            result.waiter_sent = await self._manager.send_to_waiters_only(
+                                branch_id, event, tenant_id=tenant_id
+                            )
+                            if result.waiter_sent > 0:
+                                logger.debug(
+                                    "Dispatched event to all branch waiters (high priority)",
+                                    event_type=event_type,
+                                    branch_id=branch_id,
+                                    tenant_id=tenant_id,
+                                    clients=result.waiter_sent,
+                                )
+                        elif sector_id is not None:
                             # Sector-targeted waiter notification
                             result.waiter_sent = await self._manager.send_to_sector(
                                 sector_id, event, tenant_id=tenant_id
@@ -240,16 +271,14 @@ class EventRouter:
                         errors.append(f"Failed to send to waiters: {e}")
                         logger.error("Error sending to waiters", error=str(e))
 
-                # Kitchen routing: use send_to_branch which includes all branch
-                # connections (waiters, kitchen, managers with is_admin=False)
-                # Note: Kitchen staff are registered as branch connections
+                # Kitchen routing: use send_to_kitchen
                 if to_kitchen:
                     try:
-                        # Kitchen events go to all branch connections
-                        # This includes kitchen staff who are registered to the branch
-                        result.kitchen_sent = await self._manager.send_to_branch(
+                        # Kitchen events go to kitchen connections
+                        result.kitchen_sent = await self._manager.send_to_kitchen(
                             branch_id, event, tenant_id=tenant_id
                         )
+
                         if result.kitchen_sent > 0:
                             logger.debug(
                                 "Dispatched event to branch (kitchen)",
@@ -323,20 +352,25 @@ class EventRouter:
         )
 
         if include_waiters:
+            event_type = event.get("type", "")
+            branch_wide = event_type in self.BRANCH_WIDE_WAITER_EVENTS
             sector_id = safe_int(event.get("sector_id"), "sector_id")
-            if sector_id:
-                result.waiter_sent = await self._manager.send_to_sector(
-                    sector_id, event, tenant_id=tenant_id
-                )
-            else:
+
+            if branch_wide or not sector_id:
+                # High-priority events or no sector: send to all branch waiters
                 result.waiter_sent = await self._manager.send_to_waiters_only(
                     branch_id, event, tenant_id=tenant_id
                 )
+            else:
+                result.waiter_sent = await self._manager.send_to_sector(
+                    sector_id, event, tenant_id=tenant_id
+                )
 
         if include_kitchen:
-            result.kitchen_sent = await self._manager.send_to_branch(
+            result.kitchen_sent = await self._manager.send_to_kitchen(
                 branch_id, event, tenant_id=tenant_id
             )
+
 
         return result
 

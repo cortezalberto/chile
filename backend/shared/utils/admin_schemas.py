@@ -445,6 +445,9 @@ class TableOutput(BaseModel):
     sector: str | None = None
     status: str
     is_active: bool
+    # Active round statuses for Dashboard order status calculation
+    # Maps round_id -> status (PENDING, SUBMITTED, IN_KITCHEN, READY, SERVED)
+    active_round_statuses: dict[int, str] = {}
 
     class Config:
         from_attributes = True

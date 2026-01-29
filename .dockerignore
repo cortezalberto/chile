@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/venv/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node (frontend apps)
+Dashboard/node_modules/
+pwaMenu/node_modules/
+pwaWaiter/node_modules/
+*/node_modules/
+
+# Environment files (use docker-compose environment instead)
+.env
+*.env.local
+
+# Test and cache
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+
+# Docs and misc
+*.md
+!README.md
+*.log
+.DS_Store
+Thumbs.db
+
+# Agent files
+.agent/
+.agents/

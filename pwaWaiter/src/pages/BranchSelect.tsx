@@ -15,32 +15,32 @@ export function BranchSelectPage() {
   }, [fetchBranchNames])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a] px-4">
+    <div className="min-h-screen flex items-center justify-center bg-white px-4">
       <div className="w-full max-w-md">
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-white mb-2">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
             Hola, {user?.email.split('@')[0]}
           </h1>
-          <p className="text-neutral-400">Selecciona tu sucursal</p>
+          <p className="text-gray-500">Selecciona tu sucursal</p>
         </div>
 
         {/* Branch selection */}
-        <div className="bg-neutral-900 rounded-2xl p-6 border border-neutral-800">
+        <div className="bg-gray-50 p-6 border border-gray-200">
           <div className="space-y-3">
             {availableBranches.map((branch) => (
               <button
                 key={branch.id}
                 onClick={() => selectBranch(branch.id, branch.name)}
                 className="
-                  w-full p-4 rounded-xl
-                  bg-neutral-800 hover:bg-neutral-700
-                  border border-neutral-700 hover:border-orange-500
-                  text-left transition-all
+                  w-full p-4
+                  bg-white hover:bg-gray-50
+                  border border-gray-200 hover:border-orange-500
+                  text-left transition-all shadow-sm
                   focus:outline-none focus:ring-2 focus:ring-orange-500
                 "
               >
-                <span className="text-lg font-medium text-white">
+                <span className="text-lg font-medium text-gray-900">
                   {branch.name}
                 </span>
               </button>
@@ -49,7 +49,7 @@ export function BranchSelectPage() {
 
           {availableBranches.length === 0 && (
             <div className="text-center py-8">
-              <p className="text-neutral-400">
+              <p className="text-gray-500">
                 Cargando sucursales...
               </p>
             </div>

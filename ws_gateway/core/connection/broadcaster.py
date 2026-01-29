@@ -318,6 +318,29 @@ class ConnectionBroadcaster:
             connections, payload, f"waiters:{branch_id}"
         )
 
+    async def send_to_kitchen(
+        self,
+        branch_id: int,
+        payload: dict[str, Any],
+        tenant_id: int | None = None,
+    ) -> int:
+        """
+        Send a message to kitchen connections in a branch.
+
+        Tenant filtering performed inside lock to prevent race condition.
+        """
+        branch_lock = await self._lock_manager.get_branch_lock(branch_id)
+        async with branch_lock:
+            connections = list(self._index.get_kitchen_connections(branch_id))
+            # Exclude admins as they receive events via send_to_admins
+            connections = [c for c in connections if not self._index.is_admin(c)]
+            connections = self.filter_by_tenant(connections, tenant_id)
+        return await self._broadcast_to_connections(
+            connections, payload, f"kitchen:{branch_id}"
+        )
+
+
+
     async def broadcast(self, payload: dict[str, Any]) -> int:
         """
         Send a message to all connected clients.

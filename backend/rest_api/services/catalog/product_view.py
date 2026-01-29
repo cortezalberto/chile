@@ -91,8 +91,11 @@ def _safe_json_parse(value: Optional[str], default: list | dict | None = None) -
 # Redis Cache Configuration
 # =============================================================================
 
+from shared.infrastructure.redis.constants import BRANCH_PRODUCTS_CACHE_TTL
+
 # Cache TTL: 5 minutes for branch product views
-CACHE_TTL_SECONDS = 5 * 60
+CACHE_TTL_SECONDS = BRANCH_PRODUCTS_CACHE_TTL
+
 
 def _get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
     """

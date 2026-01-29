@@ -24,9 +24,11 @@ from shared.config.logging import get_logger
 
 logger = get_logger(__name__)
 
+from shared.infrastructure.redis.constants import PREFIX_AUTH_BLACKLIST, PREFIX_AUTH_USER_REVOKE
 # REDIS-HIGH-01 FIX: Standardized key prefixes with service namespace
-BLACKLIST_PREFIX = "auth:token:blacklist:"
-USER_REVOKE_PREFIX = "auth:user:revoked:"
+BLACKLIST_PREFIX = PREFIX_AUTH_BLACKLIST
+USER_REVOKE_PREFIX = PREFIX_AUTH_USER_REVOKE
+
 
 
 async def blacklist_token(token_jti: str, expires_at: datetime) -> bool:

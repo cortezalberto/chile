@@ -68,6 +68,8 @@ class ConnectionIndex:
         self._by_session: dict[int, set[WebSocket]] = {}
         self._by_sector: dict[int, set[WebSocket]] = {}
         self._admins_by_branch: dict[int, set[WebSocket]] = {}
+        self._kitchen_by_branch: dict[int, set[WebSocket]] = {}
+
 
         # Reverse mappings
         self._ws_to_user: dict[WebSocket, int] = {}
@@ -75,6 +77,8 @@ class ConnectionIndex:
         self._ws_to_sessions: dict[WebSocket, set[int]] = {}
         self._ws_to_sectors: dict[WebSocket, list[int]] = {}
         self._ws_is_admin: dict[WebSocket, bool] = {}
+        self._ws_is_kitchen: dict[WebSocket, bool] = {}
+
         self._ws_to_tenant: dict[WebSocket, int] = {}
 
         # Connection counter
@@ -110,6 +114,12 @@ class ConnectionIndex:
         return MappingProxyType(self._admins_by_branch)
 
     @property
+    def kitchen_by_branch(self) -> MappingProxyType[int, set["WebSocket"]]:
+        """Kitchen connections indexed by branch ID (immutable view)."""
+        return MappingProxyType(self._kitchen_by_branch)
+
+
+    @property
     def total_connections(self) -> int:
         """Total number of active connections."""
         return self._total_connections
@@ -138,6 +148,11 @@ class ConnectionIndex:
         """Check if connection is admin/manager."""
         return self._ws_is_admin.get(ws, False)
 
+    def is_kitchen(self, ws: "WebSocket") -> bool:
+        """Check if connection is kitchen staff."""
+        return self._ws_is_kitchen.get(ws, False)
+
+
     def get_tenant_id(self, ws: "WebSocket") -> int | None:
         """Get tenant ID for a WebSocket connection (multi-tenant isolation)."""
         return self._ws_to_tenant.get(ws)
@@ -162,6 +177,11 @@ class ConnectionIndex:
         """Get admin connections for a branch (returns copy for safety)."""
         return set(self._admins_by_branch.get(branch_id, set()))
 
+    def get_kitchen_connections_for_branch(self, branch_id: int) -> set["WebSocket"]:
+        """Get kitchen connections for a branch (returns copy for safety)."""
+        return set(self._kitchen_by_branch.get(branch_id, set()))
+
+
     def count_user_connections(self, user_id: int) -> int:
         """Count connections for a user."""
         return len(self._by_user.get(user_id, set()))
@@ -183,6 +203,7 @@ class ConnectionIndex:
         ws: "WebSocket",
         user_id: int,
         is_admin: bool = False,
+        is_kitchen: bool = False,
         tenant_id: int | None = None,
     ) -> None:
         """
@@ -193,6 +214,7 @@ class ConnectionIndex:
             ws: WebSocket connection
             user_id: User ID (negative for diners)
             is_admin: Whether this is an admin connection
+            is_kitchen: Whether this is a kitchen connection
             tenant_id: Tenant ID for multi-tenant isolation
         """
         if user_id not in self._by_user:
@@ -200,6 +222,7 @@ class ConnectionIndex:
         self._by_user[user_id].add(ws)
         self._ws_to_user[ws] = user_id
         self._ws_is_admin[ws] = is_admin
+        self._ws_is_kitchen[ws] = is_kitchen
         if tenant_id is not None:
             self._ws_to_tenant[ws] = tenant_id
 
@@ -207,12 +230,17 @@ class ConnectionIndex:
         """Register admin status. MUST be called with user_lock."""
         self._ws_is_admin[ws] = is_admin
 
+    def register_kitchen_status(self, ws: "WebSocket", is_kitchen: bool) -> None:
+        """Register kitchen status. MUST be called with user_lock."""
+        self._ws_is_kitchen[ws] = is_kitchen
+
+
     def register_tenant(self, ws: "WebSocket", tenant_id: int) -> None:
         """Register tenant ID for multi-tenant isolation. MUST be called with user_lock."""
         self._ws_to_tenant[ws] = tenant_id
 
     def register_branch(
-        self, ws: "WebSocket", branch_id: int, is_admin: bool = False
+        self, ws: "WebSocket", branch_id: int, is_admin: bool = False, is_kitchen: bool = False
     ) -> None:
         """
         Register connection for a branch. MUST be called with branch_lock.
@@ -221,6 +249,7 @@ class ConnectionIndex:
             ws: WebSocket connection
             branch_id: Branch ID
             is_admin: Whether this is an admin connection
+            is_kitchen: Whether this is a kitchen connection
         """
         if branch_id not in self._by_branch:
             self._by_branch[branch_id] = set()
@@ -230,6 +259,12 @@ class ConnectionIndex:
             if branch_id not in self._admins_by_branch:
                 self._admins_by_branch[branch_id] = set()
             self._admins_by_branch[branch_id].add(ws)
+
+        if is_kitchen:
+            if branch_id not in self._kitchen_by_branch:
+                self._kitchen_by_branch[branch_id] = set()
+            self._kitchen_by_branch[branch_id].add(ws)
+
 
     def set_branches(self, ws: "WebSocket", branch_ids: list[int]) -> None:
         """Set branch IDs for reverse mapping. MUST be called with user_lock."""
@@ -272,9 +307,11 @@ class ConnectionIndex:
             self._by_user[user_id].discard(ws)
             if not self._by_user[user_id]:
                 del self._by_user[user_id]
-        # Clean up admin status and tenant
+        # Clean up admin status, kitchen status and tenant
         self._ws_is_admin.pop(ws, None)
+        self._ws_is_kitchen.pop(ws, None)
         self._ws_to_tenant.pop(ws, None)
+
         return user_id
 
     def unregister_admin_status(self, ws: "WebSocket") -> bool:
@@ -286,12 +323,22 @@ class ConnectionIndex:
         """
         return self._ws_is_admin.pop(ws, False)
 
+    def unregister_kitchen_status(self, ws: "WebSocket") -> bool:
+        """
+        Unregister kitchen status. MUST be called with user_lock.
+
+        Returns:
+            True if was kitchen, False otherwise.
+        """
+        return self._ws_is_kitchen.pop(ws, False)
+
+
     def unregister_tenant(self, ws: "WebSocket") -> int | None:
         """Unregister tenant. MUST be called with user_lock."""
         return self._ws_to_tenant.pop(ws, None)
 
     def unregister_branch(
-        self, ws: "WebSocket", branch_id: int, is_admin: bool = False
+        self, ws: "WebSocket", branch_id: int, is_admin: bool = False, is_kitchen: bool = False
     ) -> None:
         """Unregister connection from branch. MUST be called with branch_lock."""
         if branch_id in self._by_branch:
@@ -303,6 +350,12 @@ class ConnectionIndex:
             self._admins_by_branch[branch_id].discard(ws)
             if not self._admins_by_branch[branch_id]:
                 del self._admins_by_branch[branch_id]
+
+        if is_kitchen and branch_id in self._kitchen_by_branch:
+            self._kitchen_by_branch[branch_id].discard(ws)
+            if not self._kitchen_by_branch[branch_id]:
+                del self._kitchen_by_branch[branch_id]
+
 
     def pop_branches(self, ws: "WebSocket") -> list[int]:
         """Remove and return branch IDs for reverse mapping. MUST be called with user_lock."""
@@ -408,11 +461,18 @@ class ConnectionIndex:
         """Get admin connections for a branch (alias for get_admin_connections_for_branch)."""
         return self.get_admin_connections_for_branch(branch_id)
 
+    def get_kitchen_connections(self, branch_id: int) -> set["WebSocket"]:
+        """Get kitchen connections for a branch (alias for get_kitchen_connections_for_branch)."""
+        return self.get_kitchen_connections_for_branch(branch_id)
+
     def get_waiter_connections(self, branch_id: int) -> set["WebSocket"]:
-        """Get non-admin connections for a branch (waiters)."""
+        """Get non-admin, non-kitchen connections for a branch (waiters)."""
+
         all_branch = self._by_branch.get(branch_id, set())
         admins = self._admins_by_branch.get(branch_id, set())
-        return set(all_branch - admins)
+        kitchen = self._kitchen_by_branch.get(branch_id, set())
+        return set(all_branch - admins - kitchen)
+
 
     def get_sectors_connections(self, sector_ids: list[int]) -> set["WebSocket"]:
         """Get all connections assigned to any of the given sectors."""

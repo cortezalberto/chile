@@ -182,8 +182,10 @@ class KitchenEndpoint(JWTWebSocketEndpoint):
             self._user_id,
             self._branch_ids,
             is_admin=self._is_admin_or_manager,
+            is_kitchen=True,
             tenant_id=self._tenant_id,
         )
+
 
     async def unregister_connection(self, context: WebSocketContext) -> None:
         """Unregister from connection manager."""

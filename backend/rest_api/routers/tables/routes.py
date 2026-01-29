@@ -181,13 +181,14 @@ def get_waiter_tables(
     active_session_ids = [s.id for s in session_by_table.values()]
 
     # 2. Batch count open rounds per session
+    # QA-FIX: Include PENDING rounds in count (waiters need to see pending orders!)
     rounds_count_by_session: dict[int, int] = {}
     if active_session_ids:
         rounds_query = db.execute(
             select(Round.table_session_id, func.count().label("cnt"))
             .where(
                 Round.table_session_id.in_(active_session_ids),
-                Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
+                Round.status.in_(["PENDING", "SUBMITTED", "IN_KITCHEN", "READY"]),
                 Round.is_active.is_(True),
             )
             .group_by(Round.table_session_id)
@@ -195,20 +196,22 @@ def get_waiter_tables(
         for row in rounds_query:
             rounds_count_by_session[row[0]] = row[1]
 
-    # 3. Batch count pending service calls per session
-    calls_count_by_session: dict[int, int] = {}
+    # 3. Batch fetch pending service calls per session (IDs, not just count)
+    # This allows the frontend to call resolve on specific call IDs
+    calls_by_session: dict[int, list[int]] = {}
     if active_session_ids:
         calls_query = db.execute(
-            select(ServiceCall.table_session_id, func.count().label("cnt"))
+            select(ServiceCall.id, ServiceCall.table_session_id)
             .where(
                 ServiceCall.table_session_id.in_(active_session_ids),
                 ServiceCall.status == "OPEN",
                 ServiceCall.is_active.is_(True),
             )
-            .group_by(ServiceCall.table_session_id)
         ).all()
-        for row in calls_query:
-            calls_count_by_session[row[0]] = row[1]
+        for call_id, session_id in calls_query:
+            if session_id not in calls_by_session:
+                calls_by_session[session_id] = []
+            calls_by_session[session_id].append(call_id)
 
     # 4. Batch fetch most recent check per session
     # RTR-LOW-06 FIX: Added explanatory comments for deduplication strategy
@@ -234,7 +237,8 @@ def get_waiter_tables(
         session = session_by_table.get(table.id)
         session_id = session.id if session else None
         open_rounds = rounds_count_by_session.get(session_id, 0) if session_id else 0
-        pending_calls = calls_count_by_session.get(session_id, 0) if session_id else 0
+        active_call_ids = calls_by_session.get(session_id, []) if session_id else []
+        pending_calls = len(active_call_ids)
         check_status = check_status_by_session.get(session_id) if session_id else None
 
         result.append(
@@ -246,6 +250,7 @@ def get_waiter_tables(
                 open_rounds=open_rounds,
                 pending_calls=pending_calls,
                 check_status=check_status,
+                active_service_call_ids=active_call_ids,
             )
         )
 

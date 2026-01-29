@@ -10,7 +10,7 @@ from shared.config.settings import settings
 # Round lifecycle events
 # =============================================================================
 
-ROUND_PENDING = "ROUND_PENDING"      # Client created order (visible in Tables only)
+ROUND_PENDING = "ROUND_PENDING"      # Client created order (visible in Tables and Kitchen "Pendiente")
 ROUND_SUBMITTED = "ROUND_SUBMITTED"  # Manager sent to kitchen (visible in Kitchen "Nuevo")
 ROUND_IN_KITCHEN = "ROUND_IN_KITCHEN"
 ROUND_READY = "ROUND_READY"

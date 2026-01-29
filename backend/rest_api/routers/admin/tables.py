@@ -12,6 +12,7 @@ from rest_api.routers.admin._base import (
     get_user_id, get_user_email, publish_entity_deleted,
     require_admin, require_admin_or_manager,
     is_admin, validate_branch_access, filter_by_accessible_branches,
+    Round, TableSession,  # For active round statuses
 )
 from shared.utils.admin_schemas import (
     TableOutput, TableCreate, TableUpdate,
@@ -58,8 +59,10 @@ def list_tables(
     """List tables, optionally filtered by branch.
 
     MANAGER users only see tables from their assigned branches.
+    Includes active_round_statuses for Dashboard order status calculation.
     """
-    query = select(Table).where(Table.tenant_id == user["tenant_id"])
+    tenant_id = user["tenant_id"]
+    query = select(Table).where(Table.tenant_id == tenant_id)
 
     # MANAGER branch isolation
     branch_ids_filter, should_filter = filter_by_accessible_branches(user, branch_id)
@@ -72,7 +75,40 @@ def list_tables(
         query = query.where(Table.is_active.is_(True))
 
     tables = db.execute(query.order_by(Table.branch_id, Table.code)).scalars().all()
-    return [TableOutput.model_validate(t) for t in tables]
+
+    if not tables:
+        return []
+
+    # Get all table IDs to query active rounds
+    table_ids = [t.id for t in tables]
+
+    # Query active sessions and their rounds in a single query
+    # Active rounds = rounds from OPEN/PAYING sessions with status not SERVED/CANCELED
+    active_rounds_query = (
+        select(Round.id, Round.status, TableSession.table_id)
+        .join(TableSession, Round.table_session_id == TableSession.id)
+        .where(
+            TableSession.table_id.in_(table_ids),
+            TableSession.status.in_(["OPEN", "PAYING"]),
+            Round.tenant_id == tenant_id,
+            Round.status.notin_(["SERVED", "CANCELED", "DRAFT"]),
+        )
+    )
+    active_rounds = db.execute(active_rounds_query).all()
+
+    # Build lookup: table_id -> {round_id: status}
+    table_round_statuses: dict[int, dict[int, str]] = {t.id: {} for t in tables}
+    for round_id, round_status, table_id in active_rounds:
+        table_round_statuses[table_id][round_id] = round_status
+
+    # Build response with active_round_statuses
+    result = []
+    for table in tables:
+        output = TableOutput.model_validate(table)
+        output.active_round_statuses = table_round_statuses.get(table.id, {})
+        result.append(output)
+
+    return result
 
 
 @router.get("/tables/{table_id}", response_model=TableOutput)

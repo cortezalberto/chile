@@ -96,6 +96,7 @@ class ConnectionLifecycle:
         branch_ids: list[int],
         sector_ids: list[int] | None = None,
         is_admin: bool = False,
+        is_kitchen: bool = False,
         timeout: float = WSConstants.WS_ACCEPT_TIMEOUT,
         tenant_id: int | None = None,
     ) -> None:
@@ -145,9 +146,11 @@ class ConnectionLifecycle:
             raise ConnectionError(f"WebSocket accept failed: {e}")
 
         # Register with user lock to prevent race conditions
+        # Register with user lock to prevent race conditions
         await self._register_connection(
-            websocket, user_id, branch_ids, sector_ids, is_admin, tenant_id
+            websocket, user_id, branch_ids, sector_ids, is_admin, is_kitchen, tenant_id
         )
+
 
     async def disconnect(self, websocket: "WebSocket") -> None:
         """
@@ -172,6 +175,7 @@ class ConnectionLifecycle:
 
             # Get info before unregistering
             is_admin = self._index.is_admin(websocket)
+            is_kitchen = self._index.is_kitchen(websocket)
             branch_ids = self._index.get_branch_ids(websocket)
             session_ids = self._index.get_session_ids(websocket)
             sector_ids = self._index.get_sector_ids(websocket)
@@ -183,7 +187,8 @@ class ConnectionLifecycle:
             for branch_id in sorted(branch_ids):
                 branch_lock = await self._lock_manager.get_branch_lock(branch_id)
                 async with branch_lock:
-                    self._index.unregister_branch(websocket, branch_id, is_admin)
+                    self._index.unregister_branch(websocket, branch_id, is_admin, is_kitchen)
+
 
             # Remove from session indices
             async with self._lock_manager.session_lock:
@@ -253,8 +258,10 @@ class ConnectionLifecycle:
         branch_ids: list[int],
         sector_ids: list[int] | None,
         is_admin: bool,
+        is_kitchen: bool,
         tenant_id: int | None,
     ) -> None:
+
         """Register connection in all indices with proper locking."""
         user_lock = await self._lock_manager.get_user_lock(user_id)
         async with user_lock:
@@ -270,13 +277,14 @@ class ConnectionLifecycle:
             self._heartbeat_tracker.record(websocket)
 
             # Register via ConnectionIndex
-            self._index.register_user(websocket, user_id, is_admin, tenant_id)
+            self._index.register_user(websocket, user_id, is_admin, is_kitchen, tenant_id)
 
             # Register by branches (sorted for consistent lock ordering)
             for branch_id in sorted(branch_ids):
                 branch_lock = await self._lock_manager.get_branch_lock(branch_id)
                 async with branch_lock:
-                    self._index.register_branch(websocket, branch_id, is_admin)
+                    self._index.register_branch(websocket, branch_id, is_admin, is_kitchen)
+
 
             # Register by sectors
             if sector_ids:

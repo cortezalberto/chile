@@ -107,18 +107,18 @@ export function ConfirmDialog({
       {/* Dialog */}
       <div
         ref={dialogRef}
-        className="relative bg-neutral-900 rounded-xl border border-neutral-800 p-6 max-w-sm w-full shadow-xl animate-slide-up"
+        className="relative bg-white border border-gray-200 p-6 max-w-sm w-full shadow-xl animate-slide-up"
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
       >
         <h2
           id="confirm-dialog-title"
-          className="text-xl font-bold text-white mb-2"
+          className="text-xl font-bold text-gray-900 mb-2"
         >
           {title}
         </h2>
-        <p className="text-neutral-400 mb-6">{message}</p>
+        <p className="text-gray-500 mb-6">{message}</p>
 
         <div className="flex gap-3">
           <Button

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from 'react'
+import { useEffect, useCallback, useMemo, useState } from 'react'
 import { useAuthStore, selectSelectedBranchId } from '../stores/authStore'
 import {
   useTablesStore,
@@ -8,14 +8,16 @@ import {
 } from '../stores/tablesStore'
 import { Header } from '../components/Header'
 import { TableCard } from '../components/TableCard'
+import { TableDetailModal } from '../components/TableDetailModal'
 import { Button } from '../components/Button'
 import { PullToRefreshIndicator } from '../components/PullToRefreshIndicator'
 import { usePullToRefresh } from '../hooks/usePullToRefresh'
 import { usePersistedFilter, type TableFilterStatus } from '../hooks/usePersistedFilter'
 import { UI_CONFIG } from '../utils/constants'
+import type { TableCard as TableCardType } from '../types'
 
 interface TableGridPageProps {
-  onTableSelect: (tableId: number) => void
+  onTableSelect?: (tableId: number) => void
 }
 
 // PWAW-009: Filter button configuration
@@ -27,13 +29,16 @@ const FILTER_OPTIONS: { value: TableFilterStatus; label: string }[] = [
   { value: 'OUT_OF_SERVICE', label: 'Fuera servicio' },
 ]
 
-export function TableGridPage({ onTableSelect }: TableGridPageProps) {
+export function TableGridPage(_props: TableGridPageProps) {
   const branchId = useAuthStore(selectSelectedBranchId)
   const tables = useTablesStore(selectTables)
   const isLoading = useTablesStore(selectIsLoading)
   const error = useTablesStore(selectError)
   const fetchTables = useTablesStore((s) => s.fetchTables)
   const subscribeToEvents = useTablesStore((s) => s.subscribeToEvents)
+
+  // Modal state for table detail
+  const [selectedTableForModal, setSelectedTableForModal] = useState<TableCardType | null>(null)
 
   // PWAW-009: Persisted filter state
   const { filter, setFilter } = usePersistedFilter()
@@ -114,7 +119,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
+    <div className="min-h-screen bg-white flex flex-col">
       <Header />
 
       {/* PWAW-008: Pull-to-refresh indicator */}
@@ -132,7 +137,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
       )}
 
       {/* PWAW-009: Filter bar */}
-      <div className="px-4 py-2 bg-neutral-900 border-b border-neutral-800">
+      <div className="px-4 py-2 bg-gray-50 border-b border-gray-200">
         <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
           {FILTER_OPTIONS.map((option) => {
             const count = filterCounts[option.value]
@@ -144,14 +149,14 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
                 className={`flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
                   isActive
                     ? 'bg-orange-500 text-white'
-                    : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                    : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
                 }`}
               >
                 {option.label}
                 {count > 0 && (
                   <span
                     className={`ml-1.5 px-1.5 py-0.5 rounded-full text-xs ${
-                      isActive ? 'bg-orange-600' : 'bg-neutral-700'
+                      isActive ? 'bg-orange-600' : 'bg-gray-300'
                     }`}
                   >
                     {count}
@@ -168,7 +173,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
           <div className="flex items-center justify-center h-64">
             <div className="text-center">
               <div className="animate-spin w-8 h-8 border-2 border-orange-500 border-t-transparent rounded-full mx-auto mb-4" />
-              <p className="text-neutral-400">Cargando mesas...</p>
+              <p className="text-gray-500">Cargando mesas...</p>
             </div>
           </div>
         ) : error ? (
@@ -192,7 +197,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
                     <TableCard
                       key={table.table_id}
                       table={table}
-                      onClick={() => onTableSelect(table.table_id)}
+                      onClick={() => setSelectedTableForModal(table)}
                     />
                   ))}
                 </div>
@@ -202,7 +207,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
             {/* Active tables */}
             {showActive && activeTables.length > 0 && (
               <section>
-                <h2 className="text-lg font-semibold text-neutral-300 mb-3">
+                <h2 className="text-lg font-semibold text-gray-700 mb-3">
                   Mesas activas ({activeTables.length})
                 </h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
@@ -210,7 +215,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
                     <TableCard
                       key={table.table_id}
                       table={table}
-                      onClick={() => onTableSelect(table.table_id)}
+                      onClick={() => setSelectedTableForModal(table)}
                     />
                   ))}
                 </div>
@@ -220,7 +225,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
             {/* Available tables */}
             {showFree && availableTables.length > 0 && (
               <section>
-                <h2 className="text-lg font-semibold text-neutral-300 mb-3">
+                <h2 className="text-lg font-semibold text-gray-700 mb-3">
                   Mesas libres ({availableTables.length})
                 </h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
@@ -228,7 +233,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
                     <TableCard
                       key={table.table_id}
                       table={table}
-                      onClick={() => onTableSelect(table.table_id)}
+                      onClick={() => setSelectedTableForModal(table)}
                     />
                   ))}
                 </div>
@@ -238,7 +243,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
             {/* Out of service tables */}
             {showOutOfService && outOfServiceTables.length > 0 && (
               <section>
-                <h2 className="text-lg font-semibold text-neutral-500 mb-3">
+                <h2 className="text-lg font-semibold text-gray-400 mb-3">
                   Fuera de servicio ({outOfServiceTables.length})
                 </h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
@@ -246,7 +251,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
                     <TableCard
                       key={table.table_id}
                       table={table}
-                      onClick={() => onTableSelect(table.table_id)}
+                      onClick={() => setSelectedTableForModal(table)}
                     />
                   ))}
                 </div>
@@ -257,7 +262,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
             {tables.length > 0 &&
              !showUrgent && !showActive && !showFree && !showOutOfService && (
               <div className="flex flex-col items-center justify-center h-64">
-                <p className="text-neutral-400 mb-2">No hay mesas con este filtro</p>
+                <p className="text-gray-500 mb-2">No hay mesas con este filtro</p>
                 <Button
                   variant="secondary"
                   onClick={() => setFilter('ALL')}
@@ -276,7 +281,7 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
              filter !== 'ALL' &&
              filterCounts[filter] === 0 && (
               <div className="flex flex-col items-center justify-center h-64">
-                <p className="text-neutral-400 mb-2">
+                <p className="text-gray-500 mb-2">
                   No hay mesas {filter === 'URGENT' ? 'urgentes' :
                                filter === 'ACTIVE' ? 'activas' :
                                filter === 'FREE' ? 'libres' :
@@ -294,8 +299,8 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
             {/* Empty state when no tables configured */}
             {tables.length === 0 && (
               <div className="flex flex-col items-center justify-center h-64">
-                <p className="text-neutral-400 mb-2">No hay mesas configuradas</p>
-                <p className="text-neutral-500 text-sm">
+                <p className="text-gray-500 mb-2">No hay mesas configuradas</p>
+                <p className="text-gray-400 text-sm">
                   Agrega mesas desde el Dashboard
                 </p>
               </div>
@@ -316,6 +321,13 @@ export function TableGridPage({ onTableSelect }: TableGridPageProps) {
           {isLoading || isRefreshing ? 'Actualizando...' : 'Actualizar'}
         </Button>
       </div>
+
+      {/* Table detail modal */}
+      <TableDetailModal
+        table={selectedTableForModal}
+        isOpen={selectedTableForModal !== null}
+        onClose={() => setSelectedTableForModal(null)}
+      />
     </div>
   )
 }

@@ -44,7 +44,7 @@ export function ConnectionBanner({ isConnected }: ConnectionBannerProps) {
       </span>
       <button
         onClick={handleReconnect}
-        className="bg-white text-red-600 px-3 py-1 rounded text-sm font-medium hover:bg-red-100 transition-colors"
+        className="bg-white text-red-600 px-3 py-1 text-sm font-medium hover:bg-red-100 transition-colors"
       >
         Reconectar
       </button>

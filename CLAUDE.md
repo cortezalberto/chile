@@ -64,9 +64,23 @@ cp Dashboard/.env.example Dashboard/.env              # Dashboard config
 cp pwaMenu/.env.example pwaMenu/.env                  # pwaMenu config
 
 # =============================================================================
-# Backend (requires Docker Desktop running)
+# Backend with Docker (RECOMMENDED - includes all services)
 # =============================================================================
-docker compose -f devOps/docker-compose.yml up -d    # Start PostgreSQL + Redis
+cd devOps && docker compose up -d --build            # Start ALL: DB, Redis, Backend, WS Gateway
+docker compose logs -f backend ws_gateway            # View logs
+docker compose down                                   # Stop all services
+
+# Services available after docker compose up:
+#   PostgreSQL: localhost:5432
+#   Redis: localhost:6380
+#   REST API: http://localhost:8000
+#   WebSocket: ws://localhost:8001
+#   pgAdmin: http://localhost:5050
+
+# =============================================================================
+# Backend (manual - for local development without Docker)
+# =============================================================================
+docker compose -f devOps/docker-compose.yml up -d db redis  # Start only DB + Redis
 cd backend && pip install -r requirements.txt         # Install Python deps
 cd backend && python -m uvicorn rest_api.main:app --reload --port 8000      # REST API
 
@@ -330,14 +344,16 @@ Close codes:
 - ADMIN/MANAGER always receive all branch events
 
 **Round Event Routing:**
-| Event | Admin | Kitchen | Waiters | Diners |
-|-------|-------|---------|---------|--------|
-| `ROUND_PENDING` | ✅ | ❌ | ✅ | ❌ |
-| `ROUND_SUBMITTED` | ✅ | ✅ | ✅ | ❌ |
-| `ROUND_IN_KITCHEN` | ✅ | ✅ | ✅ | ✅ |
-| `ROUND_READY` | ✅ | ✅ | ✅ | ✅ |
-| `ROUND_SERVED` | ✅ | ✅ | ✅ | ✅ |
-| `ROUND_CANCELED` | ✅ | ✅ | ✅ | ✅ |
+| Event | Admin | Kitchen | Waiters | Diners | Notes |
+|-------|-------|---------|---------|--------|-------|
+| `ROUND_PENDING` | ✅ | ❌ | ✅ (all branch) | ❌ | Bypasses sector filter |
+| `ROUND_SUBMITTED` | ✅ | ❌ | ✅ | ❌ | |
+| `ROUND_IN_KITCHEN` | ✅ | ✅ | ✅ | ✅ | |
+| `ROUND_READY` | ✅ | ✅ | ✅ | ✅ | |
+| `ROUND_SERVED` | ✅ | ✅ | ✅ | ✅ | |
+| `ROUND_CANCELED` | ✅ | ✅ | ✅ | ✅ | |
+
+**Note:** `ROUND_PENDING` and `TABLE_SESSION_STARTED` events are sent to ALL waiters in the branch (not sector-filtered) to ensure new order notifications reach all assigned staff.
 
 ### WebSocket Gateway Architecture
 
@@ -1422,13 +1438,21 @@ ws_gateway/                # WebSocket Gateway (at project root)
 # devOps/docker-compose.yml services:
 PostgreSQL: localhost:5432 (pgvector/pgvector:pg16)
 Redis: localhost:6380 (NOTE: port 6380, not 6379)
+Backend (REST API): localhost:8000 (FastAPI with hot-reload)
+WS Gateway: localhost:8001 (WebSocket with hot-reload)
+pgAdmin: localhost:5050 (admin@admin.com / admin)
+```
+
+**Start all services:**
+```bash
+cd devOps && docker compose up -d --build
 ```
 
 **Database Reset:**
 ```bash
-cd backend
-docker compose -f devOps/docker-compose.yml down -v && docker compose -f devOps/docker-compose.yml up -d
-# Then restart REST API to re-run seed()
+cd devOps
+docker compose down -v && docker compose up -d --build
+# Database will be re-seeded on backend startup
 ```
 
 ### CORS Configuration
@@ -1440,6 +1464,7 @@ DEFAULT_CORS_ORIGINS = [
     "http://localhost:5176",  # pwaMenu
     "http://localhost:5177",  # Dashboard
     "http://localhost:5178",  # pwaWaiter
+    "http://localhost:5179",  # pwaWaiter (fallback when 5178 is busy)
     # ... and 127.0.0.1 equivalents
 ]
 ```
@@ -1449,7 +1474,7 @@ DEFAULT_CORS_ORIGINS = [
 ALLOWED_ORIGINS=https://menu.restaurant.com,https://admin.restaurant.com,https://waiter.restaurant.com
 ```
 
-When adding new origins in development, update `DEFAULT_CORS_ORIGINS` in `backend/rest_api/main.py`.
+When adding new origins in development, update `DEFAULT_CORS_ORIGINS` in `backend/rest_api/main.py` and `ws_gateway/components/core/constants.py`.
 
 ### Frontend Environment Variables
 
@@ -1704,15 +1729,19 @@ Orders go through Dashboard before reaching kitchen:
 | `SERVED` | Delivered to table | - | - |
 
 **Key behavior:**
-- `ROUND_PENDING` event: Client creates order → only to admin channel (Tables view)
+- `ROUND_PENDING` event: Client creates order → to admin AND kitchen channels (Tables view + Kitchen "Pendiente")
 - `ROUND_SUBMITTED` event: Manager sends to kitchen → to admin AND kitchen channels
 - Only `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_SERVED` notify diners (session channel)
 - Dashboard cannot change `IN_KITCHEN` → `READY` (must wait for kitchen)
 - Files: `kitchen/rounds.py` (status transitions), `TableSessionModal.tsx` (UI buttons)
 
-**Kitchen View (2 columns):**
-- Only shows "Nuevos" (SUBMITTED) and "En Cocina" (IN_KITCHEN) columns
+**Kitchen View (3 columns with modal):**
+- "Pendiente" (PENDING): Orders waiting manager/admin authorization (read-only for kitchen)
+- "Nuevos" (SUBMITTED): Orders authorized and ready for kitchen to start
+- "En Cocina" (IN_KITCHEN): Orders currently being prepared
 - READY rounds are removed from kitchen view and handled by Dashboard/waiters
+- Uses compact `RoundMiniCard` components with `RoundDetailModal` for details
+- Sidebar menu label: "Comandas" (under Cocina)
 - File: `Kitchen.tsx`
 
 ### Table Status Animation (Dashboard)
@@ -1735,6 +1764,7 @@ Tables show visual feedback for order states:
 | `pending` | Yellow | "Pendiente" |
 | `submitted` | Blue | "En Cocina" |
 | `in_kitchen` | Blue | "En Cocina" |
+| `ready_with_kitchen` | Orange | "Listo + Cocina" |
 | `ready` | Green | "Listo" |
 | `served` | Gray | "Servido" |
 
@@ -1750,7 +1780,7 @@ When a table has multiple rounds, the aggregate status is calculated with these 
 
 | Priority | Statuses | Display | Badge Color |
 |----------|----------|---------|-------------|
-| 0 (highest) | `ready` + any not ready | "Listo + Cocina" | Black |
+| 0 (highest) | `ready` + any not ready | "Listo + Cocina" | Orange |
 | 1 | `pending` (all) | "Pendiente" | Yellow |
 | 2 | `submitted`, `in_kitchen` | "En Cocina" | Blue |
 | 3 | `ready` (all) | "Listo" | Green |
@@ -1768,18 +1798,21 @@ When a table has multiple rounds, the aggregate status is calculated with these 
 | 2 ready | Listo | All ready |
 
 **Combined Status:** When a table has at least one round `ready` AND at least one round NOT ready
-(pending/submitted/in_kitchen), the status shows "Listo + Cocina" with a black badge (`bg-gray-800`, white text).
+(pending/submitted/in_kitchen), the status shows "Listo + Cocina" with an orange badge (`bg-orange-400`, black text).
 This alerts the waiter that some items are ready for pickup while more orders are still pending.
+The card also receives a 5-second continuous blink animation (`animate-ready-kitchen-blink`).
 
 **State Persistence on Navigation:**
-When `fetchTables` is called, it preserves WebSocket-updated state (`orderStatus`, `roundStatuses`,
-`hasNewOrder`, `statusChanged`) from existing tables. This prevents losing order status when
-navigating between Dashboard views.
+When `fetchTables` is called, it uses API data (`active_round_statuses`) as the source of truth
+for order status calculation. Only UI animation state (`statusChanged`) is preserved from existing
+tables to maintain visual feedback during navigation. This ensures order status reflects the
+actual backend state while keeping animations smooth.
 
 **Animation Classes:**
 - `animate-pulse-warning`: Yellow pulse for new orders (`hasNewOrder`)
 - `animate-pulse-urgent`: Purple pulse for check requested
 - `animate-status-blink`: Blue blink for status changes (auto-clears after 1.5s)
+- `animate-ready-kitchen-blink`: Orange 5-second continuous blink for `ready_with_kitchen` status
 
 **Key Fields on `RestaurantTable`:**
 - `orderStatus`: Current order/round status (`'none' | 'pending' | 'submitted' | 'in_kitchen' | 'ready_with_kitchen' | 'ready' | 'served'`)

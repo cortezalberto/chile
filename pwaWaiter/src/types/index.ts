@@ -12,6 +12,9 @@ export type UserRole = 'ADMIN' | 'MANAGER' | 'WAITER' | 'KITCHEN'
 // Table types - matches backend TableStatus
 export type TableStatus = 'FREE' | 'ACTIVE' | 'PAYING' | 'OUT_OF_SERVICE'
 
+// Order status for visual display (aggregate status of all rounds)
+export type OrderStatus = 'none' | 'pending' | 'submitted' | 'in_kitchen' | 'ready' | 'ready_with_kitchen' | 'served'
+
 // TableCard from /api/waiter/tables endpoint
 export interface TableCard {
   table_id: number
@@ -21,13 +24,21 @@ export interface TableCard {
   open_rounds: number
   pending_calls: number
   check_status: CheckStatus | null
+  // Animation and order status tracking
+  orderStatus?: OrderStatus                    // Aggregate order status for badge display
+  roundStatuses?: Record<string, OrderStatus>  // Per-round status tracking
+  statusChanged?: boolean                      // Triggers blue blink animation
+  hasNewOrder?: boolean                        // Triggers yellow pulse animation
+  hasServiceCall?: boolean                     // Triggers red blink animation (service call)
+  // QA-FIX: Track active service call IDs for resolution from UI
+  activeServiceCallIds?: number[]              // IDs of active (OPEN) service calls
 }
 
 // Check status
 export type CheckStatus = 'OPEN' | 'REQUESTED' | 'IN_PAYMENT' | 'PAID' | 'FAILED'
 
 // Round types
-export type RoundStatus = 'SUBMITTED' | 'IN_KITCHEN' | 'READY' | 'SERVED'
+export type RoundStatus = 'PENDING' | 'SUBMITTED' | 'IN_KITCHEN' | 'READY' | 'SERVED'
 
 export interface Round {
   id: number
@@ -62,6 +73,7 @@ export interface RoundItemDetail {
   id: number
   product_id: number
   product_name: string
+  category_name: string | null
   qty: number
   unit_price_cents: number
   notes: string | null
@@ -133,6 +145,8 @@ export interface ServiceCall {
  * These events are published by the backend when state changes occur.
  */
 export type WSEventType =
+  /** New order round created by diner (pending manager approval) */
+  | 'ROUND_PENDING'
   /** New order round submitted by diner */
   | 'ROUND_SUBMITTED'
   /** Round acknowledged by kitchen and being prepared */

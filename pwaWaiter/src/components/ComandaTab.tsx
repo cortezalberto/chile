@@ -194,7 +194,7 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
           placeholder="Buscar producto..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-white placeholder-neutral-500 focus:outline-none focus:ring-2 focus:ring-orange-500"
+          className="w-full bg-gray-100 border border-gray-200 px-3 py-2 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-500"
         />
       </div>
 
@@ -202,10 +202,10 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
       <div className="flex gap-2 overflow-x-auto pb-2 mb-3 scrollbar-hide">
         <button
           onClick={() => setSelectedCategory(null)}
-          className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+          className={`flex-shrink-0 px-3 py-1.5 text-sm font-medium transition-colors ${
             selectedCategory === null
-              ? 'bg-orange-500 text-white'
-              : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+              ? 'bg-orange-500 text-gray-900'
+              : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
           }`}
         >
           Todos
@@ -214,10 +214,10 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
           <button
             key={category.id}
             onClick={() => setSelectedCategory(category.id)}
-            className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`flex-shrink-0 px-3 py-1.5 text-sm font-medium transition-colors ${
               selectedCategory === category.id
-                ? 'bg-orange-500 text-white'
-                : 'bg-neutral-800 text-neutral-400 hover:bg-neutral-700'
+                ? 'bg-orange-500 text-gray-900'
+                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
             }`}
           >
             {category.name}
@@ -231,7 +231,7 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
       {/* Product list */}
       <div className="flex-1 overflow-y-auto space-y-2 pb-2">
         {filteredProducts.length === 0 ? (
-          <p className="text-neutral-500 text-center py-8">
+          <p className="text-gray-400 text-center py-8">
             No hay productos
           </p>
         ) : (
@@ -242,16 +242,16 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
             return (
               <div
                 key={product.id}
-                className={`bg-neutral-800 rounded-lg p-3 border transition-colors ${
+                className={`bg-gray-100 p-3 border transition-colors ${
                   qtyInCart > 0
                     ? 'border-orange-500/50'
-                    : 'border-neutral-700'
+                    : 'border-gray-200'
                 } ${!product.is_available ? 'opacity-50' : ''}`}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-white font-medium truncate">
+                      <span className="text-gray-900 font-medium truncate">
                         {product.name}
                       </span>
                       {/* Allergen icons */}
@@ -263,7 +263,7 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
                       )}
                     </div>
                     {product.description && (
-                      <p className="text-neutral-400 text-xs mt-0.5 line-clamp-1">
+                      <p className="text-gray-500 text-xs mt-0.5 line-clamp-1">
                         {product.description}
                       </p>
                     )}
@@ -275,19 +275,19 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
                   {/* Add/quantity controls */}
                   <div className="flex items-center gap-2 ml-2">
                     {qtyInCart > 0 ? (
-                      <div className="flex items-center gap-1 bg-neutral-700 rounded-lg">
+                      <div className="flex items-center gap-1 bg-gray-200">
                         <button
                           onClick={() => updateQuantity(product.id, -1)}
-                          className="px-2 py-1 text-white hover:bg-neutral-600 rounded-l-lg transition-colors"
+                          className="px-2 py-1 text-gray-900 hover:bg-gray-300 transition-colors"
                         >
                           −
                         </button>
-                        <span className="px-2 text-white font-medium min-w-[24px] text-center">
+                        <span className="px-2 text-gray-900 font-medium min-w-[24px] text-center">
                           {qtyInCart}
                         </span>
                         <button
                           onClick={() => updateQuantity(product.id, 1)}
-                          className="px-2 py-1 text-white hover:bg-neutral-600 rounded-r-lg transition-colors"
+                          className="px-2 py-1 text-gray-900 hover:bg-gray-300 transition-colors"
                           disabled={!product.is_available}
                         >
                           +
@@ -297,7 +297,7 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
                       <button
                         onClick={() => addToCart(product)}
                         disabled={!product.is_available}
-                        className="bg-orange-500 hover:bg-orange-600 disabled:bg-neutral-700 disabled:text-neutral-500 text-white px-3 py-1 rounded-lg font-medium transition-colors"
+                        className="bg-orange-500 hover:bg-orange-600 disabled:bg-gray-200 disabled:text-gray-400 text-gray-900 px-3 py-1 font-medium transition-colors"
                       >
                         +
                       </button>
@@ -312,7 +312,7 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
 
       {/* Cart summary and submit button (sticky bottom) */}
       {cart.length > 0 && (
-        <div className="sticky bottom-0 bg-neutral-900 border-t border-neutral-800 pt-3 -mx-4 px-4 pb-4">
+        <div className="sticky bottom-0 bg-white border-t border-gray-200 pt-3 -mx-4 px-4 pb-4">
           {/* Cart items preview */}
           <div className="mb-3 max-h-24 overflow-y-auto">
             {cart.map((item) => (
@@ -324,15 +324,15 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
                   <span className="text-orange-500 font-medium">
                     {item.qty}x
                   </span>
-                  <span className="text-white truncate">{item.name}</span>
+                  <span className="text-gray-900 truncate">{item.name}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-neutral-400">
+                  <span className="text-gray-500">
                     {formatPrice(item.price_cents * item.qty)}
                   </span>
                   <button
                     onClick={() => removeFromCart(item.id)}
-                    className="text-neutral-500 hover:text-red-500 transition-colors"
+                    className="text-gray-400 hover:text-red-500 transition-colors"
                     aria-label={`Eliminar ${item.name}`}
                   >
                     ×
@@ -344,10 +344,10 @@ export function ComandaTab({ branchId, sessionId, onRoundSubmitted }: ComandaTab
 
           {/* Total and submit */}
           <div className="flex items-center justify-between mb-3">
-            <span className="text-neutral-400">
+            <span className="text-gray-500">
               {cart.reduce((sum, item) => sum + item.qty, 0)} items
             </span>
-            <span className="text-xl font-bold text-white">
+            <span className="text-xl font-bold text-gray-900">
               {formatPrice(cartTotal)}
             </span>
           </div>

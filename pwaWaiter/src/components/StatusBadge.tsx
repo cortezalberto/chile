@@ -12,7 +12,7 @@ export function TableStatusBadge({ status, size = 'md' }: TableStatusBadgeProps)
 
   return (
     <span
-      className={`inline-flex items-center font-medium rounded-full ${config.color} text-white ${sizeClasses}`}
+      className={`inline-flex items-center font-medium ${config.color} text-white ${sizeClasses}`}
     >
       {config.label}
     </span>
@@ -30,7 +30,7 @@ export function RoundStatusBadge({ status, size = 'md' }: RoundStatusBadgeProps)
 
   return (
     <span
-      className={`inline-flex items-center font-medium rounded-full ${config.color} text-white ${sizeClasses}`}
+      className={`inline-flex items-center font-medium ${config.color} text-white ${sizeClasses}`}
     >
       {config.label}
     </span>
@@ -60,7 +60,7 @@ export function CountBadge({ count, variant = 'orange', pulse = false }: CountBa
       aria-atomic="true"
       className={`
         inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5
-        text-xs font-bold text-white rounded-full
+        text-xs font-bold text-white
         ${variantClasses[variant]}
         ${pulse ? 'animate-pulse-dot' : ''}
       `}

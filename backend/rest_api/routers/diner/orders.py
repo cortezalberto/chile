@@ -7,7 +7,7 @@ Uses table token authentication instead of JWT.
 from datetime import datetime, timezone
 from typing import Any  # Used in return type annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func
 
@@ -211,26 +211,43 @@ def get_session_diners(
 # =============================================================================
 
 
+# Helper wrapper for background task execution
+async def _bg_publish_round_event(**kwargs):
+    """Background task to publish round event."""
+    try:
+        redis = await get_redis_client()
+        await publish_round_event(redis_client=redis, **kwargs)
+        logger.info("ROUND_PENDING published (bg)", round_id=kwargs.get("round_id"))
+    except Exception as e:
+        logger.error("Failed to publish ROUND_PENDING event (bg)", error=str(e))
+
+async def _bg_publish_service_call_event(**kwargs):
+    """Background task to publish service call event."""
+    try:
+        redis = await get_redis_client()
+        await publish_service_call_event(redis_client=redis, **kwargs)
+        logger.info("SERVICE_CALL_CREATED published (bg)", call_id=kwargs.get("call_id"))
+    except Exception as e:
+        logger.error("Failed to publish SERVICE_CALL_CREATED event (bg)", error=str(e))
+
+
 @router.post("/rounds/submit", response_model=SubmitRoundResponse)
 @limiter.limit("10/minute")
-async def submit_round(
+def submit_round(
     request: Request,
     body: SubmitRoundRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     table_ctx: dict[str, int] = Depends(current_table_context),
     x_idempotency_key: str | None = Header(None),
 ) -> SubmitRoundResponse:
     """
     Submit a new round of orders.
-
-    Creates a new round with the specified items and publishes
-    a ROUND_PENDING event for admin/manager to review and send to kitchen.
+    
+    Creates a new round with the specified items and schedules a 
+    ROUND_PENDING event to be published in the background.
 
     Requires X-Table-Token header with valid table token.
-
-    HIGH-04 FIX: Supports X-Idempotency-Key header to prevent duplicate submissions.
-    If a round with the same idempotency key already exists for this session,
-    returns the existing round instead of creating a duplicate.
     """
     session_id = table_ctx["session_id"]
     table_id = table_ctx["table_id"]
@@ -238,7 +255,6 @@ async def submit_round(
     tenant_id = table_ctx["tenant_id"]
 
     # CRIT-IDEMP-01 FIX: Check for existing round with same idempotency key
-    # Uses stored idempotency_key field for reliable duplicate detection
     if x_idempotency_key:
         existing_round = db.scalar(
             select(Round).where(
@@ -248,7 +264,6 @@ async def submit_round(
             )
         )
         if existing_round:
-            # Return existing round as idempotent response
             logger.info("Idempotent round submission detected",
                        session_id=session_id,
                        round_id=existing_round.id,
@@ -261,8 +276,6 @@ async def submit_round(
             )
 
     # DEF-HIGH-01 FIX: Allow round submission in both OPEN and PAYING states
-    # This enables customers to order additional items after requesting the check
-    # Those items will be added to future payment cycles
     session = db.scalar(
         select(TableSession).where(
             TableSession.id == session_id,
@@ -280,8 +293,7 @@ async def submit_round(
     table = db.scalar(select(Table).where(Table.id == table_id))
     sector_id = table.sector_id if table else None
 
-    # CRIT-29-01 FIX: Use SELECT FOR UPDATE to prevent race condition on concurrent round submissions
-    # Lock the session row to serialize round number assignment
+    # CRIT-29-01 FIX: Use SELECT FOR UPDATE to prevent race condition
     locked_session = db.scalar(
         select(TableSession)
         .where(TableSession.id == session_id)
@@ -293,7 +305,7 @@ async def submit_round(
             detail="Session not found",
         )
 
-    # Get next round number for this session (now safe under lock)
+    # Get next round number
     max_round = db.scalar(
         select(func.max(Round.round_number))
         .where(Round.table_session_id == session_id)
@@ -301,25 +313,21 @@ async def submit_round(
     next_round_number = max_round + 1
 
     # Create the round with PENDING status
-    # The round goes to Dashboard first, then admin/manager sends it to kitchen
     new_round = Round(
         tenant_id=tenant_id,
         branch_id=branch_id,
         table_session_id=session_id,
         round_number=next_round_number,
-        status="PENDING",  # Changed from SUBMITTED - admin must advance to send to kitchen
+        status="PENDING",
         submitted_at=datetime.now(timezone.utc),
-        # CRIT-IDEMP-01 FIX: Store idempotency key for duplicate detection
         idempotency_key=x_idempotency_key,
     )
     db.add(new_round)
-    db.flush()  # Get the round ID
+    db.flush()
 
-    # REC-03 FIX: Batch fetch all products and branch prices in single queries
-    # instead of N queries per item (prevents N+1 query pattern)
+    # REC-03 FIX: Batch fetch all products and branch prices
     product_ids = [item.product_id for item in body.items]
 
-    # Single query to fetch all products with their branch prices
     products_query = db.execute(
         select(Product, BranchProduct)
         .join(BranchProduct, Product.id == BranchProduct.product_id)
@@ -331,13 +339,13 @@ async def submit_round(
         )
     ).all()
 
-    # Build lookup dict: product_id -> (Product, BranchProduct)
+    # Build lookup dict
     product_lookup: dict[int, tuple] = {
         product.id: (product, branch_product)
         for product, branch_product in products_query
     }
 
-    # Validate all products are available before creating any items
+    # Validate all products are available
     for item in body.items:
         if item.product_id not in product_lookup:
             raise HTTPException(
@@ -361,10 +369,9 @@ async def submit_round(
         )
         round_items_to_add.append(round_item)
 
-    # Add all items in batch
     db.add_all(round_items_to_add)
 
-    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    # AUDIT FIX: Wrap commit in try-except
     try:
         db.commit()
         db.refresh(new_round)
@@ -376,29 +383,20 @@ async def submit_round(
             detail="Failed to submit order - please try again",
         )
 
-    # Publish event to Redis
-    # ROUND_PENDING: Client created order, visible in Tables only (not Kitchen)
-    redis = None
-    try:
-        redis = await get_redis_client()
-        await publish_round_event(
-            redis_client=redis,
-            event_type=ROUND_PENDING,
-            tenant_id=tenant_id,
-            branch_id=branch_id,
-            table_id=table_id,
-            session_id=session_id,
-            round_id=new_round.id,
-            round_number=next_round_number,
-            actor_user_id=None,
-            actor_role="DINER",
-            sector_id=sector_id,  # FIX: Send to assigned waiter's sector
-        )
-        logger.info("ROUND_PENDING published", round_id=new_round.id, session_id=session_id, table_id=table_id, branch_id=branch_id, sector_id=sector_id)
-    except Exception as e:
-        # Log but don't fail the request if Redis is unavailable
-        logger.error("Failed to publish ROUND_PENDING event", round_id=new_round.id, session_id=session_id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Schedule event publication in background
+    background_tasks.add_task(
+        _bg_publish_round_event,
+        event_type=ROUND_PENDING,
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        table_id=table_id,
+        session_id=session_id,
+        round_id=new_round.id,
+        round_number=next_round_number,
+        actor_user_id=None,
+        actor_role="DINER",
+        sector_id=sector_id,
+    )
 
     return SubmitRoundResponse(
         session_id=session_id,
@@ -483,16 +481,17 @@ def get_session_rounds(
 
 @router.post("/service-call", response_model=ServiceCallOutput)
 @limiter.limit("10/minute")
-async def create_service_call(
+def create_service_call(
     request: Request,
     body: CreateServiceCallRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     table_ctx: dict[str, int] = Depends(current_table_context),
 ) -> ServiceCallOutput:
     """
     Create a service call (call waiter or request payment help).
 
-    Publishes a SERVICE_CALL_CREATED event for waiters.
+    Publishes a SERVICE_CALL_CREATED event for waiters in background.
     """
     session_id = table_ctx["session_id"]
     table_id = table_ctx["table_id"]
@@ -513,12 +512,11 @@ async def create_service_call(
             detail="Session is not active",
         )
 
-    # SECTOR-DISPATCH FIX: Get table's sector_id for targeted waiter notifications
+    # SECTOR-DISPATCH FIX: Get table's sector_id
     table = db.scalar(select(Table).where(Table.id == table_id))
     sector_id = table.sector_id if table else None
 
-    # HIGH-04 FIX: Check for existing open call of the same type (idempotency)
-    # This prevents duplicate service calls when network retries occur
+    # HIGH-04 FIX: Check for existing open call (idempotency)
     existing_call = db.scalar(
         select(ServiceCall).where(
             ServiceCall.table_session_id == session_id,
@@ -528,8 +526,27 @@ async def create_service_call(
     )
 
     if existing_call:
-        # HIGH-04 FIX: Return existing call instead of creating duplicate (idempotent response)
-        # DEF-MED-01 FIX: Include table_id and table_code in response
+        # QA-FIX: Still publish event for existing call (reminder notification)
+        # This ensures waiter gets sound/notification even for repeated calls
+        # without creating duplicate records in the database
+        background_tasks.add_task(
+            _bg_publish_service_call_event,
+            event_type=SERVICE_CALL_CREATED,
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            table_id=table_id,
+            session_id=session_id,
+            call_id=existing_call.id,
+            call_type=body.type,
+            actor_user_id=None,
+            actor_role="DINER",
+            sector_id=sector_id,
+        )
+        logger.info(
+            "Service call reminder sent (existing call)",
+            call_id=existing_call.id,
+            session_id=session_id,
+        )
         return ServiceCallOutput(
             id=existing_call.id,
             type=existing_call.type,
@@ -551,7 +568,7 @@ async def create_service_call(
     )
     db.add(service_call)
 
-    # AUDIT FIX: Wrap commit in try-except to handle DB errors
+    # AUDIT FIX: Wrap commit in try-except
     try:
         db.commit()
         db.refresh(service_call)
@@ -563,30 +580,21 @@ async def create_service_call(
             detail="Failed to create service call - please try again",
         )
 
-    # PWAW-C003/C004: Publish event using publish_service_call_event with correct entity structure
-    # SECTOR-DISPATCH FIX: Include sector_id for targeted waiter notifications
-    redis = None
-    try:
-        redis = await get_redis_client()
-        await publish_service_call_event(
-            redis_client=redis,
-            event_type=SERVICE_CALL_CREATED,
-            tenant_id=tenant_id,
-            branch_id=branch_id,
-            table_id=table_id,
-            session_id=session_id,
-            call_id=service_call.id,
-            call_type=body.type,
-            actor_user_id=None,
-            actor_role="DINER",
-            sector_id=sector_id,  # SECTOR-DISPATCH FIX: Send to assigned waiter's sector
-        )
-        logger.info("SERVICE_CALL_CREATED published", call_id=service_call.id, call_type=body.type, sector_id=sector_id)
-    except Exception as e:
-        logger.error("Failed to publish SERVICE_CALL_CREATED event", service_call_id=service_call.id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Schedule event publication in background
+    background_tasks.add_task(
+        _bg_publish_service_call_event,
+        event_type=SERVICE_CALL_CREATED,
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        table_id=table_id,
+        session_id=session_id,
+        call_id=service_call.id,
+        call_type=body.type,
+        actor_user_id=None,
+        actor_role="DINER",
+        sector_id=sector_id,
+    )
 
-    # DEF-MED-01 FIX: Include table_id and table_code in response
     return ServiceCallOutput(
         id=service_call.id,
         type=service_call.type,

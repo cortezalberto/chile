@@ -13,12 +13,12 @@ export function Header() {
 
   return (
     // WAITER-COMP-MED-03 FIX: Added role="banner" for navigation landmark
-    <header role="banner" className="sticky top-0 z-50 bg-neutral-900/95 backdrop-blur border-b border-neutral-800">
+    <header role="banner" className="sticky top-0 z-50 bg-white/95 backdrop-blur border-b border-gray-200 shadow-sm">
       <nav className="px-4 py-3 flex items-center justify-between" aria-label="Navegación principal">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-orange-500">Mozo</h1>
           {selectedBranchName && (
-            <span className="text-sm text-neutral-400">
+            <span className="text-sm text-gray-500">
               {selectedBranchName}
             </span>
           )}
@@ -28,7 +28,7 @@ export function Header() {
           {/* WAITER-HIGH-04 FIX: Pending operations indicator */}
           {pendingCount > 0 && (
             <div
-              className="flex items-center gap-1.5 bg-yellow-500/20 text-yellow-400 px-2 py-1 rounded-full text-xs font-medium"
+              className="flex items-center gap-1.5 bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full text-xs font-medium"
               title={`${pendingCount} operacion${pendingCount > 1 ? 'es' : ''} pendiente${pendingCount > 1 ? 's' : ''}`}
             >
               <svg
@@ -62,7 +62,7 @@ export function Header() {
               }`}
               title={wsConnected ? 'Conectado' : 'Desconectado'}
             />
-            <span className="text-sm text-neutral-400 hidden sm:inline">
+            <span className="text-sm text-gray-500 hidden sm:inline">
               {wsConnected ? 'En linea' : 'Sin conexion'}
             </span>
           </div>
@@ -70,7 +70,7 @@ export function Header() {
           {/* User info */}
           {user && (
             <div className="flex items-center gap-3">
-              <span className="text-sm text-neutral-300 hidden sm:inline">
+              <span className="text-sm text-gray-600 hidden sm:inline">
                 {user.email.split('@')[0]}
               </span>
               <Button variant="ghost" size="sm" onClick={logout}>

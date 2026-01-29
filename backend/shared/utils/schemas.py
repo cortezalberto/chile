@@ -104,6 +104,7 @@ class TableCard(BaseModel):
     open_rounds: int = 0
     pending_calls: int = 0
     check_status: CheckStatus | None = None
+    active_service_call_ids: list[int] = []  # IDs of OPEN service calls for resolution
 
 
 class TableSessionResponse(BaseModel):

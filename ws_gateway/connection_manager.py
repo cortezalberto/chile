@@ -218,16 +218,18 @@ class ConnectionManager:
         branch_ids: list[int],
         sector_ids: list[int] | None = None,
         is_admin: bool = False,
+        is_kitchen: bool = False,
         timeout: float = WSConstants.WS_ACCEPT_TIMEOUT,
         tenant_id: int | None = None,
     ) -> None:
-        """Accept a WebSocket connection and register it."""
+        """Accept and register a new WebSocket connection."""
         await self._lifecycle.connect(
             websocket=websocket,
             user_id=user_id,
             branch_ids=branch_ids,
             sector_ids=sector_ids,
             is_admin=is_admin,
+            is_kitchen=is_kitchen,
             timeout=timeout,
             tenant_id=tenant_id,
         )
@@ -387,7 +389,7 @@ class ConnectionManager:
         payload: dict[str, Any],
         tenant_id: int | None = None,
     ) -> int:
-        """Send a message to admin/manager connections in a branch."""
+        """Send a message to admin connections in a branch."""
         return await self._broadcaster.send_to_admins(branch_id, payload, tenant_id)
 
     async def send_to_waiters_only(
@@ -398,6 +400,14 @@ class ConnectionManager:
     ) -> int:
         """Send a message to NON-admin connections in a branch."""
         return await self._broadcaster.send_to_waiters_only(branch_id, payload, tenant_id)
+
+    async def send_to_kitchen(
+        self, branch_id: int, payload: dict[str, Any], tenant_id: int | None = None
+    ) -> int:
+        """Send to kitchen connections in a branch."""
+        return await self._broadcaster.send_to_kitchen(
+            branch_id, payload, tenant_id
+        )
 
     async def send_to_sectors(
         self,

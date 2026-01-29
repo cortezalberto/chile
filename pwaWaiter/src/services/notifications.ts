@@ -55,16 +55,18 @@ class NotificationService {
    * Show notification for WebSocket event
    */
   notifyEvent(event: WSEvent): void {
-    if (!this.isEnabled()) return
-
     const { title, body, tag } = this.getNotificationContent(event)
 
     if (!title) return
 
-    // PWAW-A005: Play sound for urgent events
+    // QA-FIX: Play sound for urgent events REGARDLESS of notification permission
+    // This ensures the waiter hears the alert even if they haven't granted permission
     if (this.isUrgent(event.type)) {
       this.playAlertSound()
     }
+
+    // Only show visual notification if permission is granted
+    if (!this.isEnabled()) return
 
     this.show(title, body, {
       tag,

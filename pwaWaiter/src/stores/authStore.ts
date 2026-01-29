@@ -228,72 +228,81 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
+      // LOOP-FIX: Internal helper with retry tracking to prevent infinite recursion
       checkAuth: async (): Promise<boolean> => {
-        const { token, refreshToken: storedRefreshToken } = get()
-        if (!token) {
-          set({ isAuthenticated: false })
-          return false
-        }
+        // LOOP-FIX: Use a flag to track if we've already tried refreshing in this auth check
+        let hasTriedRefresh = false
 
-        // Restore tokens to API client
-        setAuthToken(token)
-        if (storedRefreshToken) {
-          setRefreshToken(storedRefreshToken)
-        }
-
-        try {
-          const user = await authAPI.getMe()
-
-          // Check if user has WAITER role
-          if (!user.roles.includes('WAITER') && !user.roles.includes('ADMIN')) {
-            throw new Error('No tienes permisos de mozo')
+        const doCheckAuth = async (): Promise<boolean> => {
+          const { token, refreshToken: storedRefreshToken } = get()
+          if (!token) {
+            set({ isAuthenticated: false })
+            return false
           }
 
-          set({
-            user,
-            isAuthenticated: true,
-          })
-
-          // Connect to WebSocket
-          wsService.connect(token).catch((err) => {
-            authLogger.error('Failed to connect WebSocket on auth check', err)
-          })
-
-          // DEF-HIGH-04 FIX: Set up token refresh callback and start interval
-          setTokenRefreshCallback((newToken: string) => {
-            wsService.updateToken(newToken)
-          })
-          startTokenRefreshInterval(() => get().refreshAccessToken())
-
-          // Fetch branch names if not already cached (for BranchSelect or Header display)
-          if (get().availableBranches.length === 0) {
-            get().fetchBranchNames()
-          }
-
-          return true
-        } catch (err) {
-          authLogger.warn('Auth check failed', err)
-          // Token is invalid or expired - try refresh
+          // Restore tokens to API client
+          setAuthToken(token)
           if (storedRefreshToken) {
-            authLogger.info('Attempting token refresh after auth check failure')
-            const refreshed = await get().refreshAccessToken()
-            if (refreshed) {
-              // Retry auth check with new token
-              return get().checkAuth()
-            }
+            setRefreshToken(storedRefreshToken)
           }
-          // Refresh failed or no refresh token
-          set({
-            user: null,
-            token: null,
-            refreshToken: null,
-            selectedBranchId: null,
-            selectedBranchName: null,
-            availableBranches: [],
-            isAuthenticated: false,
-          })
-          return false
+
+          try {
+            const user = await authAPI.getMe()
+
+            // Check if user has WAITER role
+            if (!user.roles.includes('WAITER') && !user.roles.includes('ADMIN')) {
+              throw new Error('No tienes permisos de mozo')
+            }
+
+            set({
+              user,
+              isAuthenticated: true,
+            })
+
+            // Connect to WebSocket
+            wsService.connect(token).catch((err) => {
+              authLogger.error('Failed to connect WebSocket on auth check', err)
+            })
+
+            // DEF-HIGH-04 FIX: Set up token refresh callback and start interval
+            setTokenRefreshCallback((newToken: string) => {
+              wsService.updateToken(newToken)
+            })
+            startTokenRefreshInterval(() => get().refreshAccessToken())
+
+            // Fetch branch names if not already cached (for BranchSelect or Header display)
+            if (get().availableBranches.length === 0) {
+              get().fetchBranchNames()
+            }
+
+            return true
+          } catch (err) {
+            authLogger.warn('Auth check failed', err)
+            // Token is invalid or expired - try refresh ONLY ONCE
+            if (storedRefreshToken && !hasTriedRefresh) {
+              hasTriedRefresh = true  // LOOP-FIX: Mark that we've tried refresh
+              authLogger.info('Attempting token refresh after auth check failure')
+              const refreshed = await get().refreshAccessToken()
+              if (refreshed) {
+                // Retry auth check with new token (only once due to hasTriedRefresh flag)
+                return doCheckAuth()
+              }
+            }
+            // Refresh failed, already tried, or no refresh token
+            set({
+              user: null,
+              token: null,
+              refreshToken: null,
+              selectedBranchId: null,
+              selectedBranchName: null,
+              availableBranches: [],
+              isAuthenticated: false,
+            })
+            return false
+          }
         }
+
+        return doCheckAuth()
       },
 
       selectBranch: (branchId: number, branchName?: string) => {

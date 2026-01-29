@@ -31,18 +31,18 @@ export function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0a0a0a] px-4">
+    <div className="min-h-screen flex items-center justify-center bg-white px-4">
       <div className="w-full max-w-md">
         {/* Logo/Title */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-orange-500 mb-2">Mozo</h1>
-          <p className="text-neutral-400">Panel de control</p>
+          <p className="text-gray-500">Panel de control</p>
         </div>
 
         {/* Login form */}
         <form
           onSubmit={handleSubmit}
-          className="bg-neutral-900 rounded-2xl p-6 border border-neutral-800"
+          className="bg-gray-50 p-6 border border-gray-200 shadow-sm"
         >
           <div className="space-y-4">
             <Input
@@ -74,7 +74,7 @@ export function LoginPage() {
 
           {error && (
             <div
-              className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/20"
+              className="mt-4 p-3 bg-red-500/10 border border-red-500/20"
               role="alert"
               aria-live="assertive"
             >
@@ -92,15 +92,6 @@ export function LoginPage() {
             Iniciar Sesion
           </Button>
         </form>
-
-        {/* Test credentials hint */}
-        <div className="mt-6 p-4 rounded-lg bg-neutral-900/50 border border-neutral-800">
-          <p className="text-sm text-neutral-500 text-center">
-            Credenciales de prueba:
-            <br />
-            <span className="text-neutral-400">waiter@demo.com / waiter123</span>
-          </p>
-        </div>
       </div>
     </div>
   )

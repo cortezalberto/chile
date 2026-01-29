@@ -21,59 +21,35 @@ from shared.utils.admin_schemas import (
 router = APIRouter(tags=["admin-allergens"])
 
 
-def _build_allergen_output(allergen: Allergen, db: Session) -> AllergenOutput:
-    """Build AllergenOutput with cross-reactions (makes N+1 queries - use for single allergen)."""
-    cross_reactions = db.execute(
-        select(AllergenCrossReaction, Allergen)
-        .join(Allergen, AllergenCrossReaction.cross_reacts_with_id == Allergen.id)
-        .where(
-            AllergenCrossReaction.allergen_id == allergen.id,
-            AllergenCrossReaction.is_active.is_(True),
-            Allergen.is_active.is_(True),
-        )
-    ).all()
 
-    cross_reaction_infos = [
-        CrossReactionInfo(
-            id=cr.AllergenCrossReaction.id,
-            cross_reacts_with_id=cr.AllergenCrossReaction.cross_reacts_with_id,
-            cross_reacts_with_name=cr.Allergen.name,
-            probability=cr.AllergenCrossReaction.probability,
-            notes=cr.AllergenCrossReaction.notes,
-        )
-        for cr in cross_reactions
-    ]
-
-    return AllergenOutput(
-        id=allergen.id,
-        tenant_id=allergen.tenant_id,
-        name=allergen.name,
-        icon=allergen.icon,
-        description=allergen.description,
-        is_mandatory=allergen.is_mandatory,
-        severity=allergen.severity,
-        is_active=allergen.is_active,
-        cross_reactions=cross_reaction_infos if cross_reaction_infos else None,
-    )
-
-
-def _build_allergen_output_optimized(allergen: Allergen) -> AllergenOutput:
+def _build_allergen_output(allergen: Allergen) -> AllergenOutput:
     """
-    Build AllergenOutput from pre-loaded relationships.
-    Use this when allergen was loaded with selectinload(cross_reactions_from).
+    Build AllergenOutput from allergen model.
+    Optimized to use pre-loaded relationships (avoiding N+1).
     """
     cross_reaction_infos = []
-    for cr in allergen.cross_reactions_from:
-        if cr.is_active and cr.cross_reacts_with and cr.cross_reacts_with.is_active:
-            cross_reaction_infos.append(
-                CrossReactionInfo(
-                    id=cr.id,
-                    cross_reacts_with_id=cr.cross_reacts_with_id,
-                    cross_reacts_with_name=cr.cross_reacts_with.name,
-                    probability=cr.probability,
-                    notes=cr.notes,
+    
+    # Access relationship safely
+    # If relationship is not loaded, this might trigger a query (lazy load), 
+    # but we will ensure endpoints use eager loading.
+    if hasattr(allergen, "cross_reactions_from"):
+        for cr in allergen.cross_reactions_from:
+            # Filter active cross reactions
+            if cr.is_active:
+                # Access related allergen safely
+                cross_name = "Unknown"
+                if hasattr(cr, "cross_reacts_with") and cr.cross_reacts_with:
+                    cross_name = cr.cross_reacts_with.name
+                
+                cross_reaction_infos.append(
+                    CrossReactionInfo(
+                        id=cr.id,
+                        cross_reacts_with_id=cr.cross_reacts_with_id,
+                        cross_reacts_with_name=cross_name,
+                        probability=cr.probability,
+                        notes=cr.notes,
+                    )
                 )
-            )
 
     return AllergenOutput(
         id=allergen.id,
@@ -86,7 +62,6 @@ def _build_allergen_output_optimized(allergen: Allergen) -> AllergenOutput:
         is_active=allergen.is_active,
         cross_reactions=cross_reaction_infos if cross_reaction_infos else None,
     )
-
 
 @router.get("/allergens", response_model=list[AllergenOutput])
 def list_allergens(
@@ -112,7 +87,7 @@ def list_allergens(
         query = query.where(Allergen.is_mandatory.is_(True))
 
     allergens = db.execute(query.order_by(Allergen.name)).scalars().unique().all()
-    return [_build_allergen_output_optimized(a) for a in allergens]
+    return [_build_allergen_output(a) for a in allergens]
 
 
 @router.get("/allergens/{allergen_id}", response_model=AllergenOutput)
@@ -123,7 +98,12 @@ def get_allergen(
 ) -> AllergenOutput:
     """Get a single allergen by ID with cross-reactions."""
     allergen = db.scalar(
-        select(Allergen).where(
+        select(Allergen)
+        .options(
+            selectinload(Allergen.cross_reactions_from)
+            .joinedload(AllergenCrossReaction.cross_reacts_with)
+        )
+        .where(
             Allergen.id == allergen_id,
             Allergen.tenant_id == user["tenant_id"],
             Allergen.is_active.is_(True),
@@ -134,7 +114,7 @@ def get_allergen(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Allergen not found",
         )
-    return _build_allergen_output(allergen, db)
+    return _build_allergen_output(allergen)
 
 
 @router.post("/allergens", response_model=AllergenOutput, status_code=status.HTTP_201_CREATED)
@@ -151,8 +131,16 @@ def create_allergen(
     set_created_by(allergen, get_user_id(user), get_user_email(user))
     db.add(allergen)
     db.commit()
-    db.refresh(allergen)
-    return _build_allergen_output(allergen, db)
+    # Refresh with eager loading
+    allergen = db.scalar(
+        select(Allergen)
+        .options(
+            selectinload(Allergen.cross_reactions_from)
+            .joinedload(AllergenCrossReaction.cross_reacts_with)
+        )
+        .where(Allergen.id == allergen.id)
+    )
+    return _build_allergen_output(allergen)
 
 
 @router.patch("/allergens/{allergen_id}", response_model=AllergenOutput)
@@ -183,8 +171,16 @@ def update_allergen(
     set_updated_by(allergen, get_user_id(user), get_user_email(user))
 
     db.commit()
-    db.refresh(allergen)
-    return _build_allergen_output(allergen, db)
+    # Refresh with eager loading
+    allergen = db.scalar(
+        select(Allergen)
+        .options(
+            selectinload(Allergen.cross_reactions_from)
+            .joinedload(AllergenCrossReaction.cross_reacts_with)
+        )
+        .where(Allergen.id == allergen.id)
+    )
+    return _build_allergen_output(allergen)
 
 
 @router.delete("/allergens/{allergen_id}", status_code=status.HTTP_204_NO_CONTENT)

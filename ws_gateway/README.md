@@ -591,6 +591,8 @@ class ConnectionIndex:
     by_sector: dict[int, set[WebSocket]]
     by_session: dict[int, set[WebSocket]]
     admins_by_branch: dict[int, set[WebSocket]]
+    kitchen_by_branch: dict[int, set[WebSocket]]
+
 ```
 
 ### Cache de Sectores

@@ -45,6 +45,11 @@ export const TABLE_STATUS_CONFIG = {
 
 // Round status display configuration
 export const ROUND_STATUS_CONFIG = {
+  PENDING: {
+    label: 'Pendiente',
+    color: 'bg-yellow-400',
+    textColor: 'text-yellow-600',
+  },
   SUBMITTED: {
     label: 'Enviado',
     color: 'bg-yellow-500',
@@ -67,6 +72,30 @@ export const ROUND_STATUS_CONFIG = {
   },
 } as const
 
+// Order status display configuration (aggregate status for table cards)
+// Matches Dashboard pattern for visual consistency
+export const ORDER_STATUS_CONFIG = {
+  none: { label: '', color: '', textColor: '' },
+  pending: { label: 'Pendiente', color: 'bg-yellow-400', textColor: 'text-black font-bold' },
+  submitted: { label: 'En Cocina', color: 'bg-blue-400', textColor: 'text-black font-bold' },
+  in_kitchen: { label: 'En Cocina', color: 'bg-blue-400', textColor: 'text-black font-bold' },
+  ready_with_kitchen: { label: 'Listo + Cocina', color: 'bg-orange-400', textColor: 'text-black font-bold' },
+  ready: { label: 'Listo', color: 'bg-green-400', textColor: 'text-black font-bold' },
+  served: { label: 'Servido', color: 'bg-gray-400', textColor: 'text-black font-bold' },
+} as const
+
+// Animation duration configuration (milliseconds)
+export const ANIMATION_DURATIONS = {
+  /** Blue blink for status changes */
+  STATUS_BLINK: 1500,
+  /** Red blink for service calls (longer to ensure waiter notices) */
+  SERVICE_CALL_BLINK: 3000,
+  /** Yellow pulse for new orders */
+  NEW_ORDER_PULSE: 2000,
+  /** Orange blink for ready + kitchen items */
+  READY_KITCHEN_BLINK: 5000,
+} as const
+
 // WebSocket reconnection config
 // WS-31-LOW-01: Keep these values synchronized with Dashboard/pwaMenu
 export const WS_CONFIG = {
@@ -82,6 +111,7 @@ export const WS_CONFIG = {
 // These match the WSEventType union in types/index.ts
 export const WS_EVENT_TYPES = {
   // Round events
+  ROUND_PENDING: 'ROUND_PENDING',
   ROUND_SUBMITTED: 'ROUND_SUBMITTED',
   ROUND_IN_KITCHEN: 'ROUND_IN_KITCHEN',
   ROUND_READY: 'ROUND_READY',

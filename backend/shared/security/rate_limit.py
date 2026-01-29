@@ -118,9 +118,11 @@ async def check_email_rate_limit(email: str, fail_closed: bool = True) -> None:
 
     try:
         from shared.infrastructure.events import get_redis_pool
+        from shared.infrastructure.redis.constants import PREFIX_RATELIMIT_LOGIN
 
         redis = await get_redis_pool()
-        key = f"ratelimit:login:{email}"  # REDIS-HIGH-01: Standardized prefix
+        key = f"{PREFIX_RATELIMIT_LOGIN}{email}"  # REDIS-HIGH-01: Standardized prefix
+
 
         # REDIS-HIGH-06 FIX: Use Lua script for atomic operation
         # CRIT-LOCK-02 FIX: Use threading.Lock to protect script SHA caching
@@ -232,9 +234,11 @@ def check_email_rate_limit_sync(email: str, fail_closed: bool = True) -> None:
 
     try:
         from shared.infrastructure.events import get_redis_sync_client
+        from shared.infrastructure.redis.constants import PREFIX_RATELIMIT_LOGIN
 
         redis_client = get_redis_sync_client()
-        key = f"ratelimit:login:{email}"
+        key = f"{PREFIX_RATELIMIT_LOGIN}{email}"
+
 
         # Use Lua script for atomic INCR + EXPIRE
         with _script_sha_lock:
