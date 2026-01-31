@@ -1,5 +1,10 @@
 import { useState, type FormEvent } from 'react'
-import { useAuthStore, selectIsLoading, selectAuthError } from '../stores/authStore'
+import {
+  useAuthStore,
+  selectIsLoading,
+  selectAuthError,
+  selectPreLoginBranchName,
+} from '../stores/authStore'
 import { Button } from '../components/Button'
 import { Input } from '../components/Input'
 
@@ -18,6 +23,8 @@ export function LoginPage() {
   const isLoading = useAuthStore(selectIsLoading)
   const error = useAuthStore(selectAuthError)
   const clearError = useAuthStore((s) => s.clearError)
+  const preLoginBranchName = useAuthStore(selectPreLoginBranchName)
+  const clearPreLoginBranch = useAuthStore((s) => s.clearPreLoginBranch)
 
   // WAITER-PAGE-MED-01: Compute field-level validation errors
   const emailError = touched.email && !email ? 'El email es requerido' :
@@ -30,6 +37,11 @@ export function LoginPage() {
     await login(email, password)
   }
 
+  // Clear pre-login branch to go back to branch selection
+  const handleChangeBranch = () => {
+    clearPreLoginBranch()
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-white px-4">
       <div className="w-full max-w-md">
@@ -38,6 +50,23 @@ export function LoginPage() {
           <h1 className="text-4xl font-bold text-orange-500 mb-2">Mozo</h1>
           <p className="text-gray-500">Panel de control</p>
         </div>
+
+        {/* Selected Branch Badge */}
+        {preLoginBranchName && (
+          <div className="mb-6 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-center justify-between">
+            <div>
+              <span className="text-xs text-orange-600 uppercase font-medium">Sucursal</span>
+              <p className="text-orange-700 font-semibold">{preLoginBranchName}</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleChangeBranch}
+              className="text-sm text-orange-600 hover:text-orange-800 underline"
+            >
+              Cambiar
+            </button>
+          </div>
+        )}
 
         {/* Login form */}
         <form

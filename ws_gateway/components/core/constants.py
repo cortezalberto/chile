@@ -264,6 +264,10 @@ DEFAULT_ALLOWED_ORIGINS: Final[tuple[str, ...]] = (
     "http://127.0.0.1:5173", "http://127.0.0.1:5176",
     "http://127.0.0.1:5177", "http://127.0.0.1:5178", "http://127.0.0.1:5179",
     "http://127.0.0.1:5180",  # pwaWaiter fallback port
+    # Local network IP for testing on other devices
+    "http://192.168.1.106:5173", "http://192.168.1.106:5176",
+    "http://192.168.1.106:5177", "http://192.168.1.106:5178",
+    "http://192.168.1.106:5179", "http://192.168.1.106:5180",
 )
 
 

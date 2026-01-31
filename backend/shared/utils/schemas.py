@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field, EmailStr
 Role = Literal["WAITER", "KITCHEN", "MANAGER", "ADMIN"]
 TableStatus = Literal["FREE", "ACTIVE", "PAYING", "OUT_OF_SERVICE"]
 SessionStatus = Literal["OPEN", "PAYING", "CLOSED"]
-RoundStatus = Literal["PENDING", "DRAFT", "SUBMITTED", "IN_KITCHEN", "READY", "SERVED", "CANCELED"]
+# Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+RoundStatus = Literal["PENDING", "CONFIRMED", "DRAFT", "SUBMITTED", "IN_KITCHEN", "READY", "SERVED", "CANCELED"]
 CheckStatus = Literal["OPEN", "REQUESTED", "IN_PAYMENT", "PAID", "FAILED"]
 PaymentProvider = Literal["CASH", "MERCADO_PAGO"]
 PaymentStatus = Literal["PENDING", "APPROVED", "REJECTED"]
@@ -105,6 +106,9 @@ class TableCard(BaseModel):
     pending_calls: int = 0
     check_status: CheckStatus | None = None
     active_service_call_ids: list[int] = []  # IDs of OPEN service calls for resolution
+    # Sector info for grouping tables by section
+    sector_id: int | None = None
+    sector_name: str | None = None
 
 
 class TableSessionResponse(BaseModel):
@@ -170,9 +174,12 @@ class RoundOutput(BaseModel):
 
 
 class UpdateRoundStatusRequest(BaseModel):
-    """Request to update round status (kitchen/waiter)."""
+    """Request to update round status (kitchen/waiter).
 
-    status: Literal["SUBMITTED", "IN_KITCHEN", "READY", "SERVED"]
+    Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+    """
+
+    status: Literal["CONFIRMED", "SUBMITTED", "IN_KITCHEN", "READY", "SERVED"]
 
 
 # =============================================================================

@@ -13,7 +13,8 @@ export type UserRole = 'ADMIN' | 'MANAGER' | 'WAITER' | 'KITCHEN'
 export type TableStatus = 'FREE' | 'ACTIVE' | 'PAYING' | 'OUT_OF_SERVICE'
 
 // Order status for visual display (aggregate status of all rounds)
-export type OrderStatus = 'none' | 'pending' | 'submitted' | 'in_kitchen' | 'ready' | 'ready_with_kitchen' | 'served'
+// Flow: pending → confirmed → submitted → in_kitchen → ready → served
+export type OrderStatus = 'none' | 'pending' | 'confirmed' | 'submitted' | 'in_kitchen' | 'ready' | 'ready_with_kitchen' | 'served'
 
 // TableCard from /api/waiter/tables endpoint
 export interface TableCard {
@@ -24,6 +25,9 @@ export interface TableCard {
   open_rounds: number
   pending_calls: number
   check_status: CheckStatus | null
+  // Sector info for grouping tables by section
+  sector_id?: number | null
+  sector_name?: string | null
   // Animation and order status tracking
   orderStatus?: OrderStatus                    // Aggregate order status for badge display
   roundStatuses?: Record<string, OrderStatus>  // Per-round status tracking
@@ -38,7 +42,8 @@ export interface TableCard {
 export type CheckStatus = 'OPEN' | 'REQUESTED' | 'IN_PAYMENT' | 'PAID' | 'FAILED'
 
 // Round types
-export type RoundStatus = 'PENDING' | 'SUBMITTED' | 'IN_KITCHEN' | 'READY' | 'SERVED'
+// Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+export type RoundStatus = 'PENDING' | 'CONFIRMED' | 'SUBMITTED' | 'IN_KITCHEN' | 'READY' | 'SERVED'
 
 export interface Round {
   id: number
@@ -145,9 +150,11 @@ export interface ServiceCall {
  * These events are published by the backend when state changes occur.
  */
 export type WSEventType =
-  /** New order round created by diner (pending manager approval) */
+  /** New order round created by diner (waiter must verify at table) */
   | 'ROUND_PENDING'
-  /** New order round submitted by diner */
+  /** Waiter verified order at table (admin can now send to kitchen) */
+  | 'ROUND_CONFIRMED'
+  /** Admin/Manager sent order to kitchen */
   | 'ROUND_SUBMITTED'
   /** Round acknowledged by kitchen and being prepared */
   | 'ROUND_IN_KITCHEN'
@@ -155,6 +162,8 @@ export type WSEventType =
   | 'ROUND_READY'
   /** Round has been served to the table */
   | 'ROUND_SERVED'
+  /** Item deleted from a round (only for PENDING/CONFIRMED rounds) */
+  | 'ROUND_ITEM_DELETED'
   /** Diner pressed the "call waiter" button */
   | 'SERVICE_CALL_CREATED'
   /** Waiter acknowledged the service call */

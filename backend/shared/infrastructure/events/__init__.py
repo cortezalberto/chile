@@ -38,6 +38,7 @@ from .circuit_breaker import (
 from .event_types import (
     # Round lifecycle
     ROUND_PENDING,
+    ROUND_CONFIRMED,
     ROUND_SUBMITTED,
     ROUND_IN_KITCHEN,
     ROUND_READY,
@@ -156,6 +157,7 @@ __all__ = [
     "calculate_retry_delay_with_jitter",
     # Event Types
     "ROUND_PENDING",
+    "ROUND_CONFIRMED",
     "ROUND_SUBMITTED",
     "ROUND_IN_KITCHEN",
     "ROUND_READY",

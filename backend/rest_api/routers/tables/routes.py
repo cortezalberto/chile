@@ -140,17 +140,21 @@ def get_waiter_tables(
             )
             return []
 
-    # Build query for tables
-    query = select(Table).where(
-        Table.branch_id.in_(target_branch_ids),
-        Table.is_active.is_(True),
+    # Build query for tables with eager loading of sector_rel for grouping
+    query = (
+        select(Table)
+        .options(joinedload(Table.sector_rel))
+        .where(
+            Table.branch_id.in_(target_branch_ids),
+            Table.is_active.is_(True),
+        )
     )
 
     # SECTOR-FILTER FIX: If waiter (not admin/manager), filter by assigned sectors
     if assigned_sector_ids is not None:
         query = query.where(Table.sector_id.in_(assigned_sector_ids))
 
-    tables = db.execute(query.order_by(Table.branch_id, Table.code)).scalars().all()
+    tables = db.execute(query.order_by(Table.branch_id, Table.code)).scalars().unique().all()
 
     logger.info("SECTOR-FILTER: Tables found", count=len(tables), is_admin_or_manager=is_admin_or_manager)
 
@@ -182,13 +186,14 @@ def get_waiter_tables(
 
     # 2. Batch count open rounds per session
     # QA-FIX: Include PENDING rounds in count (waiters need to see pending orders!)
+    # FIX: Include CONFIRMED status - rounds verified by waiter but not yet sent to kitchen
     rounds_count_by_session: dict[int, int] = {}
     if active_session_ids:
         rounds_query = db.execute(
             select(Round.table_session_id, func.count().label("cnt"))
             .where(
                 Round.table_session_id.in_(active_session_ids),
-                Round.status.in_(["PENDING", "SUBMITTED", "IN_KITCHEN", "READY"]),
+                Round.status.in_(["PENDING", "CONFIRMED", "SUBMITTED", "IN_KITCHEN", "READY"]),
                 Round.is_active.is_(True),
             )
             .group_by(Round.table_session_id)
@@ -251,6 +256,8 @@ def get_waiter_tables(
                 pending_calls=pending_calls,
                 check_status=check_status,
                 active_service_call_ids=active_call_ids,
+                sector_id=table.sector_id,
+                sector_name=table.sector_rel.name if table.sector_rel else None,
             )
         )
 
@@ -471,12 +478,13 @@ def get_table(
         session_id = active_session.id
 
         # ROUTER-HIGH-06 FIX: Added is_active filter
+        # FIX: Include PENDING and CONFIRMED status - all rounds not yet served
         open_rounds = db.scalar(
             select(func.count())
             .select_from(Round)
             .where(
                 Round.table_session_id == active_session.id,
-                Round.status.in_(["SUBMITTED", "IN_KITCHEN", "READY"]),
+                Round.status.in_(["PENDING", "CONFIRMED", "SUBMITTED", "IN_KITCHEN", "READY"]),
                 Round.is_active.is_(True),
             )
         ) or 0

@@ -53,6 +53,47 @@ from rest_api.services.catalog.product_view import get_product_complete
 router = APIRouter(prefix="/api/public", tags=["catalog"])
 
 
+# =============================================================================
+# Public Branches Endpoint (for pwaWaiter pre-login branch selection)
+# =============================================================================
+
+from pydantic import BaseModel
+
+
+class BranchPublicOutput(BaseModel):
+    """Public branch info (no sensitive data)."""
+    id: int
+    name: str
+    slug: str
+    address: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/branches", response_model=list[BranchPublicOutput])
+def get_public_branches(db: Session = Depends(get_db)) -> list[BranchPublicOutput]:
+    """
+    Get all active branches for selection.
+
+    This endpoint is public and does not require authentication.
+    Used by pwaWaiter for pre-login branch selection.
+    """
+    branches = db.execute(
+        select(Branch).where(Branch.is_active.is_(True)).order_by(Branch.name)
+    ).scalars().all()
+
+    return [
+        BranchPublicOutput(
+            id=b.id,
+            name=b.name,
+            slug=b.slug,
+            address=b.address,
+        )
+        for b in branches
+    ]
+
+
 @router.get("/menu/{branch_slug}", response_model=MenuOutput)
 @limiter.limit("100/minute")
 def get_menu(request: Request, branch_slug: str, db: Session = Depends(get_db)) -> MenuOutput:

@@ -44,11 +44,17 @@ export const TABLE_STATUS_CONFIG = {
 } as const
 
 // Round status display configuration
+// Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
 export const ROUND_STATUS_CONFIG = {
   PENDING: {
     label: 'Pendiente',
     color: 'bg-yellow-400',
     textColor: 'text-yellow-600',
+  },
+  CONFIRMED: {
+    label: 'Confirmado',
+    color: 'bg-blue-400',
+    textColor: 'text-blue-600',
   },
   SUBMITTED: {
     label: 'Enviado',
@@ -74,9 +80,11 @@ export const ROUND_STATUS_CONFIG = {
 
 // Order status display configuration (aggregate status for table cards)
 // Matches Dashboard pattern for visual consistency
+// Flow: pending → confirmed → submitted → in_kitchen → ready → served
 export const ORDER_STATUS_CONFIG = {
   none: { label: '', color: '', textColor: '' },
   pending: { label: 'Pendiente', color: 'bg-yellow-400', textColor: 'text-black font-bold' },
+  confirmed: { label: 'Confirmado', color: 'bg-blue-400', textColor: 'text-black font-bold' },
   submitted: { label: 'En Cocina', color: 'bg-blue-400', textColor: 'text-black font-bold' },
   in_kitchen: { label: 'En Cocina', color: 'bg-blue-400', textColor: 'text-black font-bold' },
   ready_with_kitchen: { label: 'Listo + Cocina', color: 'bg-orange-400', textColor: 'text-black font-bold' },
@@ -109,13 +117,16 @@ export const WS_CONFIG = {
 
 // MED-08 FIX: WebSocket event type constants to avoid magic strings
 // These match the WSEventType union in types/index.ts
+// Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
 export const WS_EVENT_TYPES = {
   // Round events
   ROUND_PENDING: 'ROUND_PENDING',
+  ROUND_CONFIRMED: 'ROUND_CONFIRMED',
   ROUND_SUBMITTED: 'ROUND_SUBMITTED',
   ROUND_IN_KITCHEN: 'ROUND_IN_KITCHEN',
   ROUND_READY: 'ROUND_READY',
   ROUND_SERVED: 'ROUND_SERVED',
+  ROUND_ITEM_DELETED: 'ROUND_ITEM_DELETED',
   // Service call events
   SERVICE_CALL_CREATED: 'SERVICE_CALL_CREATED',
   SERVICE_CALL_ACKED: 'SERVICE_CALL_ACKED',

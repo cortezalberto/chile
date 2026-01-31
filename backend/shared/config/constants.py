@@ -48,27 +48,28 @@ class RoundStatus:
     """Round/order status constants."""
 
     PENDING: Final[str] = "PENDING"
-    SUBMITTED: Final[str] = "SUBMITTED"  # Legacy, kept for backwards compatibility
+    CONFIRMED: Final[str] = "CONFIRMED"  # Waiter verified the order at table
+    SUBMITTED: Final[str] = "SUBMITTED"  # Admin/Manager sent to kitchen
     IN_KITCHEN: Final[str] = "IN_KITCHEN"
     READY: Final[str] = "READY"
     SERVED: Final[str] = "SERVED"
     CANCELED: Final[str] = "CANCELED"
 
     # Status groups
-    ACTIVE: Final[list[str]] = [PENDING, SUBMITTED, IN_KITCHEN, READY]
-    KITCHEN_VISIBLE: Final[list[str]] = [SUBMITTED, IN_KITCHEN]
+    ACTIVE: Final[list[str]] = [PENDING, CONFIRMED, SUBMITTED, IN_KITCHEN, READY]
+    KITCHEN_VISIBLE: Final[list[str]] = [SUBMITTED, IN_KITCHEN]  # Kitchen only sees after admin sends
     COMPLETED: Final[list[str]] = [SERVED, CANCELED]
 
 
 class TableStatus:
-    """Table status constants."""
+    """Table status constants - matches schemas.py Literal types."""
 
     FREE: Final[str] = "FREE"
-    OCCUPIED: Final[str] = "OCCUPIED"
+    ACTIVE: Final[str] = "ACTIVE"  # Was OCCUPIED
     PAYING: Final[str] = "PAYING"
-    RESERVED: Final[str] = "RESERVED"
+    OUT_OF_SERVICE: Final[str] = "OUT_OF_SERVICE"  # Was RESERVED
 
-    ACTIVE: Final[list[str]] = [OCCUPIED, PAYING]
+    IN_USE: Final[list[str]] = [ACTIVE, PAYING]  # Tables with active sessions
 
 
 class SessionStatus:
@@ -145,9 +146,11 @@ class ServiceCallStatus:
 # =============================================================================
 
 # Valid round status transitions (from -> [allowed to states])
+# New flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
 ROUND_TRANSITIONS: Final[dict[str, list[str]]] = {
-    RoundStatus.PENDING: [RoundStatus.IN_KITCHEN, RoundStatus.CANCELED],
-    RoundStatus.SUBMITTED: [RoundStatus.IN_KITCHEN, RoundStatus.CANCELED],  # Legacy
+    RoundStatus.PENDING: [RoundStatus.CONFIRMED, RoundStatus.CANCELED],  # Waiter confirms
+    RoundStatus.CONFIRMED: [RoundStatus.SUBMITTED, RoundStatus.CANCELED],  # Admin/Manager sends to kitchen
+    RoundStatus.SUBMITTED: [RoundStatus.IN_KITCHEN, RoundStatus.CANCELED],
     RoundStatus.IN_KITCHEN: [RoundStatus.READY, RoundStatus.CANCELED],
     RoundStatus.READY: [RoundStatus.SERVED],
     RoundStatus.SERVED: [],  # Terminal state
@@ -156,9 +159,12 @@ ROUND_TRANSITIONS: Final[dict[str, list[str]]] = {
 
 # Role-based transition restrictions
 # Format: (from_status, to_status) -> [allowed_roles]
+# New flow: Waiter confirms (PENDING→CONFIRMED), Admin sends to kitchen (CONFIRMED→SUBMITTED)
 ROUND_TRANSITION_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
+    # Waiter, Admin, or Manager can confirm order (verified at table)
+    (RoundStatus.PENDING, RoundStatus.CONFIRMED): frozenset({Roles.WAITER, Roles.ADMIN, Roles.MANAGER}),
     # Only ADMIN/MANAGER can send to kitchen
-    (RoundStatus.PENDING, RoundStatus.IN_KITCHEN): MANAGEMENT_ROLES,
+    (RoundStatus.CONFIRMED, RoundStatus.SUBMITTED): MANAGEMENT_ROLES,
     (RoundStatus.SUBMITTED, RoundStatus.IN_KITCHEN): MANAGEMENT_ROLES,
     # Only KITCHEN can mark as ready
     (RoundStatus.IN_KITCHEN, RoundStatus.READY): frozenset({Roles.KITCHEN}),
@@ -166,6 +172,7 @@ ROUND_TRANSITION_ROLES: Final[dict[tuple[str, str], frozenset[str]]] = {
     (RoundStatus.READY, RoundStatus.SERVED): STAFF_ROLES,
     # Only ADMIN/MANAGER can cancel
     (RoundStatus.PENDING, RoundStatus.CANCELED): MANAGEMENT_ROLES,
+    (RoundStatus.CONFIRMED, RoundStatus.CANCELED): MANAGEMENT_ROLES,
     (RoundStatus.SUBMITTED, RoundStatus.CANCELED): MANAGEMENT_ROLES,
     (RoundStatus.IN_KITCHEN, RoundStatus.CANCELED): MANAGEMENT_ROLES,
 }
@@ -402,8 +409,8 @@ class ErrorMessages:
 def validate_round_status(status: str) -> bool:
     """Validate that a round status is valid."""
     return status in [
-        RoundStatus.PENDING, RoundStatus.SUBMITTED, RoundStatus.IN_KITCHEN,
-        RoundStatus.READY, RoundStatus.SERVED, RoundStatus.CANCELED
+        RoundStatus.PENDING, RoundStatus.CONFIRMED, RoundStatus.SUBMITTED,
+        RoundStatus.IN_KITCHEN, RoundStatus.READY, RoundStatus.SERVED, RoundStatus.CANCELED
     ]
 
 
@@ -433,8 +440,8 @@ def validate_session_status(status: str) -> bool:
 def validate_table_status(status: str) -> bool:
     """Validate that a table status is valid."""
     return status in [
-        TableStatus.FREE, TableStatus.OCCUPIED,
-        TableStatus.PAYING, TableStatus.RESERVED
+        TableStatus.FREE, TableStatus.ACTIVE,
+        TableStatus.PAYING, TableStatus.OUT_OF_SERVICE
     ]
 
 

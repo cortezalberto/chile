@@ -28,6 +28,7 @@ from shared.config.logging import kitchen_logger as logger
 from shared.infrastructure.events import (
     get_redis_client,
     publish_round_event,
+    ROUND_CONFIRMED,
     ROUND_SUBMITTED,
     ROUND_IN_KITCHEN,
     ROUND_READY,
@@ -46,10 +47,15 @@ def get_pending_rounds(
     """
     Get all active rounds for the kitchen.
 
-    Returns rounds with status SUBMITTED, IN_KITCHEN, or READY,
+    Returns rounds with status SUBMITTED or IN_KITCHEN,
     ordered by submission time (oldest first).
 
-    Note: PENDING rounds are NOT visible in kitchen (only in Tables).
+    Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+    - PENDING: Diner created order (waiter must verify)
+    - CONFIRMED: Waiter verified at table (admin can now send to kitchen)
+    - SUBMITTED: Admin sent to kitchen (visible in "Nuevos" column)
+    - IN_KITCHEN: Cook is preparing (visible in "En Cocina" column)
+    - READY/SERVED: Handled by Dashboard, not kitchen view
 
     Requires KITCHEN, MANAGER, or ADMIN role.
     """
@@ -62,7 +68,8 @@ def get_pending_rounds(
     # Get active rounds with eager loading to avoid N+1 queries
     # - selectinload for items (one-to-many collection)
     # - joinedload for session->table chain (many-to-one)
-    # Includes PENDING (waiting for manager authorization) so kitchen can see incoming orders
+    # Kitchen only sees SUBMITTED and IN_KITCHEN (2 columns: Nuevos, En Cocina)
+    # PENDING and CONFIRMED are handled by waiter/admin, not kitchen
     rounds = db.execute(
         select(Round)
         .options(
@@ -71,7 +78,7 @@ def get_pending_rounds(
         )
         .where(
             Round.branch_id.in_(branch_ids),
-            Round.status.in_(["PENDING", "SUBMITTED", "IN_KITCHEN", "READY"]),
+            Round.status.in_(["SUBMITTED", "IN_KITCHEN"]),
         )
         .order_by(Round.submitted_at.asc())
     ).scalars().unique().all()
@@ -121,7 +128,9 @@ async def update_round_status(
     Update the status of a round.
 
     Valid transitions (role-restricted):
-    - PENDING -> IN_KITCHEN (ADMIN/MANAGER only - sends to kitchen)
+    - PENDING -> CONFIRMED (WAITER/ADMIN/MANAGER - verifies order at table)
+    - CONFIRMED -> SUBMITTED (ADMIN/MANAGER only - sends to kitchen)
+    - SUBMITTED -> IN_KITCHEN (KITCHEN/ADMIN/MANAGER - starts preparing)
     - IN_KITCHEN -> READY (KITCHEN only - kitchen finished)
     - READY -> SERVED (ADMIN/MANAGER/WAITER - confirms delivery)
 
@@ -154,13 +163,16 @@ async def update_round_status(
         )
 
     # Validate status transition
-    # PENDING: Round received from diner, visible in Tables only
-    # SUBMITTED: Admin sent to kitchen, visible in Kitchen "Nuevo"
+    # Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+    # PENDING: Round received from diner (waiter must verify at table)
+    # CONFIRMED: Waiter verified order at table (admin can now send to kitchen)
+    # SUBMITTED: Admin sent to kitchen, visible in Kitchen "Nuevos"
     # IN_KITCHEN: Cook is preparing, visible in Kitchen "En Cocina"
-    # READY: Cook finished, visible in Kitchen "Listo" AND Tables "Listo"
+    # READY: Cook finished, waiter can pick up
     # SERVED: Delivered to customer
     valid_transitions = {
-        "PENDING": ["SUBMITTED"],      # Admin/Manager sends to kitchen "Nuevo"
+        "PENDING": ["CONFIRMED"],      # Waiter verifies order at table
+        "CONFIRMED": ["SUBMITTED"],    # Admin/Manager sends to kitchen "Nuevos"
         "SUBMITTED": ["IN_KITCHEN"],   # Kitchen starts preparing
         "IN_KITCHEN": ["READY"],       # Kitchen marks as ready
         "READY": ["SERVED"],           # Admin/Manager/Waiter confirms delivery
@@ -183,6 +195,22 @@ async def update_round_status(
         )
 
     # Role-based transition restrictions
+    # PENDING -> CONFIRMED: Waiter, Admin, or Manager can confirm (verified at table)
+    if current_status == "PENDING" and new_status == "CONFIRMED":
+        if not any(role in user_roles for role in ["WAITER", "ADMIN", "MANAGER"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo el mesero puede confirmar el pedido",
+            )
+
+    # CONFIRMED -> SUBMITTED: Only ADMIN/MANAGER can send to kitchen
+    if current_status == "CONFIRMED" and new_status == "SUBMITTED":
+        if not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Solo admin o manager puede enviar pedidos a cocina",
+            )
+
     # SUBMITTED -> IN_KITCHEN: KITCHEN starts preparing
     if current_status == "SUBMITTED" and new_status == "IN_KITCHEN":
         if "KITCHEN" not in user_roles and not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
@@ -197,14 +225,6 @@ async def update_round_status(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo cocina puede marcar el pedido como listo",
-            )
-
-    # PENDING -> SUBMITTED: Only ADMIN/MANAGER can send to kitchen
-    if current_status == "PENDING" and new_status == "SUBMITTED":
-        if not any(role in user_roles for role in ["ADMIN", "MANAGER"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Solo admin o manager puede enviar pedidos a cocina",
             )
 
     # Update status
@@ -239,6 +259,7 @@ async def update_round_status(
 
     # Publish event
     event_type_map = {
+        "CONFIRMED": ROUND_CONFIRMED,
         "SUBMITTED": ROUND_SUBMITTED,
         "IN_KITCHEN": ROUND_IN_KITCHEN,
         "READY": ROUND_READY,

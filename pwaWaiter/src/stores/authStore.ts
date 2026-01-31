@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { authAPI, branchAPI, setAuthToken, setRefreshToken, setTokenRefreshCallback } from '../services/api'
+import { authAPI, branchAPI, waiterAssignmentAPI, setAuthToken, setRefreshToken, setTokenRefreshCallback } from '../services/api'
 import { wsService } from '../services/websocket'
 import { notificationService } from '../services/notifications'
 import { STORAGE_KEYS } from '../utils/constants'
@@ -34,11 +34,18 @@ interface AuthState {
   error: string | null
   refreshAttempts: number  // WAITER-CRIT-01 FIX: Track refresh retry attempts
   isRefreshing: boolean  // HIGH-29-18 FIX: Flag to prevent concurrent refresh attempts
+  // Pre-login branch selection (for assignment verification)
+  preLoginBranchId: number | null
+  preLoginBranchName: string | null
+  assignmentVerified: boolean  // True if waiter is verified to work at selected branch today
   // Actions
   login: (email: string, password: string) => Promise<boolean>
   logout: () => void
   checkAuth: () => Promise<boolean>
   selectBranch: (branchId: number, branchName?: string) => void
+  setPreLoginBranchId: (branchId: number, branchName?: string) => void  // Set branch before login
+  clearPreLoginBranch: () => void  // Clear pre-login branch selection
+  verifyBranchAssignment: () => Promise<boolean>  // Verify assignment after login
   fetchBranchNames: () => Promise<void>  // Fetch branch names for selection screen
   clearError: () => void
   refreshAccessToken: () => Promise<boolean>  // DEF-HIGH-04 FIX
@@ -81,6 +88,59 @@ export const useAuthStore = create<AuthState>()(
       error: null,
       refreshAttempts: 0,  // WAITER-CRIT-01 FIX
       isRefreshing: false,  // HIGH-29-18 FIX: Initial state
+      // Pre-login branch selection
+      preLoginBranchId: null,
+      preLoginBranchName: null,
+      assignmentVerified: false,
+
+      // Set pre-login branch (before authentication)
+      setPreLoginBranchId: (branchId: number, branchName?: string) => {
+        set({ preLoginBranchId: branchId, preLoginBranchName: branchName || null })
+        authLogger.info('Pre-login branch selected', { branchId, branchName })
+      },
+
+      // Clear pre-login branch to go back to branch selection
+      clearPreLoginBranch: () => {
+        set({ preLoginBranchId: null, preLoginBranchName: null, error: null })
+        authLogger.info('Pre-login branch cleared')
+      },
+
+      // Verify branch assignment after login
+      verifyBranchAssignment: async (): Promise<boolean> => {
+        const { preLoginBranchId, preLoginBranchName } = get()
+        if (!preLoginBranchId) {
+          set({ error: 'Debes seleccionar una sucursal primero' })
+          return false
+        }
+
+        try {
+          const result = await waiterAssignmentAPI.verifyBranchAssignment(preLoginBranchId)
+
+          if (!result.is_assigned) {
+            set({
+              error: result.message,
+              assignmentVerified: false,
+            })
+            authLogger.warn('Branch assignment verification failed', { branchId: preLoginBranchId, message: result.message })
+            return false
+          }
+
+          // Assignment verified - set as selected branch
+          set({
+            selectedBranchId: preLoginBranchId,
+            selectedBranchName: preLoginBranchName || result.branch_name,
+            assignmentVerified: true,
+            error: null,
+          })
+          authLogger.info('Branch assignment verified', { branchId: preLoginBranchId, sectors: result.sectors.length })
+          return true
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Error al verificar asignación'
+          set({ error: message, assignmentVerified: false })
+          authLogger.error('Branch assignment verification error', err)
+          return false
+        }
+      },
 
       login: async (email: string, password: string): Promise<boolean> => {
         set({ isLoading: true, error: null })
@@ -92,23 +152,20 @@ export const useAuthStore = create<AuthState>()(
             throw new Error('No tienes permisos de mozo')
           }
 
-          // Auto-select first branch if only one
-          const selectedBranchId = response.user.branch_ids.length === 1
-            ? response.user.branch_ids[0]
-            : null
-
           // DEF-HIGH-04 FIX: Extract refresh token if provided
           const refreshTokenValue = (response as { refresh_token?: string }).refresh_token || null
 
+          // Don't auto-select branch - will be verified with preLoginBranchId
           set({
             user: response.user,
             token: response.access_token,
             refreshToken: refreshTokenValue,  // DEF-HIGH-04 FIX
-            selectedBranchId,
+            selectedBranchId: null,  // Will be set after verification
             isAuthenticated: true,
             isLoading: false,
             error: null,
             refreshAttempts: 0,  // WAITER-CRIT-01 FIX: Reset on login
+            assignmentVerified: false,  // Reset - needs verification
           })
 
           // Connect to WebSocket
@@ -168,14 +225,19 @@ export const useAuthStore = create<AuthState>()(
           availableBranches: [],
           isAuthenticated: false,
           error: null,
+          // Clear pre-login state
+          preLoginBranchId: null,
+          preLoginBranchName: null,
+          assignmentVerified: false,
         })
       },
 
       // DEF-HIGH-04 FIX: Refresh access token
       // WAITER-CRIT-01 FIX: Added retry counter and auto-logout after max retries
       // HIGH-29-18 FIX: Added isRefreshing flag to prevent race condition
+      // SEC-09: Refresh token is now in HttpOnly cookie, no need to check in memory
       refreshAccessToken: async (): Promise<boolean> => {
-        const { refreshToken: currentRefreshToken, refreshAttempts, isRefreshing } = get()
+        const { refreshAttempts, isRefreshing } = get()
 
         // HIGH-29-18 FIX: Check if refresh is already in progress
         if (isRefreshing) {
@@ -190,24 +252,21 @@ export const useAuthStore = create<AuthState>()(
           return false
         }
 
-        if (!currentRefreshToken) {
-          authLogger.warn('No refresh token available for refresh')
-          return false
-        }
+        // SEC-09: Don't check for refreshToken in memory - it's in HttpOnly cookie
+        // The server will reject the request if no valid cookie is present
 
         // HIGH-29-18 FIX: Set isRefreshing flag at the start
         // WAITER-CRIT-01 FIX: Increment attempt counter before trying
         set({ isRefreshing: true, refreshAttempts: refreshAttempts + 1 })
-
-        // Restore refresh token to API client
-        setRefreshToken(currentRefreshToken)
 
         try {
           const result = await authAPI.refresh()
           if (result) {
             set({
               token: result.access_token,
-              refreshToken: result.refresh_token || currentRefreshToken,
+              // SEC-09: Keep refreshToken in state for backward compatibility
+              // (actual token is managed via HttpOnly cookie)
+              refreshToken: result.refresh_token || get().refreshToken,
               refreshAttempts: 0,  // WAITER-CRIT-01 FIX: Reset on success
               isRefreshing: false,  // HIGH-29-18 FIX: Reset flag on success
             })
@@ -351,10 +410,11 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: STORAGE_KEYS.AUTH,
-      version: 3,  // Bump version for selectedBranchName
+      version: 4,  // SEC-09: Bump version - refreshToken now in HttpOnly cookie
       partialize: (state) => ({
+        // Only persist access token and user, not loading/error states
+        // SEC-09: refreshToken is now in HttpOnly cookie, not localStorage
         token: state.token,
-        refreshToken: state.refreshToken,  // DEF-HIGH-04 FIX
         user: state.user,
         selectedBranchId: state.selectedBranchId,
         selectedBranchName: state.selectedBranchName,
@@ -362,7 +422,7 @@ export const useAuthStore = create<AuthState>()(
         isAuthenticated: state.isAuthenticated,
       }),
       onRehydrateStorage: () => (state) => {
-        // After rehydration, restore tokens to API client
+        // After rehydration, restore access token to API client
         if (state?.token) {
           setAuthToken(state.token)
           // HIGH-07 FIX: Sync token with WebSocket service on rehydration
@@ -370,10 +430,7 @@ export const useAuthStore = create<AuthState>()(
           // The actual connection is deferred to checkAuth() to avoid premature connects
           authLogger.debug('Token restored from storage, API client synced')
         }
-        // DEF-HIGH-04 FIX: Restore refresh token
-        if (state?.refreshToken) {
-          setRefreshToken(state.refreshToken)
-        }
+        // SEC-09: refreshToken is in HttpOnly cookie, no need to restore
       },
     }
   )
@@ -390,3 +447,7 @@ const EMPTY_BRANCH_IDS: number[] = []
 export const selectUserBranchIds = (state: AuthState) => state.user?.branch_ids ?? EMPTY_BRANCH_IDS
 const EMPTY_BRANCHES: BranchOption[] = []
 export const selectAvailableBranches = (state: AuthState) => state.availableBranches.length > 0 ? state.availableBranches : EMPTY_BRANCHES
+// Pre-login branch selection selectors
+export const selectPreLoginBranchId = (state: AuthState) => state.preLoginBranchId
+export const selectPreLoginBranchName = (state: AuthState) => state.preLoginBranchName
+export const selectAssignmentVerified = (state: AuthState) => state.assignmentVerified

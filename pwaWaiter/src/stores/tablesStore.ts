@@ -59,6 +59,7 @@ function clearAllAnimationTimeouts(): void {
  * 1. If ANY round is 'ready' AND ANY is NOT ready → 'ready_with_kitchen'
  * 2. If ALL rounds are 'pending' → 'pending'
  * 3. Otherwise show worst status from remaining rounds
+ * Flow: pending → confirmed → submitted → in_kitchen → ready → served
  */
 function calculateAggregateOrderStatus(
   roundStatuses: Record<string, OrderStatus>
@@ -68,7 +69,7 @@ function calculateAggregateOrderStatus(
 
   const hasReady = statuses.some((s) => s === 'ready')
   const hasNotReady = statuses.some(
-    (s) => s === 'pending' || s === 'submitted' || s === 'in_kitchen'
+    (s) => s === 'pending' || s === 'confirmed' || s === 'submitted' || s === 'in_kitchen'
   )
 
   // Rule 1: Ready + not ready = combined status
@@ -83,6 +84,7 @@ function calculateAggregateOrderStatus(
   // Rule 3: Return worst status (priority order)
   const priorityOrder: OrderStatus[] = [
     'pending',
+    'confirmed',
     'submitted',
     'in_kitchen',
     'ready',
@@ -99,11 +101,14 @@ function calculateAggregateOrderStatus(
 
 /**
  * Map backend RoundStatus to frontend OrderStatus
+ * Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
  */
 function mapRoundStatusToOrderStatus(roundStatus: string): OrderStatus {
   switch (roundStatus) {
     case 'PENDING':
       return 'pending'
+    case 'CONFIRMED':
+      return 'confirmed'
     case 'SUBMITTED':
       return 'submitted'
     case 'IN_KITCHEN':
@@ -483,8 +488,10 @@ function handleWSEvent(
 
   // MED-08 FIX: Use WS event constants instead of magic strings
   // Events that require updating the table data
+  // Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
   const eventsRequiringUpdate = [
     WS_EVENT_TYPES.ROUND_PENDING,
+    WS_EVENT_TYPES.ROUND_CONFIRMED,
     WS_EVENT_TYPES.ROUND_SUBMITTED,
     WS_EVENT_TYPES.ROUND_IN_KITCHEN,
     WS_EVENT_TYPES.ROUND_READY,
@@ -507,9 +514,11 @@ function handleWSEvent(
 
   // ==========================================================================
   // Handle ROUND_* events - update orderStatus and roundStatuses locally
+  // Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
   // ==========================================================================
   const roundEvents = [
     WS_EVENT_TYPES.ROUND_PENDING,
+    WS_EVENT_TYPES.ROUND_CONFIRMED,
     WS_EVENT_TYPES.ROUND_SUBMITTED,
     WS_EVENT_TYPES.ROUND_IN_KITCHEN,
     WS_EVENT_TYPES.ROUND_READY,

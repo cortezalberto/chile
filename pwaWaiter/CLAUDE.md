@@ -28,13 +28,23 @@ cd pwaWaiter && npm run test:run # Vitest single run
 ### Navigation Structure
 
 ```
-Login → BranchSelect (if multiple) → MainPage
-                                        ├── Comensales tab (default) → TableGrid → TableDetailModal
-                                        └── Autogestión tab → AutogestionModal (split-view ordering)
+PreLoginBranchSelect → Login → AssignmentVerification → MainPage
+                                                           ├── Comensales tab (default) → TableGrid → TableDetailModal
+                                                           └── Autogestión tab → AutogestionModal (split-view ordering)
 ```
 
-**MainPage** (`src/pages/MainPage.tsx`): Two-tab header interface
-- **Comensales**: Table grid with filters (Urgentes, Activas, Libres, Fuera servicio)
+**Authentication Flow:**
+1. **PreLoginBranchSelect** (`src/pages/PreLoginBranchSelect.tsx`): Waiter selects branch BEFORE login
+   - Fetches branches from public endpoint `/api/public/branches` (no auth)
+   - Sets `preLoginBranchId` and `preLoginBranchName` in authStore
+2. **Login** (`src/pages/Login.tsx`): Standard login with selected branch shown
+   - "Cambiar" button clears branch and returns to step 1
+3. **AssignmentVerification** (in App.tsx): Verifies waiter is assigned TODAY
+   - Calls `/api/waiter/verify-branch-assignment?branch_id={id}`
+   - If not assigned → "Acceso Denegado" screen with "Elegir otra sucursal" button
+   - If assigned → sets `assignmentVerified: true` and `selectedBranchId`
+4. **MainPage** (`src/pages/MainPage.tsx`): Two-tab header interface
+- **Comensales**: Table grid grouped by sector, with filters (Urgentes, Activas, Libres, Fuera servicio)
 - **Autogestión**: Opens modal for waiter-managed ordering flow
 
 ### Store Pattern (Zustand + React 19)
@@ -53,7 +63,8 @@ const fetchTables = useTablesStore((s) => s.fetchTables)
 | File | Purpose |
 |------|---------|
 | `stores/tablesStore.ts` | Table state with WebSocket event handlers |
-| `stores/authStore.ts` | JWT auth with proactive token refresh (14 min) |
+| `stores/authStore.ts` | JWT auth with proactive token refresh (14 min), branch assignment verification |
+| `pages/PreLoginBranchSelect.tsx` | Pre-login branch selection screen |
 | `stores/retryQueueStore.ts` | Offline-first operation queue |
 | `services/api.ts` | REST client with SSRF protection |
 | `services/websocket.ts` | Auto-reconnecting WebSocket client |
@@ -62,6 +73,7 @@ const fetchTables = useTablesStore((s) => s.fetchTables)
 | `components/AutogestionModal.tsx` | Split-view order taking modal |
 | `components/ComandaTab.tsx` | Quick order component in TableDetailModal |
 | `components/TableCard.tsx` | Table card with status badges and animations |
+| `pages/TableGrid.tsx` | Table grid with sector grouping and status filters |
 
 ### WebSocket Events Handled
 
@@ -73,11 +85,13 @@ TABLE_CLEARED          // Session ended, resets all state
 
 // Round lifecycle
 ROUND_PENDING          // New order (yellow pulse)
-ROUND_SUBMITTED        // Sent to kitchen
+ROUND_CONFIRMED        // Waiter verified order at table (blue)
+ROUND_SUBMITTED        // Sent to kitchen by admin/manager
 ROUND_IN_KITCHEN       // Being prepared
 ROUND_READY            // Ready to serve
 ROUND_SERVED           // Delivered
 ROUND_CANCELED         // Cancelled
+ROUND_ITEM_DELETED     // Waiter deleted item from pending/confirmed round
 
 // Service calls
 SERVICE_CALL_CREATED   // Customer needs attention (red blink + sound)
@@ -106,6 +120,7 @@ Order status badge colors:
 | Status | Badge | Label |
 |--------|-------|-------|
 | `pending` | Yellow | "Pendiente" |
+| `confirmed` | Blue | "Confirmado" |
 | `submitted` / `in_kitchen` | Blue | "En Cocina" |
 | `ready_with_kitchen` | Orange | "Listo + Cocina" |
 | `ready` | Green | "Listo" |
@@ -116,6 +131,8 @@ Order status badge colors:
 Service calls track IDs for UI resolution:
 ```typescript
 // In TableCard type (types/index.ts)
+sector_id?: number | null        // Sector ID for grouping
+sector_name?: string | null      // Sector name for display
 activeServiceCallIds?: number[]  // IDs of OPEN service calls
 
 // Resolution flow in TableDetailModal
@@ -126,10 +143,16 @@ serviceCallsAPI.resolve(callId)  // POST /waiter/service-calls/{id}/resolve
 ### API Structure
 
 ```typescript
+// Public APIs (no auth required)
+publicAPI.getBranches()  // Get all active branches for pre-login selection
+
+// Branch assignment verification (after login)
+waiterAssignmentAPI.verifyBranchAssignment(branchId)  // Verify waiter is assigned to branch TODAY
+
 // Core APIs
 authAPI       // login, getMe, refresh, logout
-tablesAPI     // getTables (maps active_service_call_ids → activeServiceCallIds), getTable, getTableSessionDetail
-roundsAPI     // getRound, updateStatus, markAsServed
+tablesAPI     // getTables (includes sector_id, sector_name for grouping), getTable, getTableSessionDetail
+roundsAPI     // getRound, updateStatus, confirmRound, markAsServed, deleteItem
 billingAPI    // confirmCashPayment, clearTable
 serviceCallsAPI // acknowledge, resolve
 
@@ -153,7 +176,8 @@ comandaAPI.getMenuCompact(branchId)
 5. Left panel: search/browse products by category, add to cart
 6. Right panel: cart with quantity controls, total display
 7. Submit: `waiterTableAPI.submitRound()` → ROUND_PENDING event
-8. Round appears in Dashboard for manager approval
+8. Waiter confirms order at table → ROUND_CONFIRMED event
+9. Manager/Admin sends to kitchen → ROUND_SUBMITTED event
 
 ### Table Status Colors
 
@@ -196,9 +220,21 @@ For customers without phones using paper menus:
 **Round Filter Tabs:**
 In TableDetailModal, rounds can be filtered:
 - "Todos" - All rounds
-- "Pendientes" - PENDING, SUBMITTED, IN_KITCHEN
+- "Pendientes" - PENDING, CONFIRMED, SUBMITTED, IN_KITCHEN
 - "Listos" - READY rounds
 - "Servidos" - SERVED rounds
+
+**Round Confirmation Button:**
+PENDING rounds show a "Confirmar Pedido" button. Waiter must physically verify the order at the table before admin/manager can send it to kitchen.
+
+**Delete Round Item:**
+For PENDING or CONFIRMED rounds, waiter can delete items via trash icon. Confirmation dialog before deletion. If round becomes empty, it's automatically deleted.
+
+**Table Grouping by Sector:**
+Tables are displayed grouped by sector (e.g., "Interior", "Terraza") like in Dashboard. Each sector shows:
+- Sector name header
+- Badge with table count
+- Urgent indicator (red pulsing) if sector has urgent tables
 
 **Ready Rounds Pickup Alert:**
 Green pulsing alert when rounds reach READY: "¡Pedido listo! Recoger en cocina"

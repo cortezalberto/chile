@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 7
 
+    # SEC-09: HttpOnly Cookie settings for refresh token
+    # secure=True requires HTTPS (automatically False in development)
+    # samesite="lax" allows cookies on top-level navigation (good balance of security/usability)
+    cookie_secure: bool = False  # Set to True in production (.env)
+    cookie_samesite: str = "lax"  # "lax" or "strict"
+    cookie_domain: str = ""  # Empty = current domain only, set for cross-subdomain
+
     # Table Token (HMAC for diner authentication)
     table_token_secret: str = "table-token-secret-change-me"
     # CRIT-04 FIX: Reduced from 8h to 3h to limit token exposure window

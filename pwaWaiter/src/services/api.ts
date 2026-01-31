@@ -95,6 +95,9 @@ export class ApiError extends Error {
 
 // Token storage
 let authToken: string | null = null
+
+// SEC-09: Refresh token is now stored in HttpOnly cookie by the backend
+// This variable is kept for backward compatibility during migration
 let refreshToken: string | null = null
 
 // DEF-HIGH-04 FIX: Token refresh callback
@@ -269,21 +272,19 @@ export const authAPI = {
   },
 
   // DEF-HIGH-04 FIX: Refresh access token
+  // SEC-09: Refresh token is sent via HttpOnly cookie (credentials: 'include')
   async refresh(): Promise<RefreshResponse | null> {
-    const currentRefreshToken = getRefreshToken()
-    if (!currentRefreshToken) {
-      apiLogger.warn('No refresh token available')
-      return null
-    }
-
     try {
+      // SEC-09: No body needed - refresh token is sent via HttpOnly cookie
+      // credentials: 'include' in request() ensures cookie is sent
       const response = await request<RefreshResponse>('/auth/refresh', {
         method: 'POST',
-        body: JSON.stringify({ refresh_token: currentRefreshToken }),
       })
 
-      // Update tokens
+      // Update access token
       setAuthToken(response.access_token)
+      // SEC-09: Keep updating refreshToken for backward compatibility
+      // (actual token is managed via HttpOnly cookie)
       if (response.refresh_token) {
         setRefreshToken(response.refresh_token)
       }
@@ -317,6 +318,8 @@ interface TableCardResponse {
   pending_calls: number
   check_status: TableCard['check_status']
   active_service_call_ids?: number[]
+  sector_id?: number | null
+  sector_name?: string | null
 }
 
 export const tablesAPI = {
@@ -333,6 +336,8 @@ export const tablesAPI = {
       pending_calls: t.pending_calls,
       check_status: t.check_status,
       activeServiceCallIds: t.active_service_call_ids ?? [],
+      sector_id: t.sector_id,
+      sector_name: t.sector_name,
     }))
   },
 
@@ -345,23 +350,60 @@ export const tablesAPI = {
   },
 }
 
+// Delete round item response
+export interface DeleteRoundItemResponse {
+  success: boolean
+  round_id: number
+  item_id: number
+  remaining_items: number
+  round_deleted: boolean
+  message: string
+}
+
 // Rounds API
+// Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
 export const roundsAPI = {
   async getRound(roundId: number): Promise<Round> {
     return request<Round>(`/kitchen/rounds/${roundId}`)
   },
 
+  /**
+   * Update round status.
+   * Waiter can: PENDING → CONFIRMED (confirm order at table)
+   * Admin/Manager can: CONFIRMED → SUBMITTED (send to kitchen)
+   */
   async updateStatus(roundId: number, status: RoundStatus): Promise<Round> {
     return request<Round>(`/kitchen/rounds/${roundId}/status`, {
-      method: 'PUT',
+      method: 'POST',
       body: JSON.stringify({ status }),
+    })
+  },
+
+  /**
+   * Convenience method to confirm a pending order (waiter verified at table).
+   */
+  async confirmRound(roundId: number): Promise<Round> {
+    return request<Round>(`/kitchen/rounds/${roundId}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status: 'CONFIRMED' }),
     })
   },
 
   async markAsServed(roundId: number): Promise<Round> {
     return request<Round>(`/kitchen/rounds/${roundId}/status`, {
-      method: 'PUT',
+      method: 'POST',
       body: JSON.stringify({ status: 'SERVED' }),
+    })
+  },
+
+  /**
+   * Delete an item from a round.
+   * Only allowed for rounds in PENDING or CONFIRMED status.
+   * If round becomes empty, it will be automatically deleted.
+   */
+  async deleteItem(roundId: number, itemId: number): Promise<DeleteRoundItemResponse> {
+    return request<DeleteRoundItemResponse>(`/waiter/rounds/${roundId}/items/${itemId}`, {
+      method: 'DELETE',
     })
   },
 }
@@ -669,6 +711,69 @@ export const branchAPI = {
    */
   async getBranch(branchId: number): Promise<BranchInfo> {
     return request<BranchInfo>(`/admin/branches/${branchId}`)
+  },
+
+  /**
+   * Get all active branches for selection screen.
+   */
+  async getAllBranches(): Promise<BranchInfo[]> {
+    return request<BranchInfo[]>('/admin/branches')
+  },
+}
+
+// Public branch info for pre-login selection (no auth required)
+export interface BranchPublicInfo {
+  id: number
+  name: string
+  slug: string
+  address: string | null
+}
+
+// Public API (no authentication required)
+export const publicAPI = {
+  /**
+   * Get all active branches for pre-login selection.
+   * Used by pwaWaiter before authentication.
+   */
+  async getBranches(): Promise<BranchPublicInfo[]> {
+    const url = `${API_CONFIG.BASE_URL}/public/branches`
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new ApiError('Failed to fetch branches', response.status)
+    }
+    return response.json()
+  },
+}
+
+// =============================================================================
+// Branch Assignment Verification (for login flow)
+// =============================================================================
+
+export interface SectorAssignment {
+  sector_id: number
+  sector_name: string
+  sector_prefix: string
+  branch_id: number
+  assignment_date: string
+  shift: string | null
+}
+
+export interface BranchAssignmentVerifyResponse {
+  is_assigned: boolean
+  branch_id: number
+  branch_name: string | null
+  assignment_date: string
+  sectors: SectorAssignment[]
+  message: string
+}
+
+export const waiterAssignmentAPI = {
+  /**
+   * Verify if the current waiter is assigned to work at a specific branch today.
+   * Used after login to validate branch selection.
+   */
+  async verifyBranchAssignment(branchId: number): Promise<BranchAssignmentVerifyResponse> {
+    return request<BranchAssignmentVerifyResponse>(`/waiter/verify-branch-assignment?branch_id=${branchId}`)
   },
 }
 

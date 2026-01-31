@@ -33,7 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 |-----------|------|-------------|
 | **Dashboard** | 5177 | Admin panel for multi-branch restaurant management (React 19 + Zustand) |
 | **pwaMenu** | 5176 | Customer-facing shared menu PWA with collaborative ordering, i18n (es/en/pt) |
-| **pwaWaiter** | 5178 | Waiter PWA for real-time table management with push notifications |
+| **pwaWaiter** | 5178 | Waiter PWA for real-time table management with sector grouping and push notifications |
 | **backend** | 8000 | FastAPI REST API (PostgreSQL, Redis, JWT) |
 | **ws_gateway** | 8001 | WebSocket Gateway for real-time events (at project root) |
 
@@ -276,6 +276,7 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
 ```
 /api/auth/login, /me, /refresh   # JWT authentication
 /api/public/menu/{slug}          # Public menu (no auth)
+/api/public/branches             # Public branches list (no auth, for pwaWaiter pre-login)
 /api/tables/{id}/session         # Create/get table session (numeric ID)
 /api/tables/code/{code}/session  # Create/get session by table code (alphanumeric, e.g., "INT-01")
 
@@ -293,6 +294,7 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
 /api/recipes/*                   # Recipe CRUD (JWT + KITCHEN/MANAGER/ADMIN)
 /api/billing/*                   # Payment operations
 /api/waiter/*                    # Waiter operations (JWT + WAITER role)
+  /verify-branch-assignment?branch_id={id}  # Verify waiter is assigned to branch TODAY
   /tables?branch_id={id}         # Tables filtered by branch AND assigned sectors
   /branches/{id}/menu            # Compact menu for Comanda Rápida (no images)
   /sessions/{id}/rounds          # Submit round from waiter (Comanda Rápida)
@@ -313,8 +315,8 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
 /ws/admin?token=JWT     # Dashboard admin notifications
 
 Events:
-  # Round lifecycle
-  ROUND_PENDING, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
+  # Round lifecycle (PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED)
+  ROUND_PENDING, ROUND_CONFIRMED, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
   # Service calls
   SERVICE_CALL_CREATED, SERVICE_CALL_ACKED, SERVICE_CALL_CLOSED
   # Billing
@@ -346,8 +348,9 @@ Close codes:
 **Round Event Routing:**
 | Event | Admin | Kitchen | Waiters | Diners | Notes |
 |-------|-------|---------|---------|--------|-------|
-| `ROUND_PENDING` | ✅ | ❌ | ✅ (all branch) | ❌ | Bypasses sector filter |
-| `ROUND_SUBMITTED` | ✅ | ❌ | ✅ | ❌ | |
+| `ROUND_PENDING` | ✅ | ❌ | ✅ (all branch) | ❌ | Waiter must verify at table |
+| `ROUND_CONFIRMED` | ✅ | ❌ | ✅ | ❌ | Admin can now send to kitchen |
+| `ROUND_SUBMITTED` | ✅ | ✅ | ✅ | ❌ | Appears in Kitchen "Nuevos" |
 | `ROUND_IN_KITCHEN` | ✅ | ✅ | ✅ | ✅ | |
 | `ROUND_READY` | ✅ | ✅ | ✅ | ✅ | |
 | `ROUND_SERVED` | ✅ | ✅ | ✅ | ✅ | |
@@ -1151,13 +1154,55 @@ export function closeBroadcastChannel(): void {
 | Frontend | Strategy | Interval |
 |----------|----------|----------|
 | pwaWaiter | Proactive | Every 14 min (`authStore.ts:19`) |
-| Dashboard | Reactive | On 401 response (`api.ts:109-121`) |
+| Dashboard | Proactive | Every 14 min (`authStore.ts:16`) + WebSocket reconnect on refresh |
 
 ### Token Blacklist
 
 - Logout calls `revoke_all_user_tokens()` to invalidate all user sessions
 - Blacklist stored in Redis with TTL matching token expiration
 - Fail-closed pattern: Redis errors treat token as blacklisted
+
+### SEC-09: HttpOnly Cookies for Refresh Tokens
+
+Refresh tokens are stored in HttpOnly cookies to prevent XSS attacks from stealing them:
+
+**Backend Cookie Configuration (`shared/config/settings.py`):**
+```python
+cookie_secure: bool = False   # Set to True in production (HTTPS only)
+cookie_samesite: str = "lax"  # "lax" or "strict" for CSRF protection
+cookie_domain: str = ""       # Empty = current domain only
+```
+
+**Cookie Properties:**
+| Property | Value | Purpose |
+|----------|-------|---------|
+| `httponly` | `True` | Prevents JavaScript access (XSS protection) |
+| `secure` | `settings.cookie_secure` | HTTPS-only in production |
+| `samesite` | `"lax"` | CSRF protection while allowing top-level navigation |
+| `path` | `"/api/auth"` | Cookie only sent to auth endpoints |
+| `max_age` | 7 days | Matches refresh token expiration |
+
+**Auth Endpoint Behavior (`rest_api/routers/auth/routes.py`):**
+- `/login`: Sets HttpOnly cookie + returns `refresh_token` in body (backward compat)
+- `/refresh`: Reads from cookie first (`Cookie(alias="refresh_token")`), falls back to body
+- `/logout`: Clears cookie via `response.delete_cookie()`
+
+**Frontend Changes (Dashboard, pwaWaiter):**
+```typescript
+// api.ts - refresh() sends credentials, no body needed
+const response = await fetch(`${API_URL}/api/auth/refresh`, {
+  method: 'POST',
+  credentials: 'include',  // Sends HttpOnly cookie automatically
+})
+
+// authStore.ts - refreshToken removed from localStorage (version 4)
+partialize: (state) => ({
+  token: state.token,
+  user: state.user,
+  isAuthenticated: state.isAuthenticated,
+  // refreshToken no longer persisted - managed via HttpOnly cookie
+})
+```
 
 ### Authentication Methods
 
@@ -1248,6 +1293,11 @@ ALLOWED_ORIGINS=https://yourdomain.com,https://admin.yourdomain.com
 # REQUIRED: Disable debug mode
 DEBUG=false
 ENVIRONMENT=production
+
+# SEC-09: HttpOnly cookie settings for refresh tokens
+COOKIE_SECURE=true                    # HTTPS only (required in production)
+COOKIE_SAMESITE=lax                   # CSRF protection
+COOKIE_DOMAIN=                        # Empty = current domain only
 
 # If using Mercado Pago payments:
 MERCADOPAGO_WEBHOOK_SECRET=<your-webhook-secret>
@@ -1718,27 +1768,36 @@ For customers without phones using paper menus:
 
 ### Round Status Flow (Role-Restricted)
 
-Orders go through Dashboard before reaching kitchen:
+Orders require waiter verification before reaching kitchen:
+
+```
+PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
+(Diner)   (Waiter)   (Admin/Mgr)   (Kitchen)  (Kitchen) (Staff)
+```
 
 | Status | Description | Who can advance? | Next status |
 |--------|-------------|------------------|-------------|
-| `PENDING` | New order from pwaMenu/waiter | ADMIN/MANAGER | `SUBMITTED` |
-| `SUBMITTED` | Manager sent to kitchen | ADMIN/MANAGER | `IN_KITCHEN` |
+| `PENDING` | New order from pwaMenu/waiter | WAITER/ADMIN/MANAGER | `CONFIRMED` |
+| `CONFIRMED` | Waiter verified at table | ADMIN/MANAGER | `SUBMITTED` |
+| `SUBMITTED` | Admin sent to kitchen | KITCHEN/ADMIN/MANAGER | `IN_KITCHEN` |
 | `IN_KITCHEN` | Kitchen working on order | **KITCHEN only** | `READY` |
 | `READY` | Kitchen finished | ADMIN/MANAGER/WAITER | `SERVED` |
 | `SERVED` | Delivered to table | - | - |
 
 **Key behavior:**
-- `ROUND_PENDING` event: Client creates order → to admin AND kitchen channels (Tables view + Kitchen "Pendiente")
-- `ROUND_SUBMITTED` event: Manager sends to kitchen → to admin AND kitchen channels
+- `ROUND_PENDING` event: Diner creates order → to admin AND waiter channels (waiter must verify)
+- `ROUND_CONFIRMED` event: Waiter verified order at table → to admin channel (admin can now send to kitchen)
+- `ROUND_SUBMITTED` event: Admin sends to kitchen → to admin AND kitchen channels
 - Only `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_SERVED` notify diners (session channel)
-- Dashboard cannot change `IN_KITCHEN` → `READY` (must wait for kitchen)
-- Files: `kitchen/rounds.py` (status transitions), `TableSessionModal.tsx` (UI buttons)
+- Kitchen does NOT see PENDING or CONFIRMED orders (only after admin sends to kitchen)
+- pwaWaiter: "Confirmar Pedido" button appears for PENDING rounds in TableDetailModal
+- Dashboard: "Enviar a Cocina" button appears for CONFIRMED rounds in TableSessionModal
+- Files: `kitchen/rounds.py` (status transitions), `TableSessionModal.tsx`, `TableDetailModal.tsx` (UI buttons)
 
-**Kitchen View (3 columns with modal):**
-- "Pendiente" (PENDING): Orders waiting manager/admin authorization (read-only for kitchen)
-- "Nuevos" (SUBMITTED): Orders authorized and ready for kitchen to start
+**Kitchen View (2 columns with modal):**
+- "Nuevos" (SUBMITTED): Orders sent by admin, ready for kitchen to start
 - "En Cocina" (IN_KITCHEN): Orders currently being prepared
+- PENDING and CONFIRMED are NOT shown in kitchen view (handled by waiter/admin)
 - READY rounds are removed from kitchen view and handled by Dashboard/waiters
 - Uses compact `RoundMiniCard` components with `RoundDetailModal` for details
 - Sidebar menu label: "Comandas" (under Cocina)
@@ -1752,6 +1811,7 @@ Tables show visual feedback for order states:
 |-------|--------------|--------------|-----------|
 | `TABLE_SESSION_STARTED` (QR scan) | `ocupada` (red) | `none` | Blue blink |
 | `ROUND_PENDING` (client order) | `ocupada` (red) | `pending` | Yellow pulse |
+| `ROUND_CONFIRMED` (waiter verified) | `ocupada` (red) | `confirmed` | Blue blink |
 | `ROUND_SUBMITTED` (sent to kitchen) | `ocupada` (red) | `submitted` | Blue blink |
 | `ROUND_IN_KITCHEN` (kitchen working) | `ocupada` (red) | `in_kitchen` | Blue blink |
 | `ROUND_READY` (kitchen finished) | `ocupada` (red) | `ready` | Blue blink |
@@ -1762,6 +1822,7 @@ Tables show visual feedback for order states:
 | Status | Badge Color | Label |
 |--------|-------------|-------|
 | `pending` | Yellow | "Pendiente" |
+| `confirmed` | Blue | "Confirmado" |
 | `submitted` | Blue | "En Cocina" |
 | `in_kitchen` | Blue | "En Cocina" |
 | `ready_with_kitchen` | Orange | "Listo + Cocina" |
@@ -1773,32 +1834,37 @@ Tables show visual feedback for order states:
 **Order Status Priority (Multi-Round):**
 When a table has multiple rounds, the aggregate status is calculated with these rules:
 
-1. **Ready + Not Ready = Combined:** If ANY round is `ready` AND any is NOT ready (pending/submitted/in_kitchen),
+1. **Ready + Not Ready = Combined:** If ANY round is `ready` AND any is NOT ready (pending/confirmed/submitted/in_kitchen),
    show "Listo + Cocina" to alert waiter that items are ready for pickup
 2. **All Pending:** If ALL rounds are `pending` (none ready), show "Pendiente"
-3. **Otherwise:** Show the "worst" (lowest priority) status from remaining rounds
+3. **All Confirmed:** If ALL rounds are `confirmed` (none pending/ready), show "Confirmado"
+4. **Otherwise:** Show the "worst" (lowest priority) status from remaining rounds
 
 | Priority | Statuses | Display | Badge Color |
 |----------|----------|---------|-------------|
 | 0 (highest) | `ready` + any not ready | "Listo + Cocina" | Orange |
-| 1 | `pending` (all) | "Pendiente" | Yellow |
-| 2 | `submitted`, `in_kitchen` | "En Cocina" | Blue |
-| 3 | `ready` (all) | "Listo" | Green |
-| 4 | `served` | "Servido" | Gray |
-| 5 | `none` | No badge | - |
+| 1 | `pending` | "Pendiente" | Yellow |
+| 2 | `confirmed` | "Confirmado" | Blue |
+| 3 | `submitted`, `in_kitchen` | "En Cocina" | Blue |
+| 4 | `ready` (all) | "Listo" | Green |
+| 5 | `served` | "Servido" | Gray |
+| 6 | `none` | No badge | - |
 
 **Example Scenarios:**
 | Rounds | Aggregate Status | Reason |
 |--------|------------------|--------|
 | 1 ready + 1 pending | Listo + Cocina | Ready items + more coming |
+| 1 ready + 1 confirmed | Listo + Cocina | Ready items + waiter verified pending |
 | 1 ready + 1 in_kitchen | Listo + Cocina | Ready items + more in kitchen |
-| 2 pending | Pendiente | All pending |
-| 1 pending + 1 submitted | Pendiente | None ready yet |
+| 2 pending | Pendiente | All pending, waiter needs to verify |
+| 1 pending + 1 confirmed | Pendiente | At least one pending |
+| 2 confirmed | Confirmado | All verified, admin can send to kitchen |
+| 1 confirmed + 1 submitted | Confirmado | Worst status wins |
 | 2 submitted | En Cocina | All in kitchen |
 | 2 ready | Listo | All ready |
 
 **Combined Status:** When a table has at least one round `ready` AND at least one round NOT ready
-(pending/submitted/in_kitchen), the status shows "Listo + Cocina" with an orange badge (`bg-orange-400`, black text).
+(pending/confirmed/submitted/in_kitchen), the status shows "Listo + Cocina" with an orange badge (`bg-orange-400`, black text).
 This alerts the waiter that some items are ready for pickup while more orders are still pending.
 The card also receives a 5-second continuous blink animation (`animate-ready-kitchen-blink`).
 
@@ -2060,6 +2126,18 @@ If the table doesn't change to "ocupada" when a diner scans QR in pwaMenu:
 4. Check WS Gateway logs for `TABLE_SESSION_STARTED` event dispatch
 5. Verify Dashboard is connected to WebSocket (check browser console for connection status)
 
+### pwaMenu 404 on API calls
+If pwaMenu gets 404 errors like `POST http://localhost:8000/tables/code/INT-01/session`:
+- The URL is missing `/api` prefix
+- **Fix:** Ensure `pwaMenu/.env` has the full path:
+```bash
+VITE_API_URL=http://localhost:8000/api   # Correct - includes /api
+# NOT: http://localhost:8000             # Wrong - missing /api
+```
+
+### Browser console "listener indicated asynchronous response" error
+The error `"A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received"` is **not from your code** - it's caused by browser extensions (React DevTools, Redux DevTools, ad blockers). It does not affect application functionality. To verify, test in incognito mode without extensions.
+
 ---
 
 ## QA Status (January 2026)
@@ -2070,6 +2148,19 @@ All builds verified passing:
 - **pwaWaiter**: Build passes ✅
 
 **980+ defects fixed** across 23 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete details.
+
+**pwaWaiter Sector Grouping (Jan 31, 2026):**
+- Added `sector_id` and `sector_name` to TableCard schema (backend/shared/utils/schemas.py)
+- Added eager loading of `sector_rel` in waiter tables endpoint
+- Implemented table grouping by sector in TableGrid (like Dashboard)
+- Added sector headers with count badges and urgent indicators
+- Added ROUND_ITEM_DELETED event handler for item deletion notifications
+
+**WebSocket Integration Audit (Jan 30, 2026):**
+- Added `ROUND_CONFIRMED` to Dashboard WSEventType
+- Added missing event subscriptions: `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_CANCELED`
+- Fixed pwaMenu missing `/api` prefix in VITE_API_URL
+- Added LCP optimizations: preconnect, preload hero image, fetchpriority="high"
 
 **WebSocket Integration Audit (Jan 28, 2026):**
 - CRIT-01: Fixed race condition on WS reconnection (duplicate connections)

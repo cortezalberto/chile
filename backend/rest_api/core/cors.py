@@ -23,6 +23,13 @@ DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:5178",
     "http://127.0.0.1:5179",
     "http://127.0.0.1:5180",
+    # Local network IP for testing on other devices
+    "http://192.168.1.106:5173",
+    "http://192.168.1.106:5176",
+    "http://192.168.1.106:5177",
+    "http://192.168.1.106:5178",
+    "http://192.168.1.106:5179",
+    "http://192.168.1.106:5180",
 ]
 
 # Allowed HTTP methods

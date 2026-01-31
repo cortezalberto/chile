@@ -8,14 +8,17 @@ from shared.config.settings import settings
 
 # =============================================================================
 # Round lifecycle events
+# Flow: PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
 # =============================================================================
 
-ROUND_PENDING = "ROUND_PENDING"      # Client created order (visible in Tables and Kitchen "Pendiente")
-ROUND_SUBMITTED = "ROUND_SUBMITTED"  # Manager sent to kitchen (visible in Kitchen "Nuevo")
+ROUND_PENDING = "ROUND_PENDING"      # Client created order (waiter must verify at table)
+ROUND_CONFIRMED = "ROUND_CONFIRMED"  # Waiter verified order at table (admin can now send to kitchen)
+ROUND_SUBMITTED = "ROUND_SUBMITTED"  # Admin/Manager sent to kitchen (visible in Kitchen "Nuevo")
 ROUND_IN_KITCHEN = "ROUND_IN_KITCHEN"
 ROUND_READY = "ROUND_READY"
 ROUND_SERVED = "ROUND_SERVED"
 ROUND_CANCELED = "ROUND_CANCELED"
+ROUND_ITEM_DELETED = "ROUND_ITEM_DELETED"  # Waiter deleted item from pending/confirmed round
 
 # =============================================================================
 # Service call events

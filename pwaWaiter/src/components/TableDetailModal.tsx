@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { tablesAPI, roundsAPI, serviceCallsAPI } from '../services/api'
+import { tablesAPI, roundsAPI, serviceCallsAPI, type DeleteRoundItemResponse } from '../services/api'
 import { wsService } from '../services/websocket'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { TableStatusBadge, RoundStatusBadge } from './StatusBadge'
 import { formatTableCode, formatPrice, formatTime } from '../utils/format'
 import { WS_EVENT_TYPES } from '../utils/constants'
-import type { TableCard, TableSessionDetail, RoundDetail, WSEventType, RoundStatus } from '../types'
+import type { TableCard, TableSessionDetail, RoundDetail, RoundItemDetail, WSEventType, RoundStatus } from '../types'
 
 interface TableDetailModalProps {
   table: TableCard | null
@@ -64,6 +64,13 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
 
   // Service call resolve state
   const [isResolvingCall, setIsResolvingCall] = useState(false)
+
+  // Round confirmation state (PENDING → CONFIRMED)
+  const [isConfirmingRound, setIsConfirmingRound] = useState<number | null>(null)
+
+  // Delete item state
+  const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ roundId: number; item: RoundItemDetail } | null>(null)
 
   // Refs for WS event handling
   const tableIdRef = useRef(table?.table_id)
@@ -130,11 +137,13 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
     if (!isOpen) return
 
     const relevantEvents: WSEventType[] = [
-      WS_EVENT_TYPES.ROUND_PENDING,  // New round created by customer
+      WS_EVENT_TYPES.ROUND_PENDING,    // New round created by customer
+      WS_EVENT_TYPES.ROUND_CONFIRMED,  // Waiter confirmed order at table
       WS_EVENT_TYPES.ROUND_SUBMITTED,
       WS_EVENT_TYPES.ROUND_IN_KITCHEN,
       WS_EVENT_TYPES.ROUND_READY,
       WS_EVENT_TYPES.ROUND_SERVED,
+      WS_EVENT_TYPES.ROUND_ITEM_DELETED, // Item deleted from round
       WS_EVENT_TYPES.SERVICE_CALL_CREATED,
       WS_EVENT_TYPES.SERVICE_CALL_ACKED,
       WS_EVENT_TYPES.SERVICE_CALL_CLOSED,
@@ -213,6 +222,56 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
     }
   }
 
+  // Handle confirm round (PENDING → CONFIRMED)
+  // Waiter verifies order at table before admin sends to kitchen
+  const handleConfirmRound = async (roundId: number) => {
+    if (isConfirmingRound === roundId) return
+
+    setIsConfirmingRound(roundId)
+    try {
+      await roundsAPI.confirmRound(roundId)
+      await loadSessionDetail()
+    } catch (err) {
+      console.error('Failed to confirm round:', err)
+    } finally {
+      setIsConfirmingRound(null)
+    }
+  }
+
+  // Prompt to delete an item from a round
+  const promptDeleteItem = (roundId: number, item: RoundItemDetail) => {
+    setDeleteConfirm({ roundId, item })
+  }
+
+  // Handle delete item (after confirmation)
+  const handleDeleteItem = async () => {
+    if (!deleteConfirm) return
+
+    const { roundId, item } = deleteConfirm
+    setDeletingItemId(item.id)
+    try {
+      const result: DeleteRoundItemResponse = await roundsAPI.deleteItem(roundId, item.id)
+      if (result.success) {
+        // Reload session detail to reflect changes
+        await loadSessionDetail()
+      }
+    } catch (err) {
+      console.error('Failed to delete item:', err)
+    } finally {
+      setDeletingItemId(null)
+      setDeleteConfirm(null)
+    }
+  }
+
+  const cancelDeleteConfirm = () => {
+    setDeleteConfirm(null)
+  }
+
+  // Check if round allows item deletion (only PENDING or CONFIRMED)
+  const canDeleteItems = (round: RoundDetail): boolean => {
+    return round.status === 'PENDING' || round.status === 'CONFIRMED'
+  }
+
   // Calculate round subtotal
   const getRoundSubtotal = (round: RoundDetail): number => {
     return round.items.reduce((sum, item) => sum + item.unit_price_cents * item.qty, 0)
@@ -224,9 +283,10 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
 
     switch (roundFilter) {
       case 'PENDING':
-        // Include PENDING (new from customer), SUBMITTED, and IN_KITCHEN
+        // Include PENDING (new from customer), CONFIRMED (verified by waiter),
+        // SUBMITTED, and IN_KITCHEN
         return sessionDetail.rounds.filter(
-          (r) => r.status === 'PENDING' || r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN'
+          (r) => r.status === 'PENDING' || r.status === 'CONFIRMED' || r.status === 'SUBMITTED' || r.status === 'IN_KITCHEN'
         )
       case 'READY':
         return sessionDetail.rounds.filter((r) => r.status === 'READY')
@@ -426,9 +486,28 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
                         {/* Round items - sorted by category */}
                         <div className="space-y-1 mb-2">
                           {[...round.items].sort((a, b) => getCategoryOrder(a.category_name) - getCategoryOrder(b.category_name)).map((item) => (
-                            <div key={item.id} className="text-xs">
+                            <div key={item.id} className="text-xs group">
                               <div className="flex items-center justify-between whitespace-nowrap">
-                                <span className="text-gray-900">
+                                <span className="text-gray-900 flex items-center gap-1">
+                                  {/* Delete button - only for PENDING or CONFIRMED rounds */}
+                                  {canDeleteItems(round) && (
+                                    <button
+                                      onClick={() => promptDeleteItem(round.id, item)}
+                                      disabled={deletingItemId === item.id}
+                                      className={`
+                                        w-5 h-5 flex items-center justify-center
+                                        text-red-400 hover:text-red-600 hover:bg-red-50
+                                        transition-colors rounded
+                                        ${deletingItemId === item.id ? 'opacity-50 cursor-wait' : ''}
+                                      `}
+                                      title="Eliminar item"
+                                      aria-label={`Eliminar ${item.product_name}`}
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                      </svg>
+                                    </button>
+                                  )}
                                   {item.qty}x {item.product_name}
                                   {item.diner_name && (
                                     <span
@@ -462,15 +541,29 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
                           <span className="text-gray-500 text-xs">
                             Subtotal: {formatPrice(getRoundSubtotal(round))}
                           </span>
-                          {round.status === 'READY' && (
-                            <Button
-                              variant="primary"
-                              size="sm"
-                              onClick={() => promptMarkServed(round.id, round.round_number)}
-                            >
-                              Servido
-                            </Button>
-                          )}
+                          <div className="flex gap-2">
+                            {/* Confirm button for PENDING rounds - waiter verifies at table */}
+                            {round.status === 'PENDING' && (
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                onClick={() => handleConfirmRound(round.id)}
+                                disabled={isConfirmingRound === round.id}
+                              >
+                                {isConfirmingRound === round.id ? 'Confirmando...' : 'Confirmar Pedido'}
+                              </Button>
+                            )}
+                            {/* Served button for READY rounds */}
+                            {round.status === 'READY' && (
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                onClick={() => promptMarkServed(round.id, round.round_number)}
+                              >
+                                Servido
+                              </Button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -547,7 +640,7 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
         </div>
       </div>
 
-      {/* Confirmation dialog */}
+      {/* Confirmation dialog - Mark as served */}
       <ConfirmDialog
         isOpen={confirmRoundId !== null}
         title="Marcar como servido"
@@ -557,6 +650,19 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
         onConfirm={handleMarkServed}
         onCancel={cancelConfirm}
         isLoading={isMarkingServed}
+      />
+
+      {/* Confirmation dialog - Delete item */}
+      <ConfirmDialog
+        isOpen={deleteConfirm !== null}
+        title="Eliminar item"
+        message={deleteConfirm ? `¿Eliminar ${deleteConfirm.item.qty}x ${deleteConfirm.item.product_name} de la ronda?` : ''}
+        confirmLabel="Eliminar"
+        cancelLabel="Cancelar"
+        onConfirm={handleDeleteItem}
+        onCancel={cancelDeleteConfirm}
+        isLoading={deletingItemId !== null}
+        variant="danger"
       />
     </div>
   )

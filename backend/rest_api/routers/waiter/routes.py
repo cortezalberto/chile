@@ -447,6 +447,99 @@ def get_my_sector_assignments(
     )
 
 
+class BranchAssignmentVerifyOutput(BaseModel):
+    """Output for branch assignment verification."""
+    is_assigned: bool
+    branch_id: int
+    branch_name: str | None = None
+    assignment_date: date
+    sectors: list[SectorAssignmentOutput] = []
+    message: str
+
+
+@router.get("/verify-branch-assignment", response_model=BranchAssignmentVerifyOutput)
+def verify_branch_assignment(
+    branch_id: int = Query(..., description="Branch ID to verify assignment for"),
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> BranchAssignmentVerifyOutput:
+    """
+    Verify if the current waiter is assigned to work at a specific branch today.
+
+    Returns whether the waiter has any sector assignments for today at the given branch.
+    Used by pwaWaiter to validate branch selection before showing tables.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    user_branch_ids = ctx.get("branch_ids", [])
+    today = date.today()
+
+    # First check if user has access to this branch at all
+    if branch_id not in user_branch_ids:
+        return BranchAssignmentVerifyOutput(
+            is_assigned=False,
+            branch_id=branch_id,
+            branch_name=None,
+            assignment_date=today,
+            sectors=[],
+            message="No tienes acceso a esta sucursal",
+        )
+
+    # Get branch name
+    branch = db.scalar(select(Branch).where(Branch.id == branch_id))
+    branch_name = branch.name if branch else None
+
+    # Query assignments for this waiter at this branch today
+    assignments = db.execute(
+        select(WaiterSectorAssignment)
+        .options(joinedload(WaiterSectorAssignment.sector))
+        .where(
+            WaiterSectorAssignment.waiter_id == waiter_id,
+            WaiterSectorAssignment.tenant_id == tenant_id,
+            WaiterSectorAssignment.branch_id == branch_id,
+            WaiterSectorAssignment.assignment_date == today,
+            WaiterSectorAssignment.is_active.is_(True),
+        )
+    ).scalars().unique().all()
+
+    if not assignments:
+        return BranchAssignmentVerifyOutput(
+            is_assigned=False,
+            branch_id=branch_id,
+            branch_name=branch_name,
+            assignment_date=today,
+            sectors=[],
+            message=f"No estás asignado a {branch_name or 'esta sucursal'} hoy",
+        )
+
+    # Build sector list
+    sectors = []
+    for assignment in assignments:
+        sector = assignment.sector
+        if sector and sector.is_active:
+            sectors.append(
+                SectorAssignmentOutput(
+                    sector_id=sector.id,
+                    sector_name=sector.name,
+                    sector_prefix=sector.prefix,
+                    branch_id=branch_id,
+                    assignment_date=today,
+                    shift=assignment.shift,
+                )
+            )
+
+    return BranchAssignmentVerifyOutput(
+        is_assigned=True,
+        branch_id=branch_id,
+        branch_name=branch_name,
+        assignment_date=today,
+        sectors=sectors,
+        message=f"Asignado a {branch_name} - {len(sectors)} sector(es)",
+    )
+
+
 @router.get("/my-tables", response_model=list[dict])
 def get_my_assigned_tables(
     assignment_date: date = Query(default=None, description="Date for assignments (defaults to today)"),
@@ -1599,6 +1692,152 @@ def get_branch_menu_compact(
         branch_name=branch.name,
         categories=result_categories,
         total_products=total_products,
+    )
+
+
+# =============================================================================
+# Round Item Management
+# =============================================================================
+
+
+class DeleteRoundItemResponse(BaseModel):
+    """Response for deleting a round item."""
+    success: bool
+    round_id: int
+    item_id: int
+    remaining_items: int
+    round_deleted: bool = False  # True if round was deleted because it became empty
+    message: str
+
+
+@router.delete("/rounds/{round_id}/items/{item_id}", response_model=DeleteRoundItemResponse)
+async def delete_round_item(
+    round_id: int,
+    item_id: int,
+    db: Session = Depends(get_db),
+    ctx: dict[str, Any] = Depends(current_user_context),
+) -> DeleteRoundItemResponse:
+    """
+    Delete an item from a round.
+
+    Only allowed for rounds in PENDING or CONFIRMED status (before being sent to kitchen).
+    If the round becomes empty after deletion, the entire round is deleted.
+
+    Requires WAITER, MANAGER, or ADMIN role.
+    """
+    require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
+
+    waiter_id = int(ctx["sub"])
+    tenant_id = ctx.get("tenant_id")
+    branch_ids = ctx.get("branch_ids", [])
+
+    # Find the round with items and table info
+    round_obj = db.scalar(
+        select(Round)
+        .options(
+            selectinload(Round.items),
+            joinedload(Round.session).joinedload(TableSession.table),
+        )
+        .where(
+            Round.id == round_id,
+            Round.tenant_id == tenant_id,
+        )
+    )
+
+    if not round_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Ronda {round_id} no encontrada",
+        )
+
+    # Verify branch access
+    if round_obj.branch_id not in branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes acceso a esta sucursal",
+        )
+
+    # Only allow deletion for PENDING or CONFIRMED rounds
+    if round_obj.status not in ["PENDING", "CONFIRMED"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No se puede eliminar items de una ronda en estado {round_obj.status}. Solo se permite en PENDING o CONFIRMED.",
+        )
+
+    # Find the item
+    item = next((i for i in round_obj.items if i.id == item_id), None)
+    if not item:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Item {item_id} no encontrado en la ronda {round_id}",
+        )
+
+    # Delete the item
+    db.delete(item)
+
+    # Check remaining items
+    remaining_items = len([i for i in round_obj.items if i.id != item_id])
+    round_deleted = False
+
+    # If round is now empty, delete it
+    if remaining_items == 0:
+        db.delete(round_obj)
+        round_deleted = True
+        logger.info(
+            "Round deleted (no items remaining)",
+            round_id=round_id,
+            waiter_id=waiter_id,
+        )
+
+    from shared.infrastructure.db import safe_commit
+    safe_commit(db)
+
+    # Publish event for real-time UI updates
+    session = round_obj.session
+    table = session.table if session else None
+    sector_id = table.sector_id if table else None
+
+    try:
+        redis = await get_redis_client()
+        # Use a custom event type for item deletion
+        from shared.infrastructure.events import publish_event, Event
+        event = Event(
+            type="ROUND_ITEM_DELETED",
+            tenant_id=tenant_id,
+            branch_id=round_obj.branch_id,
+            table_id=table.id if table else 0,
+            session_id=round_obj.table_session_id,
+            round_id=round_id,
+            item_id=item_id,
+            round_deleted=round_deleted,
+            actor_user_id=waiter_id,
+            actor_role="WAITER",
+            sector_id=sector_id,
+        )
+        # Publish to admin and waiter channels
+        from shared.infrastructure.events import channel_branch_admin, channel_branch_waiters
+        await publish_event(redis, channel_branch_admin(round_obj.branch_id), event)
+        await publish_event(redis, channel_branch_waiters(round_obj.branch_id), event)
+        logger.info(
+            "Round item deleted",
+            round_id=round_id,
+            item_id=item_id,
+            waiter_id=waiter_id,
+            remaining_items=remaining_items,
+            round_deleted=round_deleted,
+        )
+    except Exception as e:
+        logger.error("Failed to publish ROUND_ITEM_DELETED event", error=str(e))
+
+    message = "Ronda eliminada (sin items)" if round_deleted else "Item eliminado correctamente"
+
+    return DeleteRoundItemResponse(
+        success=True,
+        round_id=round_id,
+        item_id=item_id,
+        remaining_items=remaining_items,
+        round_deleted=round_deleted,
+        message=message,
     )
 
 
