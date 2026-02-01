@@ -230,6 +230,9 @@ async def update_round_status(
     # Update status
     # ROUTER-HIGH-02 FIX: Add error handling for commit
     round_obj.status = new_status
+    # Set confirmed_by_user_id when waiter confirms the order
+    if new_status == "CONFIRMED":
+        round_obj.confirmed_by_user_id = int(ctx["sub"])
     # Set submitted_at when sending to kitchen
     if new_status == "SUBMITTED" and round_obj.submitted_at is None:
         round_obj.submitted_at = datetime.now(timezone.utc)

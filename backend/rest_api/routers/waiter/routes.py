@@ -1772,6 +1772,9 @@ async def delete_round_item(
             detail=f"Item {item_id} no encontrado en la ronda {round_id}",
         )
 
+    # SYNC FIX: Capture product_id before deletion for frontend sync
+    deleted_product_id = item.product_id
+
     # Delete the item
     db.delete(item)
 
@@ -1809,15 +1812,18 @@ async def delete_round_item(
             session_id=round_obj.table_session_id,
             round_id=round_id,
             item_id=item_id,
+            product_id=deleted_product_id,  # SYNC FIX: For frontend cart sync
             round_deleted=round_deleted,
             actor_user_id=waiter_id,
             actor_role="WAITER",
             sector_id=sector_id,
         )
-        # Publish to admin and waiter channels
-        from shared.infrastructure.events import channel_branch_admin, channel_branch_waiters
+        # Publish to admin, waiter, and diner channels
+        from shared.infrastructure.events import channel_branch_admin, channel_branch_waiters, channel_table_session
         await publish_event(redis, channel_branch_admin(round_obj.branch_id), event)
         await publish_event(redis, channel_branch_waiters(round_obj.branch_id), event)
+        # SYNC FIX: Also notify diners so their cart updates in real-time
+        await publish_event(redis, channel_table_session(round_obj.table_session_id), event)
         logger.info(
             "Round item deleted",
             round_id=round_id,

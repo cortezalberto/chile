@@ -91,15 +91,20 @@ def _safe_json_parse(value: Optional[str], default: list | dict | None = None) -
 # Redis Cache Configuration
 # =============================================================================
 
-from shared.infrastructure.redis.constants import BRANCH_PRODUCTS_CACHE_TTL
+from shared.infrastructure.redis.constants import (
+    BRANCH_PRODUCTS_CACHE_TTL,
+    get_branch_products_cache_key,
+)
 
 # Cache TTL: 5 minutes for branch product views
 CACHE_TTL_SECONDS = BRANCH_PRODUCTS_CACHE_TTL
+# FAIL-LOW-04 FIX: Max jitter for cache TTL (prevents stampede)
+CACHE_TTL_JITTER_SECONDS = 30
 
 
 def _get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
     """
-    MED-03 FIX: Generate Redis cache key for branch products.
+    PERF-MED-04 FIX: Uses centralized key function from constants.
     SVC-MED-03 FIX: Added defensive validation of inputs.
 
     Args:
@@ -107,7 +112,7 @@ def _get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
         tenant_id: Tenant ID for multi-tenant isolation (must be positive int)
 
     Returns:
-        Formatted cache key string: "branch:{branch_id}:tenant:{tenant_id}:products_complete"
+        Formatted cache key string
 
     Raises:
         ValueError: If branch_id or tenant_id are invalid
@@ -118,7 +123,8 @@ def _get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
     if not isinstance(tenant_id, int) or tenant_id <= 0:
         raise ValueError(f"Invalid tenant_id: {tenant_id}")
 
-    return f"branch:{branch_id}:tenant:{tenant_id}:products_complete"
+    # PERF-MED-04 FIX: Use centralized function
+    return get_branch_products_cache_key(branch_id, tenant_id)
 
 
 # =============================================================================
@@ -570,11 +576,15 @@ async def get_products_complete_for_branch_cached(
     # Query from database
     results = get_products_complete_for_branch(db, branch_id, tenant_id)
 
-    # Cache the results
+    # Cache the results with jitter to prevent stampede
     try:
+        import random
         redis = await get_redis_pool()
-        await redis.setex(cache_key, CACHE_TTL_SECONDS, json.dumps(results))
-        logger.debug("Cached products for branch", count=len(results), branch_id=branch_id)
+        # FAIL-LOW-04 FIX: Add jitter to prevent cache stampede
+        jitter = random.randint(-CACHE_TTL_JITTER_SECONDS, CACHE_TTL_JITTER_SECONDS)
+        ttl_with_jitter = CACHE_TTL_SECONDS + jitter
+        await redis.setex(cache_key, ttl_with_jitter, json.dumps(results))
+        logger.debug("Cached products for branch", count=len(results), branch_id=branch_id, ttl=ttl_with_jitter)
     except Exception as e:
         logger.warning("Failed to cache branch products", error=str(e), branch_id=branch_id)
 
@@ -634,7 +644,8 @@ async def invalidate_all_branch_caches_for_tenant(tenant_id: int) -> int:
     # LOG-01 FIX: Use structured logging instead of f-strings
     try:
         redis = await get_redis_pool()
-        pattern = f"branch:*:tenant:{tenant_id}:products_complete"
+        # PERF-MED-04 FIX: Pattern matches new cache key format
+        pattern = f"cache:branch:*:tenant:{tenant_id}:products"
         keys = []
         # SVC-MED-08 FIX: Use count parameter to limit batch size and cap total
         async for key in redis.scan_iter(pattern, count=100):

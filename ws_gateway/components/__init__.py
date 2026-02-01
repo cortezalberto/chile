@@ -151,6 +151,14 @@ from ws_gateway.components.data.sector_repository import (
 )
 
 # =============================================================================
+# Redis Utilities (REDIS-01/02 FIX)
+# =============================================================================
+from ws_gateway.components.redis.lua_scripts import (
+    execute_rate_limit_check,
+    pipeline_broadcast_acks,
+)
+
+# =============================================================================
 # Public API
 # =============================================================================
 __all__ = [
@@ -238,4 +246,7 @@ __all__ = [
     "get_waiter_sector_ids",
     "cleanup_sector_repository",
     "reset_sector_repository",
+    # Redis
+    "execute_rate_limit_check",
+    "pipeline_broadcast_acks",
 ]

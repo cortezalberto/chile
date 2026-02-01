@@ -128,6 +128,37 @@ class LockManager:
         """Total number of locks cleaned since startup."""
         return self._locks_cleaned
 
+    async def get_tenant_branch_lock(
+        self,
+        tenant_id: int | None,
+        branch_id: int,
+    ) -> asyncio.Lock:
+        """
+        SCALE-MED-01 FIX: Get or create a lock for a specific tenant's branch.
+        
+        Uses composite key (tenant_id, branch_id) to prevent lock collisions
+        between branches with the same ID on different tenants. This is
+        important for multi-tenant deployments with many simultaneous branches.
+        
+        Falls back to branch_id-only key if tenant_id is None (legacy support).
+        
+        Args:
+            tenant_id: The tenant ID (or None for legacy single-tenant).
+            branch_id: The branch ID to get a lock for.
+            
+        Returns:
+            asyncio.Lock for the specified tenant branch.
+        """
+        # Use composite key for tenant isolation, or plain branch_id for legacy
+        if tenant_id is not None:
+            # Use simple hash for performance, avoiding string allocation
+            # Magic number chosen to minimize collisions while keeping ints manageable
+            lock_key = tenant_id * 1_000_000 + branch_id
+        else:
+            lock_key = branch_id
+        
+        return await self.get_branch_lock(lock_key)
+
     async def get_branch_lock(self, branch_id: int) -> asyncio.Lock:
         """
         Get or create a lock for a specific branch.

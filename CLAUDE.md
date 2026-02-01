@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Table of Contents
 
+- [Quick Reference](#quick-reference)
 - [Project Overview](#project-overview)
 - [Quick Start Commands](#quick-start-commands)
 - [Architecture](#architecture)
@@ -19,9 +20,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [Documentation](#documentation)
 - [IA-Native Governance Framework](#ia-native-governance-framework)
 - [Common Issues](#common-issues)
-- [QA Status](#qa-status-january-2026)
+- [QA Status](#qa-status)
 - [Key Architecture Modules](#key-architecture-modules)
 - [WebSocket Gateway Utilities](#websocket-gateway-utilities)
+
+---
+
+## Quick Reference
+
+**Start Development (Docker - recommended):**
+```bash
+cd devOps && docker compose up -d --build   # All services
+docker compose logs -f backend ws_gateway   # Watch logs
+```
+
+**Start Frontends:**
+```bash
+cd Dashboard && npm run dev    # Port 5177
+cd pwaMenu && npm run dev      # Port 5176
+cd pwaWaiter && npm run dev    # Port 5178
+```
+
+**Run Tests:**
+```bash
+cd Dashboard && npm test -- src/stores/branchStore.test.ts  # Single file
+cd backend && python -m pytest tests/test_auth.py -v        # Backend single file
+```
+
+**Test Users:** `admin@demo.com` / `admin123` (ADMIN), `waiter@demo.com` / `waiter123` (WAITER)
+
+**Key Ports:** REST API `:8000` | WebSocket `:8001` | Redis `:6380` | PostgreSQL `:5432`
+
+**Critical Patterns:**
+- Zustand: Always use selectors `const x = useStore(selectX)`, never destructure
+- Backend: Use Domain Services (`rest_api/services/domain/`), not CRUDFactory
+- JWT: Access 15min, Refresh 7 days, Table token 3 hours
+- Prices: Store in cents (12550 = $125.50)
 
 ---
 
@@ -317,6 +351,7 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
 Events:
   # Round lifecycle (PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED)
   ROUND_PENDING, ROUND_CONFIRMED, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
+  ROUND_ITEM_DELETED  # Waiter deletes item from round (syncs to all frontends)
   # Service calls
   SERVICE_CALL_CREATED, SERVICE_CALL_ACKED, SERVICE_CALL_CLOSED
   # Billing
@@ -355,6 +390,7 @@ Close codes:
 | `ROUND_READY` | ✅ | ✅ | ✅ | ✅ | |
 | `ROUND_SERVED` | ✅ | ✅ | ✅ | ✅ | |
 | `ROUND_CANCELED` | ✅ | ✅ | ✅ | ✅ | |
+| `ROUND_ITEM_DELETED` | ✅ | ❌ | ✅ | ✅ | Syncs cart removal across all diners |
 
 **Note:** `ROUND_PENDING` and `TABLE_SESSION_STARTED` events are sent to ALL waiters in the branch (not sector-filtered) to ensure new order notifications reach all assigned staff.
 
@@ -1921,6 +1957,11 @@ View active order/session details when clicking on a table in `/branches/tables`
 - [ws_gateway/arquiws_gateway.md](ws_gateway/arquiws_gateway.md): WebSocket Gateway architecture deep-dive (components, patterns, flows)
 - [devOps/README.md](devOps/README.md): Infrastructure and startup scripts (Docker, PostgreSQL, Redis)
 
+### Architecture Deep-Dive (Narrative Prose)
+- [trabajoRedis.md](trabajoRedis.md): Redis architecture - Pub/Sub, pools, channels, caching, rate limiting
+- [compartidoSha.md](compartidoSha.md): Shared folder - Configuration, security, database, events, utilities
+- [socketGat.md](socketGat.md): WebSocket Gateway - Connection management, broadcasting, resilience patterns
+
 ### QA Reports
 - [REPORTE_TRAZABILIDAD.md](REPORTE_TRAZABILIDAD.md): Complete traceability report with test traces
 - [RESULTADOS_QA.md](RESULTADOS_QA.md): QA test results
@@ -2140,46 +2181,14 @@ The error `"A listener indicated an asynchronous response by returning true, but
 
 ---
 
-## QA Status (January 2026)
+## QA Status
 
 All builds verified passing:
 - **Dashboard**: 100 Vitest tests ✅
 - **pwaMenu**: 108 Vitest tests ✅
 - **pwaWaiter**: Build passes ✅
 
-**980+ defects fixed** across 23 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete details.
-
-**pwaWaiter Sector Grouping (Jan 31, 2026):**
-- Added `sector_id` and `sector_name` to TableCard schema (backend/shared/utils/schemas.py)
-- Added eager loading of `sector_rel` in waiter tables endpoint
-- Implemented table grouping by sector in TableGrid (like Dashboard)
-- Added sector headers with count badges and urgent indicators
-- Added ROUND_ITEM_DELETED event handler for item deletion notifications
-
-**WebSocket Integration Audit (Jan 30, 2026):**
-- Added `ROUND_CONFIRMED` to Dashboard WSEventType
-- Added missing event subscriptions: `ROUND_IN_KITCHEN`, `ROUND_READY`, `ROUND_CANCELED`
-- Fixed pwaMenu missing `/api` prefix in VITE_API_URL
-- Added LCP optimizations: preconnect, preload hero image, fetchpriority="high"
-
-**WebSocket Integration Audit (Jan 28, 2026):**
-- CRIT-01: Fixed race condition on WS reconnection (duplicate connections)
-- CRIT-02: Fixed multiple setTimeout tracking with Maps
-- HIGH-06: Added branch filtering in Kitchen page
-- HIGH-07: Added ROUND_CANCELED event handler
-- HIGH-09: Added role verification in Kitchen page
-- MED-01: Fixed memory leak from empty listener Sets
-- MED-04: Limited roundStatuses growth (cleanup when all served)
-- MED-06: Added table_id validation in events
-- MED-08: Added debounce for TABLE_STATUS_CHANGED API calls
-
-**Database Model Refactoring (Jan 26, 2026):**
-- 28 model inconsistencies fixed across 11 files
-- Added `tenant_id` to 5 catalog tables for multi-tenant isolation
-- Added 8 UniqueConstraints for data integrity
-- Added 7 missing relationships for FK navigation
-- Added 10+ composite indexes for query performance
-- See [terrible.md](terrible.md) for detailed audit report
+**980+ defects fixed** across 23 audits. See [AUDIT_HISTORY.md](AUDIT_HISTORY.md) for complete changelog and details.
 
 ---
 

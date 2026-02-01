@@ -10,7 +10,7 @@ from datetime import datetime, timezone, date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, func
 
 from shared.infrastructure.db import get_db
@@ -27,6 +27,7 @@ from rest_api.models import (
     Product,
     Category,
     WaiterSectorAssignment,
+    User,
 )
 from shared.security.auth import (
     current_user_context,
@@ -236,6 +237,26 @@ def get_waiter_tables(
             if check.table_session_id not in check_status_by_session:
                 check_status_by_session[check.table_session_id] = check.status
 
+    # 5. Batch fetch confirmed_by waiter name per session
+    # Get the most recent round with confirmed_by_user_id for each session
+    confirmed_by_name_by_session: dict[int, str] = {}
+    if active_session_ids:
+        # Query rounds with confirmed_by_user_id, joined with User to get last_name
+        confirmed_rounds_query = db.execute(
+            select(Round.table_session_id, User.last_name)
+            .join(User, Round.confirmed_by_user_id == User.id)
+            .where(
+                Round.table_session_id.in_(active_session_ids),
+                Round.confirmed_by_user_id.isnot(None),
+                Round.is_active.is_(True),
+            )
+            .order_by(Round.table_session_id, Round.created_at.desc())
+        ).all()
+        # Keep only the most recent confirmed_by per session
+        for session_id, last_name in confirmed_rounds_query:
+            if session_id not in confirmed_by_name_by_session:
+                confirmed_by_name_by_session[session_id] = last_name
+
     # Build result using pre-fetched data
     result = []
     for table in tables:
@@ -245,6 +266,7 @@ def get_waiter_tables(
         active_call_ids = calls_by_session.get(session_id, []) if session_id else []
         pending_calls = len(active_call_ids)
         check_status = check_status_by_session.get(session_id) if session_id else None
+        confirmed_by_name = confirmed_by_name_by_session.get(session_id) if session_id else None
 
         result.append(
             TableCard(
@@ -258,6 +280,7 @@ def get_waiter_tables(
                 active_service_call_ids=active_call_ids,
                 sector_id=table.sector_id,
                 sector_name=table.sector_rel.name if table.sector_rel else None,
+                confirmed_by_name=confirmed_by_name,
             )
         )
 
@@ -473,6 +496,7 @@ def get_table(
     open_rounds = 0
     pending_calls = 0
     check_status = None
+    confirmed_by_name = None
 
     if active_session:
         session_id = active_session.id
@@ -508,6 +532,22 @@ def get_table(
         if check:
             check_status = check.status
 
+        # Get waiter who confirmed the most recent round
+        confirmed_round = db.execute(
+            select(User.last_name)
+            .select_from(Round)
+            .join(User, Round.confirmed_by_user_id == User.id)
+            .where(
+                Round.table_session_id == active_session.id,
+                Round.confirmed_by_user_id.isnot(None),
+                Round.is_active.is_(True),
+            )
+            .order_by(Round.created_at.desc())
+            .limit(1)
+        ).scalar()
+        if confirmed_round:
+            confirmed_by_name = confirmed_round
+
     return TableCard(
         table_id=table.id,
         code=table.code,
@@ -516,6 +556,7 @@ def get_table(
         open_rounds=open_rounds,
         pending_calls=pending_calls,
         check_status=check_status,
+        confirmed_by_name=confirmed_by_name,
     )
 
 

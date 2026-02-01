@@ -69,6 +69,7 @@ async def get_redis_pool() -> redis.Redis:
                 decode_responses=True,
                 socket_connect_timeout=settings.redis_socket_timeout,
                 socket_timeout=settings.redis_socket_timeout,
+                health_check_interval=30,  # PERF-MED-02 FIX: Auto-detect dead connections
             )
             logger.info(
                 "Redis async pool initialized",
@@ -118,6 +119,7 @@ def _get_redis_sync_pool() -> "redis_sync.ConnectionPool":
                     decode_responses=True,
                     socket_connect_timeout=settings.redis_socket_timeout,
                     socket_timeout=settings.redis_socket_timeout,
+                    health_check_interval=30,  # PERF-MED-02 FIX: Auto-detect dead connections
                 )
                 logger.info(
                     "Redis sync pool initialized",

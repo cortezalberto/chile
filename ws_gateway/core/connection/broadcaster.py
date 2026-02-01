@@ -56,8 +56,13 @@ class ConnectionBroadcaster:
     - Filter by user, branch, sector, session
     - Rate limit global broadcasts
 
-    Uses parallel batching for efficient large-scale broadcasts.
+    SCALE-HIGH-01 FIX: Uses worker pool for efficient large-scale broadcasts.
+    Workers process send tasks from a queue in true parallel.
     """
+
+    # SCALE-HIGH-01: Worker pool configuration
+    DEFAULT_WORKER_COUNT = 10  # Number of parallel workers
+    QUEUE_MAX_SIZE = 5000  # Max pending sends before backpressure
 
     def __init__(
         self,
@@ -67,6 +72,7 @@ class ConnectionBroadcaster:
         mark_dead_callback: Callable[["WebSocket"], Awaitable[None]],
         batch_size: int = 50,
         broadcast_rate_limit: int = WSConstants.MAX_BROADCASTS_PER_SECOND,
+        worker_count: int | None = None,
     ) -> None:
         """
         Initialize broadcaster with dependencies.
@@ -76,8 +82,9 @@ class ConnectionBroadcaster:
             index: Connection indexing
             metrics: Collects broadcast metrics
             mark_dead_callback: Callback to mark dead connections
-            batch_size: Number of connections per batch
+            batch_size: Number of connections per batch (legacy mode)
             broadcast_rate_limit: Max broadcasts per second
+            worker_count: Number of parallel workers (default: 10)
         """
         self._lock_manager = lock_manager
         self._index = index
@@ -85,11 +92,139 @@ class ConnectionBroadcaster:
         self._mark_dead = mark_dead_callback
         self._batch_size = batch_size
         self._broadcast_rate_limit = broadcast_rate_limit
+        
+        # SCALE-HIGH-01: Worker pool
+        self._worker_count = worker_count or self.DEFAULT_WORKER_COUNT
+        self._queue: asyncio.Queue | None = None
+        self._workers: list[asyncio.Task] = []
+        self._running = False
 
         # Rate limiting state
         self._broadcast_timestamps: deque[float] = deque(
             maxlen=broadcast_rate_limit * 2
         )
+
+    async def start_workers(self) -> None:
+        """
+        SCALE-HIGH-01 FIX: Start the worker pool.
+        
+        Call this during application startup (lifespan).
+        Workers process send tasks from the queue in parallel.
+        """
+        if self._running:
+            logger.warning("Worker pool already running")
+            return
+        
+        self._queue = asyncio.Queue(maxsize=self.QUEUE_MAX_SIZE)
+        self._running = True
+        
+        for i in range(self._worker_count):
+            worker = asyncio.create_task(
+                self._worker_loop(i),
+                name=f"broadcast_worker_{i}"
+            )
+            self._workers.append(worker)
+        
+        logger.info(
+            "Broadcast worker pool started",
+            worker_count=self._worker_count,
+            queue_max_size=self.QUEUE_MAX_SIZE,
+        )
+
+    async def stop_workers(self, timeout: float = 5.0) -> None:
+        """
+        SCALE-HIGH-01 FIX: Gracefully stop the worker pool.
+        
+        Call this during application shutdown.
+        Waits for queue to drain or timeout.
+        """
+        if not self._running:
+            return
+        
+        self._running = False
+        
+        # Wait for queue to drain (with timeout)
+        if self._queue and not self._queue.empty():
+            try:
+                await asyncio.wait_for(self._queue.join(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Broadcast queue drain timeout",
+                    remaining=self._queue.qsize(),
+                )
+        
+        # Cancel workers
+        for worker in self._workers:
+            worker.cancel()
+        
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
+        
+        self._workers.clear()
+        self._queue = None
+        
+        logger.info("Broadcast worker pool stopped")
+
+    async def _worker_loop(self, worker_id: int) -> None:
+        """
+        SCALE-HIGH-01 FIX: Worker loop that processes send tasks.
+        
+        Each worker pulls tasks from the queue and sends messages.
+        """
+        while self._running:
+            try:
+                # Get task from queue (blocking with timeout)
+                task = await asyncio.wait_for(
+                    self._queue.get(),
+                    timeout=1.0
+                )
+                
+                ws, payload, result_future = task
+                
+                try:
+                    success = await self._send_to_connection_internal(ws, payload)
+                    if result_future and not result_future.done():
+                        result_future.set_result(success)
+                except Exception as e:
+                    if result_future and not result_future.done():
+                        result_future.set_result(False)
+                    logger.debug(
+                        "Worker send error",
+                        worker_id=worker_id,
+                        error=str(e),
+                    )
+                finally:
+                    self._queue.task_done()
+                    
+            except asyncio.TimeoutError:
+                # No tasks, continue loop
+                continue
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    "Worker loop error",
+                    worker_id=worker_id,
+                    error=str(e),
+                )
+                await asyncio.sleep(0.1)  # Prevent tight loop on error
+
+    async def _send_to_connection_internal(
+        self,
+        ws: "WebSocket",
+        payload: dict[str, Any],
+    ) -> bool:
+        """Internal send without queue (used by workers)."""
+        if not is_ws_connected(ws):
+            await self._mark_dead(ws)
+            return False
+        try:
+            await ws.send_json(payload)
+            return True
+        except Exception as e:
+            logger.debug("Send failed: %s", str(e))
+            await self._mark_dead(ws)
+            return False
 
     def filter_by_tenant(
         self,
@@ -141,7 +276,10 @@ class ConnectionBroadcaster:
         context: str = "broadcast",
     ) -> int:
         """
-        Send to multiple connections in parallel batches.
+        Send to multiple connections in parallel.
+
+        SCALE-HIGH-01 FIX: Uses worker pool for large broadcasts when running.
+        Falls back to legacy batch mode for small broadcasts or when pool not started.
 
         Args:
             connections: List of WebSocket connections.
@@ -154,6 +292,81 @@ class ConnectionBroadcaster:
         if not connections:
             return 0
 
+        # SCALE-HIGH-01: Use worker pool for large broadcasts
+        if self._running and self._queue and len(connections) > self._batch_size:
+            return await self._broadcast_via_workers(connections, payload, context)
+        
+        # Legacy: sequential batch processing for small broadcasts or no worker pool
+        return await self._broadcast_legacy(connections, payload, context)
+
+    async def _broadcast_via_workers(
+        self,
+        connections: list["WebSocket"],
+        payload: dict[str, Any],
+        context: str,
+    ) -> int:
+        """
+        SCALE-HIGH-01 FIX: Broadcast using worker pool.
+        
+        Distributes sends across workers for true parallel processing.
+        Uses futures to track completion and collect results.
+        """
+        # Create futures for all sends
+        futures: list[asyncio.Future] = []
+        
+        for ws in connections:
+            future: asyncio.Future = asyncio.get_event_loop().create_future()
+            futures.append(future)
+            
+            try:
+                # Non-blocking put with timeout
+                await asyncio.wait_for(
+                    self._queue.put((ws, payload, future)),
+                    timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                # Queue full, mark as failed
+                if not future.done():
+                    future.set_result(False)
+                logger.warning(
+                    "Broadcast queue full, dropping message",
+                    context=context,
+                    queue_size=self._queue.qsize(),
+                )
+        
+        # Wait for all sends to complete
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # Count results
+        sent = sum(1 for r in results if r is True)
+        failed = len(results) - sent
+        
+        # Update metrics
+        self._metrics.increment_broadcast_total_sync()
+        if failed > 0:
+            self._metrics.increment_broadcast_failed_sync()
+            self._metrics.add_failed_recipients_sync(failed)
+            logger.debug(
+                "Worker broadcast completed",
+                context=context,
+                sent=sent,
+                failed=failed,
+                total=len(connections),
+            )
+        
+        return sent
+
+    async def _broadcast_legacy(
+        self,
+        connections: list["WebSocket"],
+        payload: dict[str, Any],
+        context: str,
+    ) -> int:
+        """
+        Legacy broadcast using sequential batch processing.
+        
+        Used for small broadcasts or when worker pool is not running.
+        """
         sent = 0
         failed = 0
 

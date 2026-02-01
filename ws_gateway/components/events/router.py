@@ -123,6 +123,7 @@ class EventRouter:
 
     # Events that should also go to kitchen
     KITCHEN_EVENTS = frozenset({
+        "ROUND_SUBMITTED",
         "ROUND_IN_KITCHEN",
         "ROUND_READY",
         "ROUND_SERVED",

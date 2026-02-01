@@ -5,6 +5,8 @@ import type { WSEvent, WSEventType } from '../types'
 type EventCallback = (event: WSEvent) => void
 type ConnectionStateCallback = (isConnected: boolean) => void
 type TokenRefreshCallback = () => Promise<string | null>
+// RES-MED-01 FIX: Callback type for max reconnect notification
+type MaxReconnectCallback = () => void
 
 class WebSocketService {
   private ws: WebSocket | null = null
@@ -24,6 +26,8 @@ class WebSocketService {
   private isIntentionalClose = false
   // WS-31-MED-02 FIX: Visibility change handler for reconnection after sleep
   private visibilityHandler: (() => void) | null = null
+  // RES-MED-01 FIX: Callback when max reconnect attempts reached
+  private onMaxReconnectReached: MaxReconnectCallback | null = null
 
   constructor() {
     // WS-31-MED-02 FIX: Set up visibility change listener
@@ -129,6 +133,12 @@ class WebSocketService {
           this.notifyConnectionState(false)
 
           if (!this.isIntentionalClose) {
+            // SEC-MED-02 FIX: Check if close code indicates permanent error (no retry)
+            if (WS_CONFIG.NON_RECOVERABLE_CLOSE_CODES.includes(event.code)) {
+              wsLogger.warn('Non-recoverable close code, not reconnecting', { code: event.code })
+              this.onMaxReconnectReached?.()
+              return
+            }
             this.scheduleReconnect()
           }
         }
@@ -258,6 +268,77 @@ class WebSocketService {
     }
   }
 
+  /**
+   * RES-MED-01 FIX: Register callback for when max reconnect attempts reached
+   * Allows UI to show "Connection lost" notification
+   */
+  onMaxReconnect(callback: MaxReconnectCallback): () => void {
+    this.onMaxReconnectReached = callback
+    return () => {
+      this.onMaxReconnectReached = null
+    }
+  }
+
+  /**
+   * CLIENT-LOW-01 FIX: Subscribe to events with throttling
+   * Prevents excessive re-renders during high-traffic periods (multiple rapid orders)
+   * @param eventType - Event type or '*' for all events
+   * @param callback - Event handler
+   * @param delay - Throttle delay in ms (default: 100ms)
+   */
+  onThrottled(
+    eventType: WSEventType | '*',
+    callback: EventCallback,
+    delay: number = 100
+  ): () => void {
+    const throttledCallback = this._throttle(callback, delay)
+
+    if (!this.listeners.has(eventType)) {
+      this.listeners.set(eventType, new Set())
+    }
+    this.listeners.get(eventType)!.add(throttledCallback)
+
+    return () => {
+      const listeners = this.listeners.get(eventType)
+      listeners?.delete(throttledCallback)
+      // Clean up empty Set
+      if (listeners?.size === 0) {
+        this.listeners.delete(eventType)
+      }
+    }
+  }
+
+  /**
+   * CLIENT-LOW-01 FIX: Simple throttle function for event callbacks
+   */
+  private _throttle(
+    func: EventCallback,
+    delay: number
+  ): EventCallback {
+    let lastCall = 0
+    let lastEvent: WSEvent | null = null
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+    return (event: WSEvent) => {
+      const now = Date.now()
+      lastEvent = event
+
+      if (now - lastCall >= delay) {
+        lastCall = now
+        func(event)
+      } else if (!timeoutId) {
+        // Schedule trailing call
+        timeoutId = setTimeout(() => {
+          lastCall = Date.now()
+          if (lastEvent) {
+            func(lastEvent)
+          }
+          timeoutId = null
+        }, delay - (now - lastCall))
+      }
+    }
+  }
+
   private notifyConnectionState(isConnected: boolean): void {
     this.connectionStateListeners.forEach((cb) => cb(isConnected))
   }
@@ -355,6 +436,8 @@ class WebSocketService {
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= WS_CONFIG.MAX_RECONNECT_ATTEMPTS) {
       wsLogger.warn('Max reconnect attempts reached')
+      // RES-MED-01 FIX: Notify UI about connection failure
+      this.onMaxReconnectReached?.()
       return
     }
 

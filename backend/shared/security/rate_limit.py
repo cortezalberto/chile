@@ -125,13 +125,12 @@ async def check_email_rate_limit(email: str, fail_closed: bool = True) -> None:
 
 
         # REDIS-HIGH-06 FIX: Use Lua script for atomic operation
-        # CRIT-LOCK-02 FIX: Use threading.Lock to protect script SHA caching
-        # This avoids asyncio event loop issues when called from sync wrapper
+        # FAIL-CRIT-01 FIX: Proper double-check pattern to prevent race condition
+        # This ensures only one thread loads the script even under concurrent access
         with _script_sha_lock:
             current_sha = _rate_limit_script_sha
 
         try:
-            # Try to use cached script SHA first (faster)
             if current_sha:
                 result = await redis.evalsha(
                     current_sha,
@@ -141,12 +140,15 @@ async def check_email_rate_limit(email: str, fail_closed: bool = True) -> None:
                     LOGIN_RATE_WINDOW,
                 )
             else:
-                # First call - load script and cache SHA
+                # First call - load script and cache SHA with double-check
                 new_sha = await redis.script_load(RATE_LIMIT_LUA_SCRIPT)
                 with _script_sha_lock:
-                    _rate_limit_script_sha = new_sha
+                    # FAIL-CRIT-01 FIX: Double-check - another thread may have set it
+                    if _rate_limit_script_sha is None:
+                        _rate_limit_script_sha = new_sha
+                    current_sha = _rate_limit_script_sha
                 result = await redis.evalsha(
-                    new_sha,
+                    current_sha,
                     1,
                     key,
                     LOGIN_RATE_LIMIT,

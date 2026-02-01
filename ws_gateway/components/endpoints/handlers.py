@@ -273,7 +273,7 @@ class DinerEndpoint(WebSocketEndpointBase):
     Features:
     - Table token authentication (not JWT)
     - Session-based event routing
-    - No JWT revalidation (table tokens don't expire mid-session)
+    - SEC-HIGH-01 FIX: Periodic token revalidation for long sessions
     """
 
     def __init__(
@@ -294,6 +294,10 @@ class DinerEndpoint(WebSocketEndpointBase):
         # HIGH-AUD-02 FIX: Use int | None to distinguish "no tenant" from "tenant 0"
         self._tenant_id: int | None = None
         self._pseudo_user_id: int = 0
+        
+        # SEC-HIGH-01 FIX: Track last token revalidation for long sessions
+        import time
+        self._last_token_revalidation = time.time()
 
     async def validate_auth(self) -> dict[str, Any] | None:
         """Validate table token."""
@@ -376,6 +380,64 @@ class DinerEndpoint(WebSocketEndpointBase):
         """Unregister session and connection."""
         await self.manager.unregister_session(self.websocket, self._session_id)
         await self.manager.disconnect(self.websocket)
+
+    async def _pre_message_hook(self) -> bool:
+        """
+        SEC-HIGH-01 FIX: Periodically revalidate table token for long sessions.
+        
+        Table tokens can expire during 2+ hour dining sessions. This hook
+        checks token validity every TABLE_TOKEN_REVALIDATION_INTERVAL (30 min).
+        
+        Returns:
+            True to continue processing, False to close connection.
+        """
+        import time
+        from ws_gateway.components.core.constants import WSConstants, WSCloseCode
+        
+        current_time = time.time()
+        time_since_revalidation = current_time - self._last_token_revalidation
+        
+        if time_since_revalidation < WSConstants.TABLE_TOKEN_REVALIDATION_INTERVAL:
+            return True  # Not time to revalidate yet
+        
+        # Time to revalidate the table token
+        try:
+            from shared.security.auth import verify_table_token
+            
+            token_data = verify_table_token(self.table_token)
+            
+            # Verify session_id still matches (token wasn't stolen/reused)
+            if token_data.get("session_id") != self._session_id:
+                logger.warning(
+                    "Table token session mismatch during revalidation",
+                    session_id=self._session_id,
+                    token_session_id=token_data.get("session_id"),
+                )
+                await self.websocket.close(
+                    code=WSCloseCode.AUTH_FAILED,
+                    reason="Session mismatch",
+                )
+                return False
+            
+            # Token still valid, update revalidation timestamp
+            self._last_token_revalidation = current_time
+            logger.debug(
+                "Table token revalidated successfully",
+                session_id=self._session_id,
+            )
+            return True
+            
+        except Exception as e:
+            logger.warning(
+                "Table token revalidation failed",
+                session_id=self._session_id,
+                error=str(e),
+            )
+            await self.websocket.close(
+                code=WSCloseCode.AUTH_FAILED,
+                reason="Token expired",
+            )
+            return False
 
     async def handle_message(self, data: str) -> None:
         """Log unknown messages from diner."""

@@ -60,13 +60,23 @@ class Round(AuditMixin, Base):
     submitted_by_waiter_id: Mapped[Optional[int]] = mapped_column(
         BigInteger, ForeignKey("app_user.id"), index=True
     )
+    # Waiter/staff who confirmed the round (PENDING → CONFIRMED transition)
+    confirmed_by_user_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("app_user.id"), index=True
+    )
 
     # Relationships
     session: Mapped["TableSession"] = relationship(back_populates="rounds")
     items: Mapped[list["RoundItem"]] = relationship(back_populates="round")
     kitchen_tickets: Mapped[list["KitchenTicket"]] = relationship(back_populates="round")
     # MDL-MED-16 FIX: Added relationship for FK
-    submitted_by_waiter: Mapped[Optional["User"]] = relationship()
+    submitted_by_waiter: Mapped[Optional["User"]] = relationship(
+        foreign_keys=[submitted_by_waiter_id]
+    )
+    # Relationship for waiter who confirmed the round
+    confirmed_by_user: Mapped[Optional["User"]] = relationship(
+        foreign_keys=[confirmed_by_user_id]
+    )
 
     __table_args__ = (
         # MDL-MED-17 FIX: UniqueConstraint for idempotency per session

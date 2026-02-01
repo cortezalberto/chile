@@ -106,13 +106,16 @@ export const ANIMATION_DURATIONS = {
 
 // WebSocket reconnection config
 // WS-31-LOW-01: Keep these values synchronized with Dashboard/pwaMenu
+// CLIENT-MED-01 FIX: Increased MAX_RECONNECT_ATTEMPTS from 10 to 50
 export const WS_CONFIG = {
   RECONNECT_INTERVAL: 1000, // Base delay for exponential backoff (was 3000, now matches pwaMenu/Dashboard)
   MAX_RECONNECT_DELAY: 30000, // Maximum reconnect delay
-  MAX_RECONNECT_ATTEMPTS: 10,
+  MAX_RECONNECT_ATTEMPTS: 50, // CLIENT-MED-01 FIX: Increased from 10 for consistency
   HEARTBEAT_INTERVAL: 30000, // 30 seconds ping interval
   HEARTBEAT_TIMEOUT: 10000, // WS-31-HIGH-01 FIX: 10 seconds to receive pong
   JITTER_FACTOR: 0.3, // Add up to 30% random jitter
+  // SEC-MED-02 FIX: Close codes that should NOT trigger reconnection
+  NON_RECOVERABLE_CLOSE_CODES: [4001, 4003, 4029] as readonly number[],
 } as const
 
 // MED-08 FIX: WebSocket event type constants to avoid magic strings

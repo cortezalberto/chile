@@ -13,7 +13,8 @@ export default defineConfig({
         'favicon.svg',
         'apple-touch-icon.png',
         'pwa-192x192.png',
-        'pwa-512x512.png'
+        'pwa-512x512.png',
+        'offline.html' // WAITER-PWA-05 FIX: PWA offline fallback page
       ],
       manifest: {
         name: 'Sabor - Panel de Mozo',
@@ -146,6 +147,21 @@ export default defineConfig({
                 statuses: [0, 200]
               },
               networkTimeoutSeconds: 10
+            }
+          },
+          // WAITER-PWA-04 FIX: Cache images for offline use
+          {
+            urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp|ico)$/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'image-cache',
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 60 * 24 * 7 // 7 days
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
             }
           }
         ]

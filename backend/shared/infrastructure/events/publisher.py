@@ -113,3 +113,79 @@ async def publish_event(
 
     # All retries exhausted - raise the last error
     raise last_error  # type: ignore
+
+
+async def publish_to_stream(
+    redis_client: redis.Redis,
+    stream: str,
+    event: Event,
+    maxlen: int = 50000,  # PERF-LOW-06 FIX: Increased from 10k for high-volume
+) -> str:
+    """
+    Publish an event to a Redis Stream (XADD).
+
+    Provides reliable delivery/persistence for critical events.
+    Returns the generated Stream ID (e.g., "1705329600000-0").
+
+    CRIT-STREAM-02 FIX: Added retry logic matching publish_event pattern.
+    PERF-LOW-06 FIX: Increased maxlen to 50000 (~16 hours at peak load).
+
+    Args:
+        redis_client: Async Redis client.
+        stream: Stream key.
+        event: Event to publish.
+        maxlen: Max stream length (approximate) to prevent unbounded growth.
+    """
+    event_json = event.to_json()
+    _validate_event_size(event_json, event.type)
+
+    circuit_breaker = get_event_circuit_breaker()
+    if not circuit_breaker.can_execute():
+        logger.warning(
+            "Stream publish skipped - circuit breaker open",
+            stream=stream,
+            event_type=event.type,
+        )
+        return ""
+
+    last_error = None
+    for attempt in range(settings.redis_publish_max_retries):
+        try:
+            # XADD key * data
+            # We store the payload in a "data" field
+            result = await redis_client.xadd(
+                name=stream,
+                fields={"data": event_json},
+                maxlen=maxlen,
+                approximate=True,
+            )
+            circuit_breaker.record_success()
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt < settings.redis_publish_max_retries - 1:
+                delay = calculate_retry_delay_with_jitter(
+                    attempt, settings.redis_publish_retry_delay
+                )
+                logger.warning(
+                    "Redis stream publish failed, retrying",
+                    stream=stream,
+                    event_type=event.type,
+                    attempt=attempt + 1,
+                    max_retries=settings.redis_publish_max_retries,
+                    delay_seconds=round(delay, 2),
+                    error=str(e),
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "Redis stream publish failed after all retries",
+                    stream=stream,
+                    event_type=event.type,
+                    error=str(e),
+                )
+
+    circuit_breaker.record_failure()
+    raise last_error  # type: ignore
+
+

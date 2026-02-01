@@ -92,6 +92,13 @@ class WSConstants:
     # token has max 5 min window of use for existing connections.
     JWT_REVALIDATION_INTERVAL: Final[float] = 300.0
 
+    # SEC-HIGH-01 FIX: TABLE_TOKEN_REVALIDATION_INTERVAL: 30 minutes (1800 seconds)
+    # Rationale: Table tokens represent physical presence at a table but can
+    # expire during long dining sessions (2+ hours). Checking every 30 minutes
+    # balances security (token expiration handled) with minimal overhead.
+    # This interval should be less than the token's TTL (typically 4 hours).
+    TABLE_TOKEN_REVALIDATION_INTERVAL: Final[float] = 1800.0
+
     # DB_LOOKUP_TIMEOUT: 2 seconds
     # Rationale: Sector assignment lookups should be fast (<100ms typical).
     # 2 seconds is generous to handle slow DB but prevents blocking the
@@ -243,6 +250,50 @@ class WSConstants:
     # immediately instead of waiting for periodic cleanup.
     MAX_DEAD_CONNECTIONS: Final[int] = 500
 
+    # ==========================================================================
+    # DOC-IMP-01 FIX: Redis Subscription Channels
+    # ==========================================================================
+    # These are psubscribe patterns for Redis Pub/Sub.
+    # Pattern structure: <entity>:<id_or_wildcard>:<recipient_type>
+    # - branch:*:waiters → Events for waiters in any branch
+    # - branch:*:kitchen → Events for kitchen terminals in any branch
+    # - branch:*:admin → Events for admins in any branch
+    # - sector:*:waiters → Events for waiters in specific sectors
+    # - session:* → Events for diners in table sessions
+
+    REDIS_CHANNEL_BRANCH_WAITERS: Final[str] = "branch:*:waiters"
+    REDIS_CHANNEL_BRANCH_KITCHEN: Final[str] = "branch:*:kitchen"
+    REDIS_CHANNEL_BRANCH_ADMIN: Final[str] = "branch:*:admin"
+    REDIS_CHANNEL_SECTOR_WAITERS: Final[str] = "sector:*:waiters"
+    REDIS_CHANNEL_SESSION: Final[str] = "session:*"
+
+    # Convenience tuple for run_subscriber
+    REDIS_SUBSCRIPTION_CHANNELS: Final[tuple[str, ...]] = (
+        REDIS_CHANNEL_BRANCH_WAITERS,
+        REDIS_CHANNEL_BRANCH_KITCHEN,
+        REDIS_CHANNEL_BRANCH_ADMIN,
+        REDIS_CHANNEL_SECTOR_WAITERS,
+        REDIS_CHANNEL_SESSION,
+    )
+
+    # ==========================================================================
+    # Redis Streams Configuration
+    # ==========================================================================
+    # Redis Streams are used for reliable event delivery with Consumer Groups.
+    # Unlike Pub/Sub, Streams guarantee at-least-once delivery.
+
+    REDIS_STREAM_EVENTS: Final[str] = "events:critical"
+    REDIS_STREAM_DLQ: Final[str] = "events:dlq"
+    REDIS_CONSUMER_GROUP: Final[str] = "ws_gateway_group"
+    REDIS_CONSUMER_NAME: Final[str] = "consumer_1"
+
+    # Stream processing configuration
+    STREAM_BATCH_SIZE: Final[int] = 10  # Messages per XREADGROUP
+    STREAM_BLOCK_MS: Final[int] = 1000  # Block timeout for XREADGROUP
+    STREAM_PEL_CHECK_INTERVAL: Final[int] = 10  # Check pending every N reads
+    STREAM_PEL_MIN_IDLE_MS: Final[int] = 30000  # Claim messages idle 30+ seconds
+    STREAM_MAX_RETRIES: Final[int] = 3  # Before sending to DLQ
+
 
 # Message type constants for heartbeat protocol
 MSG_PING_PLAIN: Final[str] = "ping"
@@ -298,9 +349,15 @@ def validate_websocket_origin(origin: str | None, settings: object) -> bool:
         allowed = list(DEFAULT_ALLOWED_ORIGINS)
 
     # HIGH-WS-08 FIX: Handle missing origin header more strictly
+    # SEC-MED-01 FIX: Double verification of environment to prevent production bypass
     if not origin:
+        import os
         is_dev = getattr(settings, "environment", "production") == "development"
-        if is_dev:
+        # SEC-MED-01 FIX: Additional check - if PRODUCTION_CHECK env var is set,
+        # always treat as production (prevents misconfiguration)
+        production_check = os.environ.get("PRODUCTION_CHECK", "").lower() in ("1", "true", "yes")
+        
+        if is_dev and not production_check:
             # Log warning even in dev mode to help detect potential issues
             _logger.warning(
                 "WebSocket connection with missing Origin header (allowed in dev mode only)",
@@ -309,6 +366,7 @@ def validate_websocket_origin(origin: str | None, settings: object) -> bool:
         else:
             _logger.warning(
                 "WebSocket connection rejected: missing Origin header in production",
+                production_check_enabled=production_check,
             )
             return False
 

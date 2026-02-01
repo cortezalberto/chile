@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
     Application lifespan handler.
 
     Starts:
+    - Broadcast worker pool for high-throughput scenarios
     - Redis subscriber task for event dispatching
     - Heartbeat cleanup task for stale connections
     """
@@ -57,14 +58,21 @@ async def lifespan(app: FastAPI):
         env=settings.environment,
     )
 
+    # SCALE-HIGH-01 FIX: Start broadcast worker pool first
+    await manager.start_broadcast_workers()
+
     # MED-NEW-02 FIX: Added task names for easier debugging
     subscriber_task = asyncio.create_task(start_redis_subscriber(), name="redis_subscriber")
+    # CRIT-ARCH-01: Start Stream Consumer for reliable delivery
+    from ws_gateway.core.subscriber.stream_consumer import run_stream_consumer
+    stream_task = asyncio.create_task(run_stream_consumer(handle_routed_event), name="stream_consumer")
     cleanup_task = asyncio.create_task(start_heartbeat_cleanup(), name="heartbeat_cleanup")
 
     yield
 
     logger.info("Shutting down WebSocket Gateway")
     subscriber_task.cancel()
+    stream_task.cancel()
     cleanup_task.cancel()
 
     try:
@@ -72,9 +80,20 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     try:
+        await stream_task
+    except asyncio.CancelledError:
+        pass
+    try:
         await cleanup_task
     except asyncio.CancelledError:
         pass
+
+    # SCALE-HIGH-01 FIX: Stop broadcast worker pool gracefully
+    try:
+        await manager.stop_broadcast_workers(timeout=5.0)
+        logger.debug("Broadcast worker pool stopped")
+    except Exception as e:
+        logger.warning("Error stopping broadcast workers", error=str(e))
 
     # HIGH-WS-09 FIX: Wait for pending lock cleanup tasks to complete
     try:
@@ -141,55 +160,58 @@ async def start_heartbeat_cleanup():
             logger.error("Error in heartbeat cleanup", error=str(e))
 
 
+# CRIT-STREAM-04 FIX: Reuse EventRouter instance across events
+_event_router: EventRouter | None = None
+
+
+def _get_event_router() -> EventRouter:
+    """Get or create the singleton EventRouter instance."""
+    global _event_router
+    if _event_router is None:
+        _event_router = EventRouter(manager)
+    return _event_router
+
+
+async def handle_routed_event(event: dict):
+    """
+    Handle incoming Redis events (from Pub/Sub or Stream).
+    Delegates exact routing to EventRouter.
+    """
+    router = _get_event_router()
+    result = await router.route_event(event)
+
+    if result.errors:
+        logger.error(
+            "Errors routing event",
+            event_type=event.get("type"),
+            errors=result.errors,
+        )
+    elif result.total_sent == 0:
+        logger.debug(
+            "Event routed but no recipients",
+            event_type=event.get("type"),
+        )
+
+
 async def start_redis_subscriber():
     """
     Start the Redis subscriber that dispatches events to WebSocket clients.
 
     ARCH-AUDIT-03 FIX: Now uses EventRouter for explicit dependency injection
     instead of capturing 'manager' via closure.
+    DOC-IMP-01 FIX: Uses constants from WSConstants to prevent documentation drift.
     """
-    # ARCH-AUDIT-03 FIX: Explicit dependency - EventRouter receives manager
-    router = EventRouter(manager)
-
-    async def on_event(event: dict):
-        """
-        Handle incoming Redis events.
-
-        ARCH-AUDIT-03 FIX: Delegates routing to EventRouter which handles:
-        - tenant_id: Filter by tenant for multi-tenant isolation
-        - branch_id: Send to admins and waiters in branch
-        - sector_id: Target specific sector's waiters (if present)
-        - session_id: Send to diners at the table
-        - Event-type based routing (kitchen events, session events, admin-only)
-        """
-        result = await router.route_event(event)
-
-        if result.errors:
-            logger.error(
-                "Errors routing event",
-                event_type=event.get("type"),
-                errors=result.errors,
-            )
-        elif result.total_sent == 0:
-            logger.debug(
-                "Event routed but no recipients",
-                event_type=event.get("type"),
-            )
-
-    channels = [
-        "branch:*:waiters",
-        "branch:*:kitchen",
-        "branch:*:admin",
-        "sector:*:waiters",
-        "session:*",
-    ]
+    # DOC-IMP-01: Use centralized channel constants
+    channels = list(WSConstants.REDIS_SUBSCRIPTION_CHANNELS)
 
     try:
-        await run_subscriber(channels, on_event)
+        # Pass the separated handler function
+        await run_subscriber(channels, handle_routed_event)
     except asyncio.CancelledError:
         pass
     except Exception as e:
         logger.error("Redis subscriber error", error=str(e), exc_info=True)
+
 
 
 # =============================================================================

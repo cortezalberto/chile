@@ -74,9 +74,10 @@ class Settings(BaseSettings):
     ws_heartbeat_timeout: int = 60  # Consider connection dead after this many seconds
     ws_max_message_size: int = 64 * 1024  # 64 KB
     # LOAD-LEVEL2: Global connection limit to prevent resource exhaustion
-    ws_max_total_connections: int = 1000  # Maximum total WebSocket connections
+    # SCALE-CONFIG: Adjusted for 100-table/20-waiter branch (~430 connections + margin)
+    ws_max_total_connections: int = 500  # Maximum total WebSocket connections
     # LOAD-LEVEL2: Rate limiting for WebSocket messages
-    ws_message_rate_limit: int = 20  # Max messages per window per connection
+    ws_message_rate_limit: int = 30  # Max messages per window per connection
     ws_message_rate_window: int = 1  # Window in seconds
     # LOAD-LEVEL2: Broadcast optimization
     ws_broadcast_batch_size: int = 50  # Connections to send to in parallel
@@ -90,8 +91,9 @@ class Settings(BaseSettings):
     redis_socket_timeout: int = 5  # Socket timeout in seconds (for both connect and read/write)
     # MED-WS-03 FIX: Reduced from 100 to 20 - with exponential backoff, this is ~10 min of retries
     redis_max_reconnect_attempts: int = 20  # Max reconnection attempts for subscriber
-    # LOAD-LEVEL1: Increased queue and batch sizes
-    redis_event_queue_size: int = 5000  # Was 1000, increased for burst handling
+    # LOAD-LEVEL1: Queue and batch sizes for event processing
+    # SCALE-CONFIG: Reduced from 5000 to 500 for 100-table branch
+    redis_event_queue_size: int = 500  # Sufficient for ~430 connections
     redis_event_batch_size: int = 50  # Was 10, increased for faster processing
     redis_publish_max_retries: int = 3  # Max retries for event publishing
     redis_publish_retry_delay: float = 0.1  # Delay between retries in seconds

@@ -1,16 +1,83 @@
 <!doctype html>
 <html lang="es">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <meta name="theme-color" content="#f97316" />
-    <meta name="description" content="Panel de control para mozos - Gestiona tus mesas en tiempo real" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <title>Mozo - Panel de Control</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+
+  <!-- SEO & Meta -->
+  <title>Mozo - Panel de Control</title>
+  <meta name="description" content="Panel de control para mozos. Gestiona tus mesas en tiempo real." />
+  <meta name="author" content="Sabor" />
+  <meta name="robots" content="noindex, nofollow" />
+
+  <!-- Theme & Colors -->
+  <meta name="theme-color" content="#f97316" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#f97316" media="(prefers-color-scheme: dark)" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="msapplication-TileColor" content="#f97316" />
+  <meta name="msapplication-navbutton-color" content="#f97316" />
+
+  <!-- PWA Meta Tags (WAITER-PWA-03 FIX) -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Mozo" />
+  <meta name="application-name" content="Mozo" />
+  <meta name="format-detection" content="telephone=no" />
+
+  <!-- Icons - SVG con fallback a PNG -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="mask-icon" href="/favicon.svg" color="#f97316" />
+
+  <!-- iOS Splash Screens (Launch Images) -->
+  <!-- iPhone 15 Pro Max, 14 Pro Max (430x932) -->
+  <link rel="apple-touch-startup-image"
+    media="screen and (device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3)"
+    href="/apple-touch-icon.png" />
+  <!-- iPhone 15 Pro, 14 Pro (393x852) -->
+  <link rel="apple-touch-startup-image"
+    media="screen and (device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3)"
+    href="/apple-touch-icon.png" />
+  <!-- iPhone 14, 13, 12 (390x844) -->
+  <link rel="apple-touch-startup-image"
+    media="screen and (device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3)"
+    href="/apple-touch-icon.png" />
+  <!-- iPhone 11 Pro Max, XS Max (414x896) -->
+  <link rel="apple-touch-startup-image"
+    media="screen and (device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3)"
+    href="/apple-touch-icon.png" />
+  <!-- iPhone X, XS, 11 Pro (375x812) -->
+  <link rel="apple-touch-startup-image"
+    media="screen and (device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3)"
+    href="/apple-touch-icon.png" />
+
+  <!-- Preload critical resources (WAITER-PWA-06 FIX) -->
+  <link rel="preload" href="/src/index.css" as="style" />
+
+  <!-- Preconnect for performance -->
+  <link rel="preconnect" href="http://localhost:8000" />
+  <link rel="dns-prefetch" href="http://localhost:8000" />
+  <link rel="preconnect" href="ws://localhost:8001" />
+</head>
+
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+
+  <!-- No-JS fallback (WAITER-PWA-03 FIX) -->
+  <noscript>
+    <div
+      style="padding: 20px; text-align: center; font-family: system-ui; background: #0a0a0a; color: white; min-height: 100vh;">
+      <h1>Panel de Mozo</h1>
+      <p>Para usar esta aplicación, necesitás habilitar JavaScript en tu navegador.</p>
+    </div>
+  </noscript>
+</body>
+
 </html>

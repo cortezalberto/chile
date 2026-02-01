@@ -31,9 +31,25 @@ PREFIX_AUTH_BLACKLIST = "auth:token:blacklist:"
 PREFIX_AUTH_USER_REVOKE = "auth:user:revoked:"
 
 PREFIX_CACHE_PRODUCT = "cache:product:"
-PREFIX_CACHE_BRANCH_PRODUCTS = "branch:{branch_id}:tenant:{tenant_id}:products_complete"
+# PERF-MED-04 FIX: Template for branch products cache key
+PREFIX_CACHE_BRANCH_PRODUCTS_TEMPLATE = "cache:branch:{branch_id}:tenant:{tenant_id}:products"
+
+
+def get_branch_products_cache_key(branch_id: int, tenant_id: int) -> str:
+    """PERF-MED-04: Generate cache key for branch products with consistent prefix."""
+    return PREFIX_CACHE_BRANCH_PRODUCTS_TEMPLATE.format(branch_id=branch_id, tenant_id=tenant_id)
 
 PREFIX_RATELIMIT_LOGIN = "ratelimit:login:"
 
 PREFIX_WEBHOOK_RETRY = "webhook:retry:"
 PREFIX_WEBHOOK_DEAD_LETTER = "webhook:dead_letter:"
+
+# =============================================================================
+# Stream Keys & Consumer Groups
+# =============================================================================
+
+# Critical events stream (Orders, Payments)
+STREAM_EVENTS_CRITICAL = "events:critical"
+# Consumer group for WebSocket Gateway
+CONSUMER_GROUP_WS_GATEWAY = "ws_gateway_group"
+

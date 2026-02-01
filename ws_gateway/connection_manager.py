@@ -196,6 +196,28 @@ class ConnectionManager:
         return self._lifecycle.total_connections
 
     # =========================================================================
+    # SCALE-HIGH-01: Broadcast Worker Pool
+    # =========================================================================
+
+    async def start_broadcast_workers(self) -> None:
+        """
+        SCALE-HIGH-01 FIX: Start broadcast worker pool.
+        
+        Call this during application startup (lifespan) to enable
+        parallel broadcast processing for high-throughput scenarios.
+        """
+        await self._broadcaster.start_workers()
+
+    async def stop_broadcast_workers(self, timeout: float = 5.0) -> None:
+        """
+        SCALE-HIGH-01 FIX: Stop broadcast worker pool.
+        
+        Call this during application shutdown. Waits for pending
+        broadcasts to complete or timeout.
+        """
+        await self._broadcaster.stop_workers(timeout=timeout)
+
+    # =========================================================================
     # Rate limiting (delegate to rate_limiter)
     # =========================================================================
 

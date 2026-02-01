@@ -29,6 +29,8 @@ from .routing import (
     publish_to_admin,
     publish_to_tenant_admin,
 )
+from .publisher import publish_to_stream
+from ..redis.constants import STREAM_EVENTS_CRITICAL
 
 
 async def publish_round_event(
@@ -76,15 +78,12 @@ async def publish_round_event(
     to_session = event_type in [ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
     to_admin = event_type in [ROUND_PENDING, ROUND_CONFIRMED, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED]
 
-    await _publish_with_routing(
+    # CRIT-ARCH-01 FIX: Use Redis Streams for critical round events (Reliable Delivery)
+    # Replaces Pub/Sub to allow rewind/catch-up if Gateway restarts
+    await publish_to_stream(
         redis_client=redis_client,
+        stream=STREAM_EVENTS_CRITICAL,
         event=event,
-        branch_id=branch_id,
-        sector_id=sector_id,
-        to_session=to_session,
-        session_id=session_id,
-        to_kitchen=to_kitchen,
-        to_admin=to_admin,
     )
 
 
@@ -125,15 +124,11 @@ async def publish_service_call_event(
 
     to_session = event_type in [SERVICE_CALL_ACKED, SERVICE_CALL_CLOSED]
 
-    await _publish_with_routing(
+    # CRIT-ARCH-01 FIX: Use Redis Streams for service calls (Reliable Delivery)
+    await publish_to_stream(
         redis_client=redis_client,
+        stream=STREAM_EVENTS_CRITICAL,
         event=event,
-        branch_id=branch_id,
-        sector_id=sector_id,
-        to_session=to_session,
-        session_id=session_id,
-        to_kitchen=False,
-        to_admin=True,
     )
 
 
@@ -179,15 +174,11 @@ async def publish_check_event(
 
     to_session = event_type in [PAYMENT_APPROVED, PAYMENT_REJECTED, CHECK_PAID]
 
-    await _publish_with_routing(
+    # CRIT-ARCH-01 FIX: Use Redis Streams for check/payment events (Reliable Delivery)
+    await publish_to_stream(
         redis_client=redis_client,
+        stream=STREAM_EVENTS_CRITICAL,
         event=event,
-        branch_id=branch_id,
-        sector_id=sector_id,
-        to_session=to_session,
-        session_id=session_id,
-        to_kitchen=False,
-        to_admin=True,
     )
 
 

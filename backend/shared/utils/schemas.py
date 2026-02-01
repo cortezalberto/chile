@@ -109,6 +109,8 @@ class TableCard(BaseModel):
     # Sector info for grouping tables by section
     sector_id: int | None = None
     sector_name: str | None = None
+    # Waiter who confirmed the order (last name for display)
+    confirmed_by_name: str | None = None
 
 
 class TableSessionResponse(BaseModel):

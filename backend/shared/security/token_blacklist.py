@@ -174,6 +174,8 @@ async def check_token_validity(token_jti: str, user_id: int, token_iat: datetime
     """
     Combined check for token validity.
 
+    PERF-CRIT-01 FIX: Uses Redis PIPELINE to reduce 2 round-trips to 1.
+
     Checks both:
     1. Individual token blacklist
     2. User-level revocation
@@ -186,15 +188,41 @@ async def check_token_validity(token_jti: str, user_id: int, token_iat: datetime
     Returns:
         True if token is valid, False if revoked
     """
-    # Check individual blacklist
-    if await is_token_blacklisted(token_jti):
-        return False
+    try:
+        redis = await get_redis_pool()
+        blacklist_key = f"{BLACKLIST_PREFIX}{token_jti}"
+        revoke_key = f"{USER_REVOKE_PREFIX}{user_id}"
 
-    # Check user-level revocation
-    if await is_token_revoked_by_user(user_id, token_iat):
-        return False
+        # PERF-CRIT-01 FIX: Single round-trip with pipeline
+        async with redis.pipeline(transaction=False) as pipe:
+            pipe.exists(blacklist_key)
+            pipe.get(revoke_key)
+            results = await pipe.execute()
 
-    return True
+        # Check blacklist result
+        is_blacklisted = results[0] > 0
+        if is_blacklisted:
+            return False
+
+        # Check user-level revocation
+        revoke_time_str = results[1]
+        if revoke_time_str:
+            revoke_time = datetime.fromisoformat(revoke_time_str)
+            if token_iat < revoke_time:
+                return False
+
+        return True
+
+    except Exception as e:
+        # CRIT-02 FIX: Fail CLOSED on Redis errors for security
+        logger.error(
+            "Failed to check token validity - failing closed",
+            jti=token_jti,
+            user_id=user_id,
+            error=str(e),
+            sync=False,
+        )
+        return False  # Treat as invalid (fail closed)
 
 
 # =============================================================================
