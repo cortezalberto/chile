@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .billing import Check
     from .customer import Diner
     from .user import User
+    from .cart import CartItem
 
 
 class Table(AuditMixin, Base):
@@ -106,12 +107,17 @@ class TableSession(AuditMixin, Base):
         BigInteger, ForeignKey("app_user.id"), index=True
     )
 
+    # SHARED-CART: Version counter for optimistic locking on cart operations
+    cart_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     # Relationships
     table: Mapped["Table"] = relationship(back_populates="sessions")
     rounds: Mapped[list["Round"]] = relationship(back_populates="session")
     service_calls: Mapped[list["ServiceCall"]] = relationship(back_populates="session")
     checks: Mapped[list["Check"]] = relationship(back_populates="session")
     diners: Mapped[list["Diner"]] = relationship(back_populates="session")
+    # SHARED-CART: Cart items for real-time synchronization
+    cart_items: Mapped[list["CartItem"]] = relationship(back_populates="session")
     # MDL-MED-14 FIX: Added relationship for FK
     assigned_waiter: Mapped[Optional["User"]] = relationship(
         "User", foreign_keys=[assigned_waiter_id]

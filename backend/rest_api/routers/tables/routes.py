@@ -272,7 +272,7 @@ def get_waiter_tables(
             TableCard(
                 table_id=table.id,
                 code=table.code,
-                status=table.status,
+                status=table.status.upper(),  # FIX: DB stores lowercase, schema expects uppercase
                 session_id=session_id,
                 open_rounds=open_rounds,
                 pending_calls=pending_calls,

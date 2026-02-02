@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .table import TableSession
     from .order import RoundItem
     from .billing import Charge
+    from .cart import CartItem
 
 
 class Customer(AuditMixin, Base):
@@ -159,6 +160,8 @@ class Diner(AuditMixin, Base):
     round_items: Mapped[list["RoundItem"]] = relationship(back_populates="diner")
     charges: Mapped[list["Charge"]] = relationship(back_populates="diner")
     customer: Mapped[Optional["Customer"]] = relationship(back_populates="visits")
+    # SHARED-CART: Cart items for this diner
+    cart_items: Mapped[list["CartItem"]] = relationship(back_populates="diner")
 
     __table_args__ = (
         # HIGH-03 FIX: Composite index for idempotency check (session_id + local_id)

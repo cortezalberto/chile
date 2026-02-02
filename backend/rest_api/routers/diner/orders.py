@@ -25,6 +25,7 @@ from rest_api.models import (
     Payment,
     Diner,
     Branch,
+    CartItem,
 )
 from shared.security.auth import current_table_context
 from shared.utils.schemas import (
@@ -53,8 +54,10 @@ from shared.infrastructure.events import (
     get_redis_client,
     publish_round_event,
     publish_service_call_event,
+    publish_cart_event,
     ROUND_PENDING,
     SERVICE_CALL_CREATED,
+    CART_CLEARED,
 )
 
 
@@ -231,6 +234,20 @@ async def _bg_publish_service_call_event(**kwargs):
         logger.error("Failed to publish SERVICE_CALL_CREATED event (bg)", error=str(e))
 
 
+async def _bg_publish_cart_cleared(**kwargs):
+    """Background task to publish cart cleared event after round submission."""
+    try:
+        redis = await get_redis_client()
+        await publish_cart_event(
+            redis_client=redis,
+            event_type=CART_CLEARED,
+            **kwargs
+        )
+        logger.info("CART_CLEARED published (bg)", session_id=kwargs.get("session_id"))
+    except Exception as e:
+        logger.error("Failed to publish CART_CLEARED event (bg)", error=str(e))
+
+
 @router.post("/rounds/submit", response_model=SubmitRoundResponse)
 @limiter.limit("10/minute")
 def submit_round(
@@ -371,6 +388,11 @@ def submit_round(
 
     db.add_all(round_items_to_add)
 
+    # SHARED-CART: Clear cart_items after creating round
+    db.execute(
+        CartItem.__table__.delete().where(CartItem.session_id == session_id)
+    )
+
     # AUDIT FIX: Wrap commit in try-except
     try:
         db.commit()
@@ -396,6 +418,15 @@ def submit_round(
         actor_user_id=None,
         actor_role="DINER",
         sector_id=sector_id,
+    )
+
+    # SHARED-CART: Notify all diners that cart was cleared
+    background_tasks.add_task(
+        _bg_publish_cart_cleared,
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        session_id=session_id,
+        entity={"cleared": True},
     )
 
     return SubmitRoundResponse(

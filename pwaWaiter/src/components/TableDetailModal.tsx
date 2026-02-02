@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { tablesAPI, roundsAPI, serviceCallsAPI, type DeleteRoundItemResponse } from '../services/api'
 import { wsService } from '../services/websocket'
+import { useTablesStore } from '../stores/tablesStore'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
 import { TableStatusBadge, RoundStatusBadge } from './StatusBadge'
@@ -243,15 +244,22 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
     setDeleteConfirm({ roundId, item })
   }
 
+  // Get decrementOpenRounds from store
+  const decrementOpenRounds = useTablesStore((state) => state.decrementOpenRounds)
+
   // Handle delete item (after confirmation)
   const handleDeleteItem = async () => {
-    if (!deleteConfirm) return
+    if (!deleteConfirm || !table) return
 
     const { roundId, item } = deleteConfirm
     setDeletingItemId(item.id)
     try {
       const result: DeleteRoundItemResponse = await roundsAPI.deleteItem(roundId, item.id)
       if (result.success) {
+        // QA-FIX: If round was deleted (no items left), decrement open_rounds counter
+        if (result.round_deleted) {
+          decrementOpenRounds(table.table_id)
+        }
         // Reload session detail to reflect changes
         await loadSessionDetail()
       }

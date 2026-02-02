@@ -65,6 +65,9 @@ from .table import Table, TableSession
 # Customers and diners
 from .customer import Customer, Diner
 
+# Cart (real-time shared cart)
+from .cart import CartItem
+
 # Orders (rounds)
 from .order import Round, RoundItem
 
@@ -135,6 +138,8 @@ __all__ = [
     # Customer
     "Customer",
     "Diner",
+    # Cart
+    "CartItem",
     # Order
     "Round",
     "RoundItem",

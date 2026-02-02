@@ -166,6 +166,8 @@ interface TablesState {
   clearActiveSession: () => void
   // WebSocket
   subscribeToEvents: (branchId: number) => () => void
+  // QA-FIX: Decrement open_rounds when a round is deleted (all items removed)
+  decrementOpenRounds: (tableId: number) => void
 }
 
 export const useTablesStore = create<TablesState>()((set, get) => ({
@@ -469,6 +471,26 @@ export const useTablesStore = create<TablesState>()((set, get) => ({
       unsubscribeConnection()
       storeLogger.info('Unsubscribed from WebSocket events')
     }
+  },
+
+  // QA-FIX: Decrement open_rounds when a round is deleted (all items removed)
+  decrementOpenRounds: (tableId: number) => {
+    const { tables } = get()
+    const tableIndex = tables.findIndex((t) => t.table_id === tableId)
+    if (tableIndex === -1) return
+
+    const currentTable = tables[tableIndex]
+    const newOpenRounds = Math.max(0, (currentTable.open_rounds ?? 0) - 1)
+
+    const updatedTables = [...tables]
+    updatedTables[tableIndex] = {
+      ...currentTable,
+      open_rounds: newOpenRounds,
+      // If no more open rounds, reset order status to 'none'
+      orderStatus: newOpenRounds === 0 ? 'none' : currentTable.orderStatus,
+    }
+    set({ tables: updatedTables })
+    storeLogger.debug('Decremented open_rounds', { tableId, newOpenRounds })
   },
 }))
 

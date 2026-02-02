@@ -22,6 +22,7 @@ from rest_api.routers.public.health import router as health_router
 from rest_api.routers.tables import router as tables_router
 from rest_api.routers.diner import router as diner_router
 from rest_api.routers.diner.customer import router as customer_router
+from rest_api.routers.diner.cart import router as cart_router
 from rest_api.routers.kitchen import router as kitchen_router
 from rest_api.routers.kitchen.tickets import router as kitchen_tickets_router
 from rest_api.routers.billing import router as billing_router
@@ -82,6 +83,7 @@ _routers = [
     catalogs_router,
     kitchen_tickets_router,
     customer_router,
+    cart_router,
 ]
 
 for router in _routers:

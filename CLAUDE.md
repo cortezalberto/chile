@@ -4,6 +4,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
+## First Time Setup (5 Steps)
+
+```bash
+# 1. Copy environment files
+cp backend/.env.example backend/.env
+cp Dashboard/.env.example Dashboard/.env
+cp pwaMenu/.env.example pwaMenu/.env
+
+# 2. Start all backend services (PostgreSQL, Redis, REST API, WebSocket Gateway)
+cd devOps && docker compose up -d --build
+
+# 3. Start the frontend you need
+cd Dashboard && npm install && npm run dev    # Admin panel on :5177
+cd pwaMenu && npm install && npm run dev      # Customer menu on :5176
+cd pwaWaiter && npm install && npm run dev    # Waiter app on :5178
+
+# 4. Login with test user
+# Dashboard/pwaWaiter: admin@demo.com / admin123
+
+# 5. Verify everything works
+curl http://localhost:8000/api/health          # REST API health
+curl http://localhost:8001/ws/health           # WebSocket Gateway health
+```
+
+---
+
 ## Table of Contents
 
 - [Quick Reference](#quick-reference)
@@ -319,6 +345,9 @@ class MyEntityService(BranchScopedService[MyEntity, MyEntityOutput]):
   /preferences                   # PATCH: Sync implicit preferences (Fase 2)
   /device/{id}/history           # GET: Visit history for device (Fase 1)
   /device/{id}/preferences       # GET: Saved preferences for device (Fase 2)
+  /cart/add                      # POST: Add item to shared cart (real-time sync)
+  /cart/{item_id}                # PATCH/DELETE: Update/remove cart item
+  /cart                          # GET: Full cart for reconnection, DELETE: Clear cart
 /api/customer/*                  # Customer loyalty (X-Table-Token auth, Fase 4)
   /register                      # POST: Create customer with opt-in consent
   /recognize                     # GET: Check if device linked to customer
@@ -352,6 +381,8 @@ Events:
   # Round lifecycle (PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED)
   ROUND_PENDING, ROUND_CONFIRMED, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED
   ROUND_ITEM_DELETED  # Waiter deletes item from round (syncs to all frontends)
+  # Shared Cart (real-time sync between diners at same table)
+  CART_ITEM_ADDED, CART_ITEM_UPDATED, CART_ITEM_REMOVED, CART_CLEARED, CART_SYNC
   # Service calls
   SERVICE_CALL_CREATED, SERVICE_CALL_ACKED, SERVICE_CALL_CLOSED
   # Billing
@@ -1733,6 +1764,34 @@ Kitchen technical sheets ("fichas técnicas") with:
 - Ingredients, preparation steps, allergens
 - RAG chatbot ingestion via `/api/recipes/{id}/ingest`
 - Optional link to Products (Recipe → Product derivation)
+
+### Shared Cart (Real-Time Sync)
+
+Multi-device cart synchronization via WebSocket:
+- Chrome adds "Coca-Cola" → Firefox sees it instantly
+- All diners' items combined in ONE round when submitted
+- Items show who added them (diner name/color)
+
+**Architecture:**
+```
+Frontend (addToCart) → REST API (POST /api/diner/cart/add)
+                            ↓
+                    Backend saves to cart_item table
+                            ↓
+                    Redis publish CART_ITEM_ADDED
+                            ↓
+                    WS Gateway → All diners at table (via session channel)
+                            ↓
+                    useCartSync hook updates local state
+```
+
+**Key Files:**
+- `backend/rest_api/models/cart.py`: CartItem model
+- `backend/rest_api/routers/diner/cart.py`: Cart CRUD endpoints
+- `pwaMenu/src/hooks/useCartSync.ts`: WebSocket listener
+- `pwaMenu/src/stores/tableStore/store.ts`: Local cart state
+
+**Important:** When adding to cart, the frontend sends `diner_id` to identify which diner is adding the item. The `isFromCurrentDiner()` check in `useCartSync` compares `currentDiner.backendDinerId` with the event's `diner_id` to skip own events (already in local state).
 
 ### pwaMenu Advanced Filters
 

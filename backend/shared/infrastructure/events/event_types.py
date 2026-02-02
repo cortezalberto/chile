@@ -57,6 +57,16 @@ TICKET_READY = "TICKET_READY"
 TICKET_DELIVERED = "TICKET_DELIVERED"
 
 # =============================================================================
+# Shared cart events (real-time sync between diners)
+# =============================================================================
+
+CART_ITEM_ADDED = "CART_ITEM_ADDED"      # Diner added item to shared cart
+CART_ITEM_UPDATED = "CART_ITEM_UPDATED"  # Diner updated quantity/notes
+CART_ITEM_REMOVED = "CART_ITEM_REMOVED"  # Diner removed item from cart
+CART_CLEARED = "CART_CLEARED"            # Cart cleared (after round submit)
+CART_SYNC = "CART_SYNC"                  # Full cart state for reconnection
+
+# =============================================================================
 # Admin CRUD events
 # =============================================================================
 

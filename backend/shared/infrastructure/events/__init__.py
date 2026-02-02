@@ -67,6 +67,12 @@ from .event_types import (
     ENTITY_UPDATED,
     ENTITY_DELETED,
     CASCADE_DELETE,
+    # Shared cart
+    CART_ITEM_ADDED,
+    CART_ITEM_UPDATED,
+    CART_ITEM_REMOVED,
+    CART_CLEARED,
+    CART_SYNC,
     # Size limits
     MAX_EVENT_SIZE,
 )
@@ -143,6 +149,7 @@ from .domain_publishers import (
     publish_check_event,
     publish_table_event,
     publish_admin_crud_event,
+    publish_cart_event,
 )
 
 # =============================================================================
@@ -181,6 +188,11 @@ __all__ = [
     "ENTITY_UPDATED",
     "ENTITY_DELETED",
     "CASCADE_DELETE",
+    "CART_ITEM_ADDED",
+    "CART_ITEM_UPDATED",
+    "CART_ITEM_REMOVED",
+    "CART_CLEARED",
+    "CART_SYNC",
     "MAX_EVENT_SIZE",
     # Event Schema
     "Event",
@@ -218,4 +230,5 @@ __all__ = [
     "publish_check_event",
     "publish_table_event",
     "publish_admin_crud_event",
+    "publish_cart_event",
 ]

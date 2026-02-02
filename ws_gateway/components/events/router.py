@@ -146,6 +146,12 @@ class EventRouter:
         "TABLE_SESSION_STARTED",
         "TABLE_CLEARED",
         "TABLE_STATUS_CHANGED",
+        # Shared cart events (real-time sync between diners)
+        "CART_ITEM_ADDED",
+        "CART_ITEM_UPDATED",
+        "CART_ITEM_REMOVED",
+        "CART_CLEARED",
+        "CART_SYNC",
     })
 
     # Events that skip waiters (admin-only CRUD events)

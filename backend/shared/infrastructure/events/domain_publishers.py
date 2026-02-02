@@ -20,11 +20,18 @@ from .event_types import (
     PAYMENT_APPROVED,
     PAYMENT_REJECTED,
     CHECK_PAID,
+    # Cart events
+    CART_ITEM_ADDED,
+    CART_ITEM_UPDATED,
+    CART_ITEM_REMOVED,
+    CART_CLEARED,
+    CART_SYNC,
 )
 from .event_schema import Event
 from .routing import (
     _publish_with_routing,
     publish_to_sector,
+    publish_to_session,
     publish_to_waiters,
     publish_to_admin,
     publish_to_tenant_admin,
@@ -281,3 +288,41 @@ async def publish_admin_crud_event(
 
     # Always publish to tenant-wide admin channel
     await publish_to_tenant_admin(redis_client, tenant_id, event)
+
+
+async def publish_cart_event(
+    redis_client: redis.Redis,
+    event_type: str,
+    tenant_id: int,
+    branch_id: int,
+    session_id: int,
+    entity: dict,
+    actor_diner_id: int | None = None,
+) -> None:
+    """
+    Publish cart events for real-time shared cart sync between diners.
+
+    Cart events are published ONLY to the session channel since they are
+    relevant only to diners at the same table.
+
+    Args:
+        redis_client: Async Redis client.
+        event_type: CART_ITEM_ADDED, CART_ITEM_UPDATED, CART_ITEM_REMOVED,
+                   CART_CLEARED, or CART_SYNC.
+        tenant_id: Tenant ID.
+        branch_id: Branch ID.
+        session_id: Table session ID.
+        entity: Event payload containing cart item data.
+        actor_diner_id: ID of diner who performed the action (None for system actions).
+    """
+    event = Event(
+        type=event_type,
+        tenant_id=tenant_id,
+        branch_id=branch_id,
+        session_id=session_id,
+        entity=entity,
+        actor={"user_id": actor_diner_id, "role": "DINER"},
+    )
+
+    # Cart events only go to session channel (diners at the table)
+    await publish_to_session(redis_client, session_id, event)
