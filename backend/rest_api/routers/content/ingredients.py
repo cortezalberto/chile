@@ -20,6 +20,7 @@ from rest_api.services.crud.soft_delete import (
     set_updated_by,
 )
 from rest_api.routers._common.base import get_user_id, get_user_email
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(prefix="/api/admin/ingredients", tags=["ingredients"])
@@ -146,8 +147,18 @@ def create_ingredient_group(
     )
     set_created_by(group, get_user_id(user), get_user_email(user))
     db.add(group)
-    db.commit()
-    db.refresh(group)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(group)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create ingredient group", name=body.name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create ingredient group - please try again",
+        )
     return IngredientGroupOutput.model_validate(group)
 
 
@@ -281,8 +292,18 @@ def create_ingredient(
     )
     set_created_by(ingredient, get_user_id(user), get_user_email(user))
     db.add(ingredient)
-    db.commit()
-    db.refresh(ingredient)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(ingredient)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create ingredient", name=body.name, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create ingredient - please try again",
+        )
 
     # Load relationships for response
     ingredient = db.scalar(
@@ -335,8 +356,18 @@ def update_ingredient(
         setattr(ingredient, key, value)
 
     set_updated_by(ingredient, get_user_id(user), get_user_email(user))
-    db.commit()
-    db.refresh(ingredient)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(ingredient)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update ingredient", ingredient_id=ingredient_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update ingredient - please try again",
+        )
 
     # Load relationships for response
     ingredient = db.scalar(
@@ -375,7 +406,17 @@ def delete_ingredient(
         )
 
     soft_delete(db, ingredient, get_user_id(user), get_user_email(user))
-    db.commit()
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to delete ingredient", ingredient_id=ingredient_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete ingredient - please try again",
+        )
 
 
 # =============================================================================
@@ -431,8 +472,18 @@ def create_sub_ingredient(
     )
     set_created_by(sub_ingredient, get_user_id(user), get_user_email(user))
     db.add(sub_ingredient)
-    db.commit()
-    db.refresh(sub_ingredient)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(sub_ingredient)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create sub-ingredient", ingredient_id=ingredient_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create sub-ingredient - please try again",
+        )
     return SubIngredientOutput.model_validate(sub_ingredient)
 
 
@@ -472,4 +523,14 @@ def delete_sub_ingredient(
         )
 
     soft_delete(db, sub_ingredient, get_user_id(user), get_user_email(user))
-    db.commit()
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to delete sub-ingredient", sub_ingredient_id=sub_ingredient_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete sub-ingredient - please try again",
+        )

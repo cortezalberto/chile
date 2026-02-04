@@ -193,9 +193,13 @@ cd pwaMenu && npm run test:coverage                           # Coverage report
 cd pwaWaiter && npm run test                                  # Watch mode
 cd pwaWaiter && npm run test:run                              # Single run
 
-# Backend tests
+# Backend tests (local)
 cd backend && python -m pytest tests/ -v                      # All tests
 cd backend && python -m pytest tests/test_auth.py -v          # Single file
+
+# Backend tests (Docker - recommended)
+cd devOps && docker compose exec backend sh -c "cd backend && python -m pytest tests/ -v"
+cd devOps && docker compose exec backend sh -c "cd backend && python -m pytest tests/test_outbox.py -v"
 
 # Type checking (all frontends)
 npx tsc --noEmit
@@ -944,6 +948,63 @@ def list_products(pagination: Pagination = Depends(get_pagination)):
     query = query.offset(pagination.offset).limit(pagination.limit)
     return {"items": items, "pagination": pagination.to_dict(total=count)}
 ```
+
+### Outbox Pattern (Guaranteed Event Delivery)
+
+For critical events that MUST NOT be lost, the backend uses the Transactional Outbox Pattern:
+
+```
+Business Transaction + OutboxEvent → DB Commit (atomic)
+                                         ↓
+                            Outbox Processor (background)
+                                         ↓
+                                   Redis Pub/Sub
+```
+
+**Event Routing by Criticality:**
+
+| Event | Pattern | Reason |
+|-------|---------|--------|
+| `CHECK_REQUESTED`, `CHECK_PAID` | Outbox | Financial - must not lose |
+| `PAYMENT_APPROVED`, `PAYMENT_REJECTED` | Outbox | Financial - must not lose |
+| `ROUND_SUBMITTED`, `ROUND_READY` | Outbox | Critical workflow events |
+| `SERVICE_CALL_CREATED` | Outbox | Customer service SLA |
+| `ROUND_CONFIRMED`, `ROUND_IN_KITCHEN`, `ROUND_SERVED` | Direct Redis | Non-critical, lower latency |
+| `CART_*`, `TABLE_*`, `ENTITY_*` | Direct Redis / BackgroundTasks | Non-critical |
+
+**Usage:**
+```python
+from rest_api.services.events.outbox_service import (
+    write_outbox_event,
+    write_billing_outbox_event,
+    write_round_outbox_event,
+    write_service_call_outbox_event,
+)
+
+# Write event atomically BEFORE db.commit()
+write_billing_outbox_event(
+    db=db,
+    tenant_id=tenant_id,
+    event_type=CHECK_REQUESTED,
+    check_id=check.id,
+    branch_id=branch_id,
+    session_id=session_id,
+    table_id=table_id,
+    extra_data={"total_cents": total_cents},
+    actor_role="DINER",
+)
+db.commit()  # Event and business data committed atomically
+
+# Outbox processor handles publishing (started in lifespan.py)
+```
+
+**Key Files:**
+- `backend/rest_api/models/outbox.py`: OutboxEvent model, OutboxStatus enum
+- `backend/rest_api/services/events/outbox_service.py`: Write functions
+- `backend/rest_api/services/events/outbox_processor.py`: Background processor
+- `backend/rest_api/core/lifespan.py`: Processor lifecycle (start/stop)
+
+**Processor Config:** `MAX_RETRIES=5`, `BATCH_SIZE=50`, `POLL_INTERVAL=1.0s`
 
 ### Frontend WebSocket Pattern
 
@@ -1861,6 +1922,21 @@ For customers without phones using paper menus:
 - Submits via `waiterTableAPI.submitRound()` - same backend as diner orders
 - Round created with `PENDING` status (same flow as pwaMenu)
 
+### Fiscal Invoice Simulation (pwaWaiter)
+
+Argentine AFIP-format fiscal invoice simulation with PDF export:
+- **Format:** Factura B (consumidor final) with CUIT, CAE, QR code (simulated)
+- **Access:** TableDetailModal → "Generar Factura" button (when session has items)
+- **Export:** PDF download via jspdf + html2canvas
+
+**Key Files:**
+- `pwaWaiter/src/types/fiscal.ts`: Types and helpers (InvoiceType, TaxCondition, formatCuit)
+- `pwaWaiter/src/components/FiscalInvoice.tsx`: Visual component (A4 format)
+- `pwaWaiter/src/components/FiscalInvoiceModal.tsx`: Preview modal with PDF export
+- `pwaWaiter/src/utils/pdfExport.ts`: PDF generation utility
+
+**Note:** This is a simulation for demonstration purposes. CAE and QR codes are mock data. Real implementation requires AFIP integration.
+
 ### Round Status Flow (Role-Restricted)
 
 Orders require waiter verification before reaching kitchen:
@@ -2266,7 +2342,7 @@ All builds verified passing:
 | `backend/rest_api/services/domain/` | **Clean Architecture services** (CategoryService, BranchService, TableService, ProductService, AllergenService, SectorService, SubcategoryService) |
 | `backend/rest_api/services/crud/` | Repository pattern (repository.py), soft delete, audit, CRUDFactory (deprecated) |
 | `backend/rest_api/services/permissions/` | Permission Strategy pattern (context.py, strategies.py, decorators.py) |
-| `backend/rest_api/services/events/` | Domain events (domain_event.py, publisher.py, admin_events.py) |
+| `backend/rest_api/services/events/` | Domain events (domain_event.py, publisher.py, admin_events.py), **Outbox Pattern** (outbox_service.py, outbox_processor.py) |
 | `backend/rest_api/services/payments/` | Payment processing (allocation.py, circuit_breaker.py, mp_webhook.py) |
 | `backend/rest_api/services/catalog/` | Product catalog views (product_view.py, recipe_sync.py) |
 | `ws_gateway/core/connection/` | Connection management (lifecycle, broadcaster, cleanup, stats) |
@@ -2283,6 +2359,7 @@ All builds verified passing:
 - `from shared.utils.admin_schemas import CategoryOutput, ProductOutput`  # Admin schemas
 - `from rest_api.models import Product`
 - `from rest_api.services.domain import ProductService, CategoryService`  # Domain services
+- `from rest_api.services.events import write_billing_outbox_event, write_round_outbox_event`  # Outbox Pattern
 - `from ws_gateway.core.connection import ConnectionLifecycle, ConnectionBroadcaster`  # WS modules
 - `from ws_gateway.core.subscriber import EventDropRateTracker, validate_event_schema`  # WS modules
 

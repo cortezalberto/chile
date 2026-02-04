@@ -416,8 +416,17 @@ async def create_or_get_session(
     # Update table status
     table.status = "ACTIVE"
 
-    db.commit()
-    db.refresh(new_session)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(new_session)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create table session", table_id=table_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create session - please try again",
+        )
 
     # Generate table token
     token = sign_table_token(

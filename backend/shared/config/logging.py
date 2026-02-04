@@ -1,6 +1,8 @@
 """
 Centralized structured logging for the backend.
 Uses Python's standard logging with JSON formatting for production.
+
+FIX-03: Integrated Correlation ID support for distributed tracing.
 """
 
 import json
@@ -16,6 +18,8 @@ class StructuredFormatter(logging.Formatter):
     """
     JSON formatter for structured logging.
     Outputs logs in a format easily parseable by log aggregation tools.
+    
+    FIX-03: Includes request_id (correlation ID) in output.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -25,6 +29,11 @@ class StructuredFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+
+        # FIX-03: Add correlation ID if present
+        request_id = getattr(record, 'request_id', None)
+        if request_id and request_id != '-':
+            log_data["request_id"] = request_id
 
         # Add extra fields if present
         if hasattr(record, "extra_data") and record.extra_data:
@@ -48,6 +57,8 @@ class StructuredFormatter(logging.Formatter):
 class DevelopmentFormatter(logging.Formatter):
     """
     Human-readable formatter for development.
+    
+    FIX-03: Includes correlation ID in output.
     """
 
     COLORS = {
@@ -58,13 +69,21 @@ class DevelopmentFormatter(logging.Formatter):
         "CRITICAL": "\033[35m",  # Magenta
     }
     RESET = "\033[0m"
+    DIM = "\033[2m"
 
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, self.RESET)
         timestamp = datetime.now().strftime("%H:%M:%S")
 
+        # FIX-03: Include correlation ID if present
+        request_id = getattr(record, 'request_id', None)
+        if request_id and request_id != '-':
+            request_id_str = f"{self.DIM}[{request_id[:8]}]{self.RESET} "
+        else:
+            request_id_str = ""
+
         # Base message
-        message = f"{color}[{timestamp}] {record.levelname:8}{self.RESET} {record.name}: {record.getMessage()}"
+        message = f"{color}[{timestamp}] {record.levelname:8}{self.RESET} {request_id_str}{record.name}: {record.getMessage()}"
 
         # Add extra data if present
         if hasattr(record, "extra_data") and record.extra_data:
@@ -124,13 +143,19 @@ def setup_logging() -> None:
     """
     Configure logging for the application.
     Call this once at application startup.
+    
+    FIX-03: Integrates CorrelationIdFilter for distributed tracing.
     """
+    # Import here to avoid circular imports
+    from shared.infrastructure.correlation import CorrelationIdFilter
+    
     # Determine log level from settings
     log_level = logging.DEBUG if settings.debug else logging.INFO
 
-    # Create handler
+    # Create handler with correlation filter
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(log_level)
+    handler.addFilter(CorrelationIdFilter())  # FIX-03: Add correlation filter
 
     # Use appropriate formatter based on environment
     if settings.environment == "production":
@@ -151,6 +176,10 @@ def setup_logging() -> None:
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    
+    logging.getLogger("shared.infrastructure.correlation").info(
+        "Correlation ID logging integrated (FIX-03)"
+    )
 
 
 def get_logger(name: str) -> StructuredLogger:

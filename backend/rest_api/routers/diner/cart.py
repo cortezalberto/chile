@@ -235,8 +235,17 @@ def add_to_cart(
     # Increment cart version
     session.cart_version += 1
 
-    db.commit()
-    db.refresh(cart_item)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(cart_item)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to add item to cart", product_id=body.product_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to add to cart - please try again",
+        )
 
     # Build output
     output = CartItemOutput(
@@ -317,8 +326,17 @@ def update_cart_item(
     if session:
         session.cart_version += 1
 
-    db.commit()
-    db.refresh(cart_item)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(cart_item)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update cart item", item_id=item_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update cart - please try again",
+        )
 
     # Get branch price
     branch_product = next(
@@ -403,7 +421,16 @@ def remove_cart_item(
     if session:
         session.cart_version += 1
 
-    db.commit()
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to remove cart item", item_id=item_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to remove from cart - please try again",
+        )
 
     # Publish event in background
     background_tasks.add_task(
@@ -523,7 +550,16 @@ def clear_cart(
     if session:
         session.cart_version += 1
 
-    db.commit()
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to clear cart", session_id=session_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear cart - please try again",
+        )
 
     # Publish event in background
     background_tasks.add_task(

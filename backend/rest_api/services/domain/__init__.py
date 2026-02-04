@@ -30,8 +30,16 @@ from .product_service import ProductService
 from .allergen_service import AllergenService
 from .staff_service import StaffService
 from .promotion_service import PromotionService
+from .ticket_service import TicketService
+
+# CRIT-01 FIX: New domain services for thin controller pattern
+from .round_service import RoundService
+from .service_call_service import ServiceCallService
+from .billing_service import BillingService
+from .diner_service import DinerService
 
 __all__ = [
+    # Existing services
     "CategoryService",
     "SubcategoryService",
     "BranchService",
@@ -41,4 +49,10 @@ __all__ = [
     "AllergenService",
     "StaffService",
     "PromotionService",
+    "TicketService",
+    # CRIT-01: New domain services
+    "RoundService",
+    "ServiceCallService",
+    "BillingService",
+    "DinerService",
 ]

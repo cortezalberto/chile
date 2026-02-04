@@ -73,6 +73,10 @@ from shared.infrastructure.events import (
     TABLE_CLEARED,
 )
 from rest_api.services.payments.allocation import allocate_payment_fifo
+from rest_api.services.domain import RoundService, ServiceCallService, BillingService
+from rest_api.services.domain.service_call_service import (
+    ServiceCallNotFoundError,
+)
 
 
 # =============================================================================
@@ -114,6 +118,7 @@ def get_pending_service_calls(
     """
     Get all pending service calls for the waiter's branches.
 
+    REF-02: Uses ServiceCallService for thin controller pattern.
     Returns service calls with status OPEN or ACKED.
     PWAW-A003: List endpoint for service calls.
     """
@@ -123,21 +128,8 @@ def get_pending_service_calls(
     if not branch_ids:
         return []
 
-    # Get pending service calls with eager loading to avoid N+1 queries
-    # - joinedload for session->table chain (many-to-one relationships)
-    # QA-BACK-HIGH-01 FIX: Added is_active filter for soft delete compatibility
-    calls = db.execute(
-        select(ServiceCall)
-        .options(
-            joinedload(ServiceCall.session).joinedload(TableSession.table),
-        )
-        .where(
-            ServiceCall.branch_id.in_(branch_ids),
-            ServiceCall.status.in_(["OPEN", "ACKED"]),
-            ServiceCall.is_active.is_(True),
-        )
-        .order_by(ServiceCall.created_at.asc())
-    ).scalars().unique().all()
+    service = ServiceCallService(db)
+    calls = service.get_pending_calls(branch_ids)
 
     result = []
     for call in calls:
@@ -171,68 +163,40 @@ async def acknowledge_service_call(
     """
     Acknowledge a service call.
 
+    REF-02: Uses ServiceCallService for thin controller pattern.
     Changes status from OPEN to ACKED, indicating waiter is aware
     and will attend to the table.
     """
     require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
-
-    # Find the service call with eager loading for session and table
-    # QA-BACK-HIGH-01 FIX: Added is_active filter for soft delete compatibility
-    call = db.scalar(
-        select(ServiceCall)
-        .options(
-            joinedload(ServiceCall.session).joinedload(TableSession.table),
-        )
-        .where(
-            ServiceCall.id == call_id,
-            ServiceCall.is_active.is_(True),
-        )
-    )
-
-    if not call:
+    
+    user_id = int(ctx["sub"])
+    branch_ids = ctx.get("branch_ids", [])
+    
+    service = ServiceCallService(db)
+    
+    try:
+        call = service.acknowledge(call_id, user_id, branch_ids)
+    except ServiceCallNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Service call {call_id} not found",
+            detail=f"Service call {call_id} not found or no access",
         )
-
-    # Verify branch access
-    branch_ids = ctx.get("branch_ids", [])
-    if call.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No access to this branch",
-        )
-
-    # Verify status
-    if call.status != "OPEN":
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot acknowledge call with status {call.status}",
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("Failed to acknowledge service call", call_id=call_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to acknowledge service call - please try again",
         )
 
-    # Update status
-    user_id = int(ctx["sub"])
-    # ROUTER-HIGH-07 FIX: Use getattr with default for safe attribute access
-    call.status = "ACKED"
-    call.acked_by_user_id = user_id
-    # Set acked_at if the attribute exists (uses AuditMixin pattern)
-    try:
-        call.acked_at = datetime.now(timezone.utc)
-    except AttributeError:
-        pass  # Model doesn't have acked_at field
-
-    db.commit()
-    db.refresh(call)
-
-    # Access pre-loaded relationships (no additional queries)
-    session = call.session
-    table = session.table if session else None
-
-    # SECTOR-DISPATCH FIX: Get sector_id for targeted notifications
-    sector_id = table.sector_id if table else None
+    # Get table info for event publishing
+    table, sector_id = service.get_table_info(call.session.table_id if call.session else 0)
 
     # Publish event
-    redis = None
     try:
         redis = await get_redis_client()
         await publish_service_call_event(
@@ -246,12 +210,11 @@ async def acknowledge_service_call(
             call_type=call.type,
             actor_user_id=user_id,
             actor_role="WAITER",
-            sector_id=sector_id,  # SECTOR-DISPATCH FIX
+            sector_id=sector_id,
         )
         logger.info("Service call acknowledged", call_id=call_id, user_id=user_id, sector_id=sector_id)
     except Exception as e:
         logger.error("Failed to publish SERVICE_CALL_ACKED event", call_id=call_id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ServiceCallOutput(
         id=call.id,
@@ -275,69 +238,39 @@ async def resolve_service_call(
     """
     Resolve a service call.
 
+    REF-02: Uses ServiceCallService for thin controller pattern.
     Changes status to CLOSED, indicating the request has been fulfilled.
     """
     require_roles(ctx, ["WAITER", "MANAGER", "ADMIN"])
 
-    # Find the service call with eager loading for session and table
-    # QA-BACK-HIGH-01 FIX: Added is_active filter for soft delete compatibility
-    call = db.scalar(
-        select(ServiceCall)
-        .options(
-            joinedload(ServiceCall.session).joinedload(TableSession.table),
-        )
-        .where(
-            ServiceCall.id == call_id,
-            ServiceCall.is_active.is_(True),
-        )
-    )
-
-    if not call:
+    user_id = int(ctx["sub"])
+    branch_ids = ctx.get("branch_ids", [])
+    
+    service = ServiceCallService(db)
+    
+    try:
+        call = service.resolve(call_id, user_id, branch_ids)
+    except ServiceCallNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Service call {call_id} not found",
+            detail=f"Service call {call_id} not found or no access",
         )
-
-    # Verify branch access
-    branch_ids = ctx.get("branch_ids", [])
-    if call.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No access to this branch",
-        )
-
-    # Verify status (can resolve from OPEN or ACKED)
-    if call.status not in ["OPEN", "ACKED"]:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot resolve call with status {call.status}",
+            detail=str(e),
+        )
+    except Exception as e:
+        logger.error("Failed to resolve service call", call_id=call_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resolve service call - please try again",
         )
 
-    # Update status
-    # ROUTER-HIGH-07 FIX: Use try-except for safe attribute access
-    user_id = int(ctx["sub"])
-    call.status = "CLOSED"
-    try:
-        call.resolved_at = datetime.now(timezone.utc)
-    except AttributeError:
-        pass
-    try:
-        call.resolved_by_user_id = user_id
-    except AttributeError:
-        pass
-
-    db.commit()
-    db.refresh(call)
-
-    # Access pre-loaded relationships (no additional queries)
-    session = call.session
-    table = session.table if session else None
-
-    # SECTOR-DISPATCH FIX: Get sector_id for targeted notifications
-    sector_id = table.sector_id if table else None
+    # Get table info for event publishing
+    table, sector_id = service.get_table_info(call.session.table_id if call.session else 0)
 
     # Publish event
-    redis = None
     try:
         redis = await get_redis_client()
         await publish_service_call_event(
@@ -351,12 +284,11 @@ async def resolve_service_call(
             call_type=call.type,
             actor_user_id=user_id,
             actor_role="WAITER",
-            sector_id=sector_id,  # SECTOR-DISPATCH FIX
+            sector_id=sector_id,
         )
         logger.info("Service call resolved", call_id=call_id, user_id=user_id, sector_id=sector_id)
     except Exception as e:
         logger.error("Failed to publish SERVICE_CALL_CLOSED event", call_id=call_id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
 
     return ServiceCallOutput(
         id=call.id,
@@ -897,6 +829,7 @@ async def request_check_for_session(
     """
     HU-WAITER-MESA CA-05: Waiter requests the check for a session.
 
+    REF-02: Uses BillingService for thin controller pattern.
     Creates or retrieves the check for the session, aggregating all
     submitted rounds into a single bill.
     """
@@ -906,13 +839,10 @@ async def request_check_for_session(
     tenant_id = ctx.get("tenant_id")
     branch_ids = ctx.get("branch_ids", [])
 
-    # Find the session with table and rounds
+    # Find the session to verify access
     session = db.scalar(
         select(TableSession)
-        .options(
-            joinedload(TableSession.table),
-            selectinload(TableSession.rounds).selectinload(Round.items),
-        )
+        .options(joinedload(TableSession.table))
         .where(
             TableSession.id == session_id,
             TableSession.tenant_id == tenant_id,
@@ -933,100 +863,55 @@ async def request_check_for_session(
             detail="No access to this branch",
         )
 
-    # Check for existing check
-    # QA-BACK-CRIT-02 FIX: Added tenant_id validation for defense in depth
-    existing_check = db.scalar(
-        select(Check)
-        .where(
-            Check.table_session_id == session_id,
-            Check.tenant_id == tenant_id,
-            Check.is_active.is_(True),
-        )
-    )
-
-    if existing_check:
-        # Return existing check info
-        items_count = sum(
-            item.qty
-            for r in session.rounds
-            if r.status not in ["DRAFT", "CANCELED"]
-            for item in r.items
-        )
-        return WaiterRequestCheckResponse(
-            check_id=existing_check.id,
-            session_id=session_id,
-            total_cents=existing_check.total_cents,
-            paid_cents=existing_check.paid_cents,
-            status=existing_check.status,
-            items_count=items_count,
-        )
-
-    # Calculate total from all submitted rounds
-    total_cents = 0
-    items_count = 0
-    for round_obj in session.rounds:
-        if round_obj.status not in ["DRAFT", "CANCELED"]:
-            for item in round_obj.items:
-                total_cents += item.unit_price_cents * item.qty
-                items_count += item.qty
-
-    if total_cents == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No items to bill. Submit at least one round first.",
-        )
-
-    # Create the check
-    new_check = Check(
-        tenant_id=tenant_id,
-        branch_id=session.branch_id,
-        table_session_id=session_id,
-        status="REQUESTED",
-        total_cents=total_cents,
-        paid_cents=0,
-    )
-    db.add(new_check)
-
-    # Update session status to PAYING
-    session.status = "PAYING"
-
-    safe_commit(db)
-    db.refresh(new_check)
-
-    # Publish CHECK_REQUESTED event
-    table = session.table
+    billing_service = BillingService(db)
+    
     try:
-        redis = await get_redis_client()
-        await publish_check_event(
-            redis_client=redis,
-            event_type=CHECK_REQUESTED,
+        check, items_count, is_new = billing_service.request_check(
             tenant_id=tenant_id,
             branch_id=session.branch_id,
-            table_id=table.id if table else 0,
             session_id=session_id,
-            check_id=new_check.id,
-            total_cents=new_check.total_cents,
-            paid_cents=0,
-            actor_user_id=waiter_id,
-            actor_role="WAITER",
-            sector_id=table.sector_id if table else None,
         )
-        logger.info(
-            "Check requested by waiter",
-            session_id=session_id,
-            check_id=new_check.id,
-            total_cents=total_cents,
-            waiter_id=waiter_id,
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
-    except Exception as e:
-        logger.error("Failed to publish CHECK_REQUESTED event", error=str(e))
+
+    # Publish CHECK_REQUESTED event only for new checks
+    if is_new:
+        table = session.table
+        try:
+            redis = await get_redis_client()
+            await publish_check_event(
+                redis_client=redis,
+                event_type=CHECK_REQUESTED,
+                tenant_id=tenant_id,
+                branch_id=session.branch_id,
+                table_id=table.id if table else 0,
+                session_id=session_id,
+                check_id=check.id,
+                total_cents=check.total_cents,
+                paid_cents=0,
+                actor_user_id=waiter_id,
+                actor_role="WAITER",
+                sector_id=table.sector_id if table else None,
+            )
+            logger.info(
+                "Check requested by waiter",
+                session_id=session_id,
+                check_id=check.id,
+                total_cents=check.total_cents,
+                waiter_id=waiter_id,
+            )
+        except Exception as e:
+            logger.error("Failed to publish CHECK_REQUESTED event", error=str(e))
 
     return WaiterRequestCheckResponse(
-        check_id=new_check.id,
+        check_id=check.id,
         session_id=session_id,
-        total_cents=new_check.total_cents,
-        paid_cents=new_check.paid_cents,
-        status=new_check.status,
+        total_cents=check.total_cents,
+        paid_cents=check.paid_cents,
+        status=check.status,
         items_count=items_count,
     )
 
@@ -1040,6 +925,7 @@ async def register_manual_payment(
     """
     HU-WAITER-MESA CA-06: Waiter registers a manual payment.
 
+    REF-02: Uses BillingService for thin controller pattern.
     CRITICAL: This endpoint does NOT integrate with Mercado Pago or any
     digital payment provider. The waiter physically receives the payment
     (cash, physical card, or bank transfer) and registers it in the system.
@@ -1053,75 +939,28 @@ async def register_manual_payment(
     tenant_id = ctx.get("tenant_id")
     branch_ids = ctx.get("branch_ids", [])
 
-    # Find the check with session info
-    check = db.scalar(
-        select(Check)
-        .options(joinedload(Check.session).joinedload(TableSession.table))
-        .where(
-            Check.id == body.check_id,
-            Check.tenant_id == tenant_id,
-            Check.is_active.is_(True),
+    billing_service = BillingService(db)
+    
+    try:
+        from rest_api.services.domain.billing_service import CheckNotFoundError
+        payment, check = billing_service.record_manual_payment(
+            check_id=body.check_id,
+            amount_cents=body.amount_cents,
+            manual_method=body.manual_method,
+            waiter_id=waiter_id,
+            branch_ids=branch_ids,
+            notes=body.notes,
         )
-        .with_for_update()  # Lock to prevent race conditions
-    )
-
-    if not check:
+    except CheckNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Check {body.check_id} not found",
+            detail=f"Check {body.check_id} not found or no access",
         )
-
-    # Verify branch access
-    if check.branch_id not in branch_ids:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No access to this branch",
-        )
-
-    # Validate check status - can only pay REQUESTED or IN_PAYMENT checks
-    if check.status not in ["REQUESTED", "IN_PAYMENT"]:
+    except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot pay check with status {check.status}",
+            detail=str(e),
         )
-
-    # Calculate remaining amount
-    remaining = check.total_cents - check.paid_cents
-
-    if body.amount_cents > remaining:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Payment amount ({body.amount_cents}) exceeds remaining balance ({remaining})",
-        )
-
-    # Create the manual payment - immediately APPROVED since waiter confirms receipt
-    payment = Payment(
-        tenant_id=tenant_id,
-        branch_id=check.branch_id,
-        check_id=check.id,
-        provider="CASH" if body.manual_method == "CASH" else "CARD_PHYSICAL",
-        status="APPROVED",
-        amount_cents=body.amount_cents,
-        payment_category="MANUAL",
-        registered_by="WAITER",
-        registered_by_waiter_id=waiter_id,
-        manual_method=body.manual_method,
-        manual_notes=body.notes,
-    )
-    db.add(payment)
-
-    # Update check paid amount
-    check.paid_cents += body.amount_cents
-
-    # Update check status
-    if check.paid_cents >= check.total_cents:
-        check.status = "PAID"
-    else:
-        check.status = "IN_PAYMENT"
-
-    safe_commit(db)
-    db.refresh(payment)
-    db.refresh(check)
 
     # Allocate payment to charges (FIFO)
     try:
@@ -1129,9 +968,15 @@ async def register_manual_payment(
     except Exception as e:
         logger.warning("Payment allocation failed", payment_id=payment.id, error=str(e))
 
-    # Publish payment event
-    session = check.session
+    # Get session/table info for events
+    session = db.scalar(
+        select(TableSession)
+        .options(joinedload(TableSession.table))
+        .where(TableSession.id == check.table_session_id)
+    )
     table = session.table if session else None
+
+    # Publish payment event
     try:
         redis = await get_redis_client()
 

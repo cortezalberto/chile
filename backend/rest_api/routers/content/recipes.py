@@ -24,6 +24,7 @@ from rest_api.services.crud.soft_delete import (
     set_updated_by,
 )
 from rest_api.routers._common.base import get_user_id, get_user_email
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(prefix="/api/recipes", tags=["recipes"])
@@ -742,14 +743,34 @@ def create_recipe(
     user_email = get_user_email(ctx)
     set_created_by(recipe, user_id, user_email)
     db.add(recipe)
-    db.commit()
-    db.refresh(recipe)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(recipe)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create recipe", branch_id=body.branch_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create recipe - please try again",
+        )
 
     # Sync allergens via M:N relationship
     _sync_recipe_allergens(
         db, recipe, body.allergen_ids, tenant_id, user_id, user_email
     )
-    db.commit()
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to sync recipe allergens", recipe_id=recipe.id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save recipe allergens - please try again",
+        )
 
     # FIX: Load related data for output
     branch = db.scalar(select(Branch).where(Branch.id == recipe.branch_id))
@@ -911,8 +932,18 @@ def update_recipe(
     )
 
     set_updated_by(recipe, user_id, user_email)
-    db.commit()
-    db.refresh(recipe)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(recipe)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update recipe", recipe_id=recipe_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update recipe - please try again",
+        )
 
     # FIX: Load related data for output
     branch = db.scalar(select(Branch).where(Branch.id == recipe.branch_id))
@@ -1043,23 +1074,53 @@ async def ingest_recipe_to_rag(
         # Mark as ingested (even if Ollama unavailable, for UI purposes)
         recipe.is_ingested = True
         recipe.last_ingested_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(recipe)
+
+        # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+        try:
+            db.commit()
+            db.refresh(recipe)
+        except Exception as e:
+            db.rollback()
+            logger.error("Failed to commit recipe ingest status", recipe_id=recipe_id, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to mark recipe as ingested - please try again",
+            )
 
     except ImportError:
         # RAG service not available (missing dependencies), just mark timing
         recipe.is_ingested = True
         recipe.last_ingested_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(recipe)
+
+        # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+        try:
+            db.commit()
+            db.refresh(recipe)
+        except Exception as commit_err:
+            db.rollback()
+            logger.error("Failed to commit recipe ingest status (ImportError fallback)", recipe_id=recipe_id, error=str(commit_err))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to mark recipe as ingested - please try again",
+            )
     except Exception as e:
         # Log the error but don't fail - mark as ingested for UI
         import logging
         logging.getLogger(__name__).warning(f"RAG ingest failed for recipe {recipe_id}: {e}")
         recipe.is_ingested = True
         recipe.last_ingested_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(recipe)
+
+        # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+        try:
+            db.commit()
+            db.refresh(recipe)
+        except Exception as commit_err:
+            db.rollback()
+            logger.error("Failed to commit recipe ingest status (fallback)", recipe_id=recipe_id, error=str(commit_err))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to mark recipe as ingested - please try again",
+            )
 
     # Load related data for output
     branch = db.scalar(select(Branch).where(
@@ -1268,8 +1329,17 @@ def derive_product_from_recipe(
             )
             db.add(branch_product)
 
-    db.commit()
-    db.refresh(product)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(product)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to derive product from recipe", recipe_id=recipe_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create derived product - please try again",
+        )
 
     return DeriveProductOutput(
         id=product.id,

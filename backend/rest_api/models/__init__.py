@@ -20,6 +20,7 @@ All models are organized into domain-specific modules:
 - exclusion: BranchCategoryExclusion, BranchSubcategoryExclusion
 - audit: AuditLog
 - recipe: Recipe, RecipeAllergen
+- outbox: OutboxEvent (transactional event publishing)
 """
 
 # Base classes
@@ -91,6 +92,9 @@ from .audit import AuditLog
 
 # Recipes
 from .recipe import Recipe, RecipeAllergen
+
+# Outbox (transactional event publishing)
+from .outbox import OutboxEvent, OutboxStatus
 
 __all__ = [
     # Base
@@ -167,4 +171,7 @@ __all__ = [
     # Recipe
     "Recipe",
     "RecipeAllergen",
+    # Outbox
+    "OutboxEvent",
+    "OutboxStatus",
 ]

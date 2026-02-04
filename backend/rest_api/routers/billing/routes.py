@@ -65,6 +65,13 @@ from shared.infrastructure.events import (
     CHECK_PAID,
     TABLE_CLEARED,
 )
+from rest_api.services.events.outbox_service import write_billing_outbox_event
+from shared.security.audit_log import get_audit_log
+from rest_api.services.domain import BillingService
+from rest_api.services.domain.billing_service import (
+    CheckNotFoundError,
+    CheckAlreadyExistsError,
+)
 
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
@@ -156,6 +163,20 @@ async def request_check(
 
     session.status = "PAYING"
 
+    # OUTBOX-PATTERN: Write event atomically with business data
+    # The outbox processor will publish to Redis, ensuring guaranteed delivery
+    write_billing_outbox_event(
+        db=db,
+        tenant_id=tenant_id,
+        event_type=CHECK_REQUESTED,
+        check_id=check.id,
+        branch_id=branch_id,
+        session_id=session_id,
+        table_id=table_id,
+        extra_data={"total_cents": total_cents},
+        actor_role="DINER",
+    )
+
     # AUDIT FIX: Wrap commit in try-except to handle DB errors
     try:
         db.commit()
@@ -168,24 +189,7 @@ async def request_check(
             detail="Failed to create check - please try again",
         )
 
-    # HIGH-02 FIX: Publish event to waiters, admin, and session using centralized pattern
-    redis = None
-    try:
-        redis = await get_redis_client()
-        event = Event(
-            type=CHECK_REQUESTED,
-            tenant_id=tenant_id,
-            branch_id=branch_id,
-            table_id=table_id,
-            session_id=session_id,
-            entity={"check_id": check.id, "total_cents": total_cents},
-            actor={"user_id": None, "role": "DINER"},
-        )
-        await publish_to_waiters(redis, branch_id, event)
-        await publish_to_admin(redis, branch_id, event)  # HIGH-02 FIX: Also notify admin/dashboard
-    except Exception as e:
-        logger.error("Failed to publish CHECK_REQUESTED event", check_id=check.id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Note: Event publishing is now handled by outbox processor (guaranteed delivery)
 
     return RequestCheckResponse(
         check_id=check.id,
@@ -278,6 +282,46 @@ async def record_cash_payment(
     if check.paid_cents >= check.total_cents:
         check.status = "PAID"
 
+    # Get session for event (before commit for table_id)
+    session = db.scalar(
+        select(TableSession).where(TableSession.id == check.table_session_id)
+    )
+    table_id = session.table_id if session else None
+
+    # OUTBOX-PATTERN: Write events atomically with business data
+    # Payment approved event
+    write_billing_outbox_event(
+        db=db,
+        tenant_id=check.tenant_id,
+        event_type=PAYMENT_APPROVED,
+        check_id=check.id,
+        branch_id=check.branch_id,
+        session_id=check.table_session_id,
+        table_id=table_id,
+        extra_data={
+            "payment_id": payment.id,
+            "amount_cents": body.amount_cents,
+            "provider": "CASH",
+        },
+        actor_user_id=int(ctx["sub"]),
+        actor_role="WAITER",
+    )
+
+    # If check is fully paid, also queue CHECK_PAID event
+    if check.status == "PAID":
+        write_billing_outbox_event(
+            db=db,
+            tenant_id=check.tenant_id,
+            event_type=CHECK_PAID,
+            check_id=check.id,
+            branch_id=check.branch_id,
+            session_id=check.table_session_id,
+            table_id=table_id,
+            extra_data={"total_cents": check.total_cents},
+            actor_user_id=int(ctx["sub"]),
+            actor_role="WAITER",
+        )
+
     # AUDIT FIX: Wrap commit in try-except to handle DB errors
     try:
         db.commit()
@@ -291,52 +335,32 @@ async def record_cash_payment(
             detail="Failed to record payment - please try again",
         )
 
-    # Get session for event
-    session = db.scalar(
-        select(TableSession).where(TableSession.id == check.table_session_id)
-    )
-
-    # HIGH-02 FIX: Publish events to all relevant channels (waiters, admin, session)
-    redis = None
+    # SEC-AUDIT-03: Log payment to tamper-evident audit chain
     try:
-        redis = await get_redis_client()
-
-        # Payment approved event
-        payment_event = Event(
-            type=PAYMENT_APPROVED,
-            tenant_id=check.tenant_id,
-            branch_id=check.branch_id,
-            table_id=session.table_id if session else None,
-            session_id=check.table_session_id,
-            entity={
-                "payment_id": payment.id,
+        audit_log = await get_audit_log()
+        await audit_log.log(
+            event_type="PAYMENT",
+            action="CASH_PAYMENT_APPROVED",
+            user_id=int(ctx["sub"]),
+            user_email=ctx.get("email"),
+            ip_address=request.client.host if request.client else None,
+            resource_type="payment",
+            resource_id=payment.id,
+            data={
                 "check_id": check.id,
                 "amount_cents": body.amount_cents,
                 "provider": "CASH",
+                "check_status": check.status,
+                "check_paid_cents": check.paid_cents,
+                "check_total_cents": check.total_cents,
+                "diner_id": body.diner_id,
             },
-            actor={"user_id": int(ctx["sub"]), "role": "WAITER"},
         )
-        await publish_to_waiters(redis, check.branch_id, payment_event)
-        await publish_to_admin(redis, check.branch_id, payment_event)  # HIGH-02 FIX: Notify admin
-        await publish_to_session(redis, check.table_session_id, payment_event)  # HIGH-02 FIX: Notify diners
+    except Exception as audit_err:
+        # Don't fail the payment if audit logging fails, just log the error
+        logger.warning("Failed to write audit log for payment", payment_id=payment.id, error=str(audit_err))
 
-        # If check is fully paid
-        if check.status == "PAID":
-            paid_event = Event(
-                type=CHECK_PAID,
-                tenant_id=check.tenant_id,
-                branch_id=check.branch_id,
-                table_id=session.table_id if session else None,
-                session_id=check.table_session_id,
-                entity={"check_id": check.id, "total_cents": check.total_cents},
-                actor={"user_id": int(ctx["sub"]), "role": "WAITER"},
-            )
-            await publish_to_waiters(redis, check.branch_id, paid_event)
-            await publish_to_admin(redis, check.branch_id, paid_event)  # HIGH-02 FIX: Notify admin
-            await publish_to_session(redis, check.table_session_id, paid_event)  # HIGH-02 FIX: Notify diners
-    except Exception as e:
-        logger.error("Failed to publish payment event", check_id=check.id, payment_id=payment.id, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Note: Event publishing is now handled by outbox processor (guaranteed delivery)
 
     return PaymentResponse(
         payment_id=payment.id,
@@ -457,6 +481,28 @@ async def clear_table(
     except Exception as e:
         logger.error("Failed to publish TABLE_CLEARED event", table_id=table_id, error=str(e))
     # Note: Don't close pooled Redis connection - pool manages lifecycle
+
+    # SEC-AUDIT-03: Log table clearing to tamper-evident audit chain
+    try:
+        audit_log = await get_audit_log()
+        await audit_log.log(
+            event_type="TABLE",
+            action="TABLE_CLEARED",
+            user_id=int(ctx["sub"]),
+            user_email=ctx.get("email"),
+            resource_type="table_session",
+            resource_id=session.id,
+            data={
+                "table_id": table_id,
+                "table_code": table.code,
+                "session_id": session.id,
+                "check_id": check.id if check else None,
+                "check_total_cents": check.total_cents if check else None,
+                "branch_id": table.branch_id,
+            },
+        )
+    except Exception as audit_err:
+        logger.warning("Failed to write audit log for table clear", table_id=table_id, error=str(audit_err))
 
     return ClearTableResponse(table_id=table_id, status="FREE")
 
@@ -901,6 +947,59 @@ async def mercadopago_webhook(
     elif mp_status in ["rejected", "cancelled"]:
         payment.status = "REJECTED"
 
+    # Get session for events (before commit for table_id)
+    session = db.scalar(
+        select(TableSession).where(TableSession.id == check.table_session_id)
+    )
+    table_id = session.table_id if session else None
+
+    # OUTBOX-PATTERN: Write events atomically with business data
+    if mp_status == "approved":
+        write_billing_outbox_event(
+            db=db,
+            tenant_id=check.tenant_id,
+            event_type=PAYMENT_APPROVED,
+            check_id=check.id,
+            branch_id=check.branch_id,
+            session_id=check.table_session_id,
+            table_id=table_id,
+            extra_data={
+                "payment_id": payment.id,
+                "amount_cents": payment.amount_cents,
+                "provider": "MERCADO_PAGO",
+            },
+            actor_role="SYSTEM",
+        )
+
+        if check.status == "PAID":
+            write_billing_outbox_event(
+                db=db,
+                tenant_id=check.tenant_id,
+                event_type=CHECK_PAID,
+                check_id=check.id,
+                branch_id=check.branch_id,
+                session_id=check.table_session_id,
+                table_id=table_id,
+                extra_data={"total_cents": check.total_cents},
+                actor_role="SYSTEM",
+            )
+
+    elif mp_status in ["rejected", "cancelled"]:
+        write_billing_outbox_event(
+            db=db,
+            tenant_id=check.tenant_id,
+            event_type=PAYMENT_REJECTED,
+            check_id=check.id,
+            branch_id=check.branch_id,
+            session_id=check.table_session_id,
+            table_id=table_id,
+            extra_data={
+                "payment_id": payment.id,
+                "reason": mp_payment.get("status_detail", "unknown"),
+            },
+            actor_role="SYSTEM",
+        )
+
     # CRIT-01 FIX: Wrap commit in try-except to handle DB errors
     try:
         db.commit()
@@ -914,64 +1013,33 @@ async def mercadopago_webhook(
             detail="Failed to process payment - please try again",
         )
 
-    # Get session for events
-    session = db.scalar(
-        select(TableSession).where(TableSession.id == check.table_session_id)
-    )
-
-    # Publish events
-    redis = None
+    # SEC-AUDIT-03: Log Mercado Pago payment to tamper-evident audit chain
     try:
-        redis = await get_redis_client()
+        audit_log = await get_audit_log()
+        action = "MP_PAYMENT_APPROVED" if mp_status == "approved" else "MP_PAYMENT_REJECTED"
+        await audit_log.log(
+            event_type="PAYMENT",
+            action=action,
+            ip_address=request.client.host if request.client else None,
+            resource_type="payment",
+            resource_id=payment.id,
+            data={
+                "check_id": check.id,
+                "amount_cents": payment.amount_cents,
+                "provider": "MERCADO_PAGO",
+                "mp_status": mp_status,
+                "mp_status_detail": mp_payment.get("status_detail"),
+                "mp_payment_id": mp_payment_id,
+                "check_status": check.status,
+                "check_paid_cents": check.paid_cents,
+                "check_total_cents": check.total_cents,
+            },
+        )
+    except Exception as audit_err:
+        # Don't fail the webhook if audit logging fails, just log the error
+        logger.warning("Failed to write audit log for MP payment", payment_id=payment.id, error=str(audit_err))
 
-        if mp_status == "approved":
-            event = Event(
-                type=PAYMENT_APPROVED,
-                tenant_id=check.tenant_id,
-                branch_id=check.branch_id,
-                table_id=session.table_id if session else None,
-                session_id=check.table_session_id,
-                entity={
-                    "payment_id": payment.id,
-                    "check_id": check.id,
-                    "amount_cents": payment.amount_cents,
-                    "provider": "MERCADO_PAGO",
-                },
-                actor={"user_id": None, "role": "SYSTEM"},
-            )
-            await publish_to_waiters(redis, check.branch_id, event)
-            await publish_to_session(redis, check.table_session_id, event)
-
-            if check.status == "PAID":
-                paid_event = Event(
-                    type=CHECK_PAID,
-                    tenant_id=check.tenant_id,
-                    branch_id=check.branch_id,
-                    table_id=session.table_id if session else None,
-                    session_id=check.table_session_id,
-                    entity={"check_id": check.id, "total_cents": check.total_cents},
-                    actor={"user_id": None, "role": "SYSTEM"},
-                )
-                await publish_to_waiters(redis, check.branch_id, paid_event)
-                await publish_to_session(redis, check.table_session_id, paid_event)
-
-        elif mp_status in ["rejected", "cancelled"]:
-            event = Event(
-                type=PAYMENT_REJECTED,
-                tenant_id=check.tenant_id,
-                branch_id=check.branch_id,
-                table_id=session.table_id if session else None,
-                session_id=check.table_session_id,
-                entity={
-                    "payment_id": payment.id,
-                    "check_id": check.id,
-                    "reason": mp_payment.get("status_detail", "unknown"),
-                },
-                actor={"user_id": None, "role": "SYSTEM"},
-            )
-            await publish_to_session(redis, check.table_session_id, event)
-    except Exception as e:
-        logger.error("Failed to publish MP payment event", check_id=check.id, mp_status=mp_status, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Note: Event publishing is now handled by outbox processor (guaranteed delivery)
 
     return {"status": "processed", "payment_status": mp_status}
+

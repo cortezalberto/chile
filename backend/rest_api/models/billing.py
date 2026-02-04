@@ -63,6 +63,8 @@ class Check(AuditMixin, Base):
         # MED-CONS-02: Ensure amounts are non-negative
         CheckConstraint("total_cents >= 0", name="chk_total_non_negative"),
         CheckConstraint("paid_cents >= 0", name="chk_paid_non_negative"),
+        # OPT-02: Composite index for branch + status queries
+        Index("ix_check_branch_status", "branch_id", "status"),
     )
 
 

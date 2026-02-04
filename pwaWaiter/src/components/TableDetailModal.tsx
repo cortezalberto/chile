@@ -4,6 +4,7 @@ import { wsService } from '../services/websocket'
 import { useTablesStore } from '../stores/tablesStore'
 import { Button } from './Button'
 import { ConfirmDialog } from './ConfirmDialog'
+import { FiscalInvoiceModal } from './FiscalInvoiceModal'
 import { TableStatusBadge, RoundStatusBadge } from './StatusBadge'
 import { formatTableCode, formatPrice, formatTime } from '../utils/format'
 import { WS_EVENT_TYPES } from '../utils/constants'
@@ -72,6 +73,9 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
   // Delete item state
   const [deletingItemId, setDeletingItemId] = useState<number | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ roundId: number; item: RoundItemDetail } | null>(null)
+
+  // Fiscal invoice modal state
+  const [showInvoiceModal, setShowInvoiceModal] = useState(false)
 
   // Refs for WS event handling
   const tableIdRef = useRef(table?.table_id)
@@ -637,7 +641,22 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-gray-200">
+        <div className="p-4 border-t border-gray-200 space-y-2">
+          {/* Invoice button - only show when there are items */}
+          {hasActiveSession && sessionDetail && sessionDetail.rounds.length > 0 && (
+            <Button
+              variant="primary"
+              className="w-full"
+              onClick={() => setShowInvoiceModal(true)}
+            >
+              <span className="flex items-center justify-center gap-2">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Generar Factura
+              </span>
+            </Button>
+          )}
           <Button
             variant="secondary"
             className="w-full"
@@ -647,6 +666,15 @@ export function TableDetailModal({ table, isOpen, onClose }: TableDetailModalPro
           </Button>
         </div>
       </div>
+
+      {/* Fiscal Invoice Modal */}
+      <FiscalInvoiceModal
+        isOpen={showInvoiceModal}
+        onClose={() => setShowInvoiceModal(false)}
+        sessionDetail={sessionDetail}
+        tableCode={table?.code || ''}
+        waiterName={undefined}
+      />
 
       {/* Confirmation dialog - Mark as served */}
       <ConfirmDialog

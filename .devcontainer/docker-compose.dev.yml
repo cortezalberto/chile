@@ -1,0 +1,61 @@
+version: '3.8'
+
+# DevContainer Docker Compose overlay
+# Use with: docker-compose -f ../devOps/docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      - devcontainer-venv:/workspace/backend/.venv
+      - devcontainer-node-dashboard:/workspace/Dashboard/node_modules
+      - devcontainer-node-menu:/workspace/pwaMenu/node_modules
+      - devcontainer-node-waiter:/workspace/pwaWaiter/node_modules
+    command: sleep infinity
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/menu_ops
+      - REDIS_URL=redis://redis:6379
+      - PYTHONPATH=/workspace/backend
+    networks:
+      - integrador
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: menu_ops
+    volumes:
+      - devcontainer-postgres:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - integrador
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - devcontainer-redis:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - integrador
+
+volumes:
+  devcontainer-venv:
+  devcontainer-node-dashboard:
+  devcontainer-node-menu:
+  devcontainer-node-waiter:
+  devcontainer-postgres:
+  devcontainer-redis:
+
+networks:
+  integrador:
+    driver: bridge

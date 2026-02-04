@@ -307,17 +307,23 @@ class ConnectionBroadcaster:
     ) -> int:
         """
         SCALE-HIGH-01 FIX: Broadcast using worker pool.
-        
+
         Distributes sends across workers for true parallel processing.
         Uses futures to track completion and collect results.
+
+        PERF-FUTURE-01 FIX: Added timeout protection to prevent future leaks
+        if workers crash before setting results.
         """
+        # PERF-FUTURE-01: Use get_running_loop() instead of deprecated get_event_loop()
+        loop = asyncio.get_running_loop()
+
         # Create futures for all sends
         futures: list[asyncio.Future] = []
-        
+
         for ws in connections:
-            future: asyncio.Future = asyncio.get_event_loop().create_future()
+            future: asyncio.Future = loop.create_future()
             futures.append(future)
-            
+
             try:
                 # Non-blocking put with timeout
                 await asyncio.wait_for(
@@ -333,14 +339,32 @@ class ConnectionBroadcaster:
                     context=context,
                     queue_size=self._queue.qsize(),
                 )
-        
-        # Wait for all sends to complete
-        results = await asyncio.gather(*futures, return_exceptions=True)
-        
+
+        # PERF-FUTURE-01 FIX: Wait with timeout to prevent hanging forever
+        # if workers crash before setting results
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*futures, return_exceptions=True),
+                timeout=10.0  # 10 second timeout for entire broadcast
+            )
+        except asyncio.TimeoutError:
+            # Some futures didn't complete - count completed ones
+            logger.warning(
+                "Broadcast timeout - some sends did not complete",
+                context=context,
+                total=len(futures),
+            )
+            # Cancel pending futures to prevent leaks
+            for f in futures:
+                if not f.done():
+                    f.cancel()
+            # Count what we have
+            results = [f.result() if f.done() and not f.cancelled() else False for f in futures]
+
         # Count results
         sent = sum(1 for r in results if r is True)
         failed = len(results) - sent
-        
+
         # Update metrics
         self._metrics.increment_broadcast_total_sync()
         if failed > 0:
@@ -353,7 +377,7 @@ class ConnectionBroadcaster:
                 failed=failed,
                 total=len(connections),
             )
-        
+
         return sent
 
     async def _broadcast_legacy(

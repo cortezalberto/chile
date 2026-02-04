@@ -3,10 +3,10 @@ Sector management endpoints for organizing tables.
 """
 
 import re
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 
 from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select, func, or_,
+    Depends, Session, select, func, or_,
     get_db, current_user, BranchSector,
     soft_delete, set_created_by,
     get_user_id, get_user_email,
@@ -14,6 +14,7 @@ from rest_api.routers.admin._base import (
     is_admin, validate_branch_access, filter_by_accessible_branches,
 )
 from shared.utils.admin_schemas import BranchSectorOutput, BranchSectorCreate
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(tags=["admin-sectors"])
@@ -165,8 +166,18 @@ def create_sector(
     set_created_by(sector, get_user_id(user), get_user_email(user))
 
     db.add(sector)
-    db.commit()
-    db.refresh(sector)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(sector)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create sector", branch_id=body.branch_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create sector - please try again",
+        )
 
     return _sector_to_output(sector)
 

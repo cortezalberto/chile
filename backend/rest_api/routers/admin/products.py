@@ -7,7 +7,7 @@ All business logic is in rest_api/services/domain/product_service.py.
 Reduced from 1022 lines to ~200 lines (80% reduction).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 
 from shared.infrastructure.db import get_db
@@ -172,8 +172,9 @@ def update_product(
 
 
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_product(
+async def delete_product(
     product_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(require_admin_or_manager),
 ) -> None:
@@ -181,12 +182,18 @@ def delete_product(
     Soft delete a product. Requires ADMIN or MANAGER role.
 
     MANAGER users can only delete products available in their assigned branches.
+    
+    SEC-AUDIT-03: Product deletions are logged to the secure audit log.
     """
     service = _get_service(db)
 
     # MANAGER branch isolation
     if not is_admin(user):
         _validate_manager_branch_access_for_delete(service, product_id, user)
+
+    # Get product name before deletion for audit log
+    product_entity = service.get_entity(product_id, user["tenant_id"])
+    product_name = product_entity.name if product_entity else "unknown"
 
     try:
         service.delete_product(
@@ -200,6 +207,29 @@ def delete_product(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Product not found",
         )
+
+    # SEC-AUDIT-03: Log product deletion to secure audit log
+    async def _log_product_deletion():
+        from shared.security.audit_log import get_audit_log
+        try:
+            audit_log = await get_audit_log()
+            await audit_log.log(
+                event_type="PRODUCT_DELETED",
+                action="delete",
+                user_id=get_user_id(user),
+                user_email=get_user_email(user),
+                resource_type="product",
+                resource_id=product_id,
+                data={
+                    "product_name": product_name,
+                    "tenant_id": user["tenant_id"],
+                },
+            )
+        except Exception:
+            # Don't fail deletion if audit log fails
+            pass
+
+    background_tasks.add_task(_log_product_deletion)
 
 
 # =============================================================================

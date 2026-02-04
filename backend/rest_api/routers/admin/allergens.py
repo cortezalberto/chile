@@ -1,8 +1,10 @@
 """
 Allergen management endpoints with cross-reaction support.
+
+PERF-BGTASK-01: Uses FastAPI BackgroundTasks for event publishing.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 
 from rest_api.routers.admin._base import (
     Depends, HTTPException, status, Session, select,
@@ -186,10 +188,14 @@ def update_allergen(
 @router.delete("/allergens/{allergen_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_allergen(
     allergen_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(require_admin),
 ) -> None:
-    """Soft delete an allergen. Requires ADMIN role."""
+    """Soft delete an allergen. Requires ADMIN role.
+
+    PERF-BGTASK-01: Uses BackgroundTasks for async event publishing.
+    """
     allergen = db.scalar(
         select(Allergen).where(
             Allergen.id == allergen_id,
@@ -214,6 +220,7 @@ def delete_allergen(
         entity_id=allergen_id,
         entity_name=allergen_name,
         actor_user_id=get_user_id(user),
+        background_tasks=background_tasks,
     )
 
 

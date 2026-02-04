@@ -67,10 +67,51 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(start_retry_processor(interval_seconds=30.0))
     logger.info("Webhook retry processor started")
 
+    # OUTBOX-PATTERN: Start outbox processor for guaranteed event delivery
+    from rest_api.services.events.outbox_processor import start_outbox_processor
+    await start_outbox_processor()
+    logger.info("Outbox processor started")
+
+    # REDIS-02: Warm caches on startup to prevent cold-start latency
+    try:
+        from shared.infrastructure.events import get_redis_client
+        from shared.infrastructure.cache.warmer import (
+            warm_caches_on_startup,
+            start_refresh_ahead,
+        )
+        redis = await get_redis_client()
+        await warm_caches_on_startup(redis, SessionLocal)
+        logger.info("Cache warming completed")
+        
+        # OPT-03: Start refresh-ahead scheduler for proactive cache refresh
+        await start_refresh_ahead(redis, SessionLocal)
+        logger.info("Refresh-ahead scheduler started")
+        
+        # OBS-01: Initialize Prometheus metrics system
+        from shared.infrastructure.metrics import init_metrics
+        await init_metrics(redis)
+        logger.info("Prometheus metrics initialized")
+    except Exception as e:
+        # Cache warming failure is non-fatal - app can still start
+        logger.warning("Cache/metrics initialization failed (non-fatal)", error=str(e))
+
     yield
 
     # Shutdown
     logger.info("Shutting down REST API")
+
+    # OPT-03: Stop refresh-ahead scheduler
+    try:
+        from shared.infrastructure.cache.warmer import stop_refresh_ahead
+        await stop_refresh_ahead()
+        logger.info("Refresh-ahead scheduler stopped")
+    except Exception as e:
+        logger.warning("Failed to stop refresh-ahead scheduler", error=str(e))
+
+    # OUTBOX-PATTERN: Stop outbox processor gracefully
+    from rest_api.services.events.outbox_processor import stop_outbox_processor
+    await stop_outbox_processor()
+    logger.info("Outbox processor stopped")
 
     # Close Ollama HTTP client on shutdown
     from rest_api.services.rag.service import close_ollama_client

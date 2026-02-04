@@ -11,14 +11,26 @@ from sqlalchemy.orm import sessionmaker, Session
 
 from shared.config.settings import DATABASE_URL
 
+import os
+
+
+def _calculate_pool_size() -> int:
+    """
+    DEFECTO-05 FIX: Calculate optimal pool size based on CPU cores.
+    Formula: (2 * CPU cores) + 1, capped at 20 for reasonable limits.
+    """
+    cores = os.cpu_count() or 4
+    return min(cores * 2 + 1, 20)
+
 
 # Create engine with connection pooling and timeouts
 # BACK-HIGH-01: Added timeout and pool settings for production reliability
+# DEFECTO-05 FIX: Dynamic pool size based on CPU cores
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,  # Verify connections before using
-    pool_size=5,
-    max_overflow=10,
+    pool_size=_calculate_pool_size(),
+    max_overflow=15,  # DEFECTO-05 FIX: Increased for high-load scenarios
     pool_timeout=30,  # Wait max 30s for connection from pool
     pool_recycle=1800,  # Recycle connections after 30 minutes
     connect_args={"connect_timeout": 10},  # Connection establishment timeout

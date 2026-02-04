@@ -1,1386 +1,293 @@
-# WebSocket Gateway: Arquitectura y Funcionamiento
+# WebSocket Gateway: Arquitectura Modular y Funcionamiento Interno
+
+**Versión 3.0 - Febrero 2026**
 
 ## Introducción
 
-El WebSocket Gateway constituye el sistema nervioso central de comunicación en tiempo real dentro del ecosistema Integrador. Ejecutándose en el puerto 8001, este servicio actúa como intermediario entre los eventos de dominio generados por la API REST y los clientes conectados que requieren notificaciones instantáneas. A diferencia del modelo tradicional de polling donde los clientes consultan repetidamente al servidor, el Gateway mantiene conexiones bidireccionales persistentes que permiten la transmisión inmediata de eventos sin latencia perceptible para el usuario final.
+El WebSocket Gateway constituye el sistema nervioso central de comunicación en tiempo real dentro del ecosistema Integrador. Este servicio, ejecutándose en el puerto 8001, desempeña un rol fundamental como intermediario entre los eventos de dominio generados por la API REST y los múltiples clientes conectados que requieren notificaciones instantáneas. A diferencia del modelo tradicional de polling, donde los clientes consultan repetidamente al servidor en busca de actualizaciones, el Gateway mantiene conexiones bidireccionales persistentes que permiten la transmisión inmediata de eventos sin latencia perceptible para el usuario final.
 
-La arquitectura del Gateway fue diseñada desde sus cimientos para soportar operaciones de alta concurrencia. Con capacidad para manejar simultáneamente entre 400 y 1000 conexiones WebSocket, el sistema implementa patrones avanzados de gestión de recursos que incluyen locks fragmentados por sucursal y usuario, un worker pool dedicado para broadcasting paralelo, y pools de conexiones Redis optimizados. Esta infraestructura permite que un restaurante ocupado pueda operar con docenas de mozos, múltiples terminales de cocina y cientos de comensales activos, todos recibiendo actualizaciones en tiempo real sobre el estado de sus pedidos.
+La arquitectura del Gateway fue diseñada desde sus cimientos para soportar operaciones de alta concurrencia en entornos de restauración exigentes. Con capacidad para manejar simultáneamente entre cuatrocientas y mil conexiones WebSocket, el sistema implementa patrones avanzados de gestión de recursos que incluyen locks fragmentados organizados por sucursal y usuario, un worker pool dedicado para broadcasting paralelo con diez workers, y pools de conexiones Redis optimizados para diferentes patrones de uso. Esta infraestructura robusta permite que un restaurante en hora pico pueda operar con docenas de mozos activos, múltiples terminales de cocina y cientos de comensales consultando el estado de sus pedidos, todos recibiendo actualizaciones en tiempo real sin degradación del servicio.
 
-El proyecto experimentó una refactorización arquitectónica significativa identificada como ARCH-MODULAR, que transformó archivos monolíticos de casi 1000 líneas en orquestadores delgados que delegan responsabilidades a módulos especializados. Esta transformación no solo mejoró la mantenibilidad del código sino que habilitó testing unitario granular y evolución independiente de cada componente.
-
----
-
-## Capítulo 1: Arquitectura Fundamental
-
-### 1.1 Estructura Modular del Proyecto
-
-El WebSocket Gateway reside en la carpeta `ws_gateway/` en la raíz del proyecto. Su organización refleja una arquitectura de componentes donde cada módulo tiene una responsabilidad única y bien definida:
-
-```
-ws_gateway/
-├── main.py                    # Punto de entrada FastAPI con lifespan manager
-├── connection_manager.py      # Orquestador delgado (~463 líneas, reducido de 987)
-├── redis_subscriber.py        # Orquestador de suscripción (~326 líneas, reducido de 666)
-├── core/                      # Módulos extraídos del connection_manager
-│   ├── __init__.py            # Re-exporta todos los módulos
-│   ├── connection/
-│   │   ├── lifecycle.py       # ConnectionLifecycle: connect/disconnect
-│   │   ├── broadcaster.py     # ConnectionBroadcaster: envío paralelo con workers
-│   │   ├── cleanup.py         # ConnectionCleanup: limpieza de conexiones muertas
-│   │   └── stats.py           # ConnectionStats: agregación de estadísticas
-│   └── subscriber/
-│       ├── drop_tracker.py    # EventDropRateTracker: alertas de eventos perdidos
-│       ├── validator.py       # Validación de esquemas de eventos
-│       └── processor.py       # Procesamiento en lotes de eventos
-└── components/                # Componentes organizados por dominio
-    ├── __init__.py            # Re-exporta símbolos públicos (backward compat)
-    ├── core/
-    │   ├── constants.py       # WSCloseCode, WSConstants, canales Redis
-    │   ├── context.py         # WebSocketContext para logging estructurado
-    │   └── dependencies.py    # Contenedor DI para testing
-    ├── connection/
-    │   ├── index.py           # ConnectionIndex: índices y mappings
-    │   ├── locks.py           # LockManager: locks fragmentados
-    │   ├── heartbeat.py       # HeartbeatTracker: detección de conexiones stale
-    │   └── rate_limiter.py    # WebSocketRateLimiter: límite de mensajes
-    ├── events/
-    │   ├── types.py           # WebSocketEvent, VALID_EVENT_TYPES
-    │   └── router.py          # EventRouter: validación y enrutamiento
-    ├── broadcast/
-    │   ├── router.py          # BroadcastRouter con Strategy y Observer patterns
-    │   └── tenant_filter.py   # TenantFilter: aislamiento multi-tenant
-    ├── auth/
-    │   └── strategies.py      # JWTAuthStrategy, TableTokenAuthStrategy
-    ├── endpoints/
-    │   ├── base.py            # WebSocketEndpointBase, JWTWebSocketEndpoint
-    │   ├── mixins.py          # Mixins de validación, heartbeat, JWT
-    │   └── handlers.py        # WaiterEndpoint, KitchenEndpoint, AdminEndpoint, DinerEndpoint
-    ├── resilience/
-    │   ├── circuit_breaker.py # CircuitBreaker con threading.Lock unificado
-    │   └── retry.py           # RetryConfig con jitter decorrelacionado
-    ├── metrics/
-    │   ├── collector.py       # MetricsCollector thread-safe
-    │   └── prometheus.py      # PrometheusFormatter para /ws/metrics
-    └── data/
-        └── sector_repository.py # SectorAssignmentRepository con caché TTL
-```
-
-La separación entre `core/` y `components/` refleja dos niveles de abstracción: `core/` contiene los módulos extraídos directamente de los orquestadores monolíticos originales, mientras que `components/` organiza funcionalidad transversal por dominio de responsabilidad.
-
-### 1.2 El Punto de Entrada: main.py
-
-El archivo `main.py` configura la aplicación FastAPI y orquesta el ciclo de vida completo del Gateway. La función `lifespan` es el corazón de esta orquestación, iniciando y deteniendo múltiples subsistemas de forma coordinada:
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: Inicializar todos los subsistemas
-    await manager.start_broadcast_workers()  # SCALE-HIGH-01: Worker pool paralelo
-
-    subscriber_task = asyncio.create_task(start_redis_subscriber())
-    stream_task = asyncio.create_task(run_stream_consumer(handle_routed_event))
-    cleanup_task = asyncio.create_task(start_heartbeat_cleanup())
-
-    yield  # Aplicación ejecutándose
-
-    # Shutdown: Cerrar ordenadamente
-    subscriber_task.cancel()
-    stream_task.cancel()
-    cleanup_task.cancel()
-
-    await manager.stop_broadcast_workers(timeout=5.0)
-    await manager._lock_manager.await_pending_cleanup()
-    cleanup_sector_repository()
-    await close_redis_pool()
-```
-
-El startup inicializa cuatro componentes críticos en paralelo: el worker pool de broadcasting (10 workers que procesan envíos concurrentemente), el suscriptor Redis Pub/Sub (escucha eventos en canales de sucursal, sector y sesión), el consumidor de Redis Streams (para eventos críticos con entrega garantizada), y la tarea de limpieza de heartbeat (remueve conexiones inactivas cada 30 segundos).
-
-Los endpoints WebSocket expuestos diferencian clientes por rol y método de autenticación:
-
-| Endpoint | Autenticación | Roles Permitidos | Propósito |
-|----------|---------------|------------------|-----------|
-| `/ws/waiter?token=JWT` | JWT | WAITER, MANAGER, ADMIN | Notificaciones por sector asignado |
-| `/ws/kitchen?token=JWT` | JWT | KITCHEN, MANAGER, ADMIN | Comandas para preparación |
-| `/ws/admin?token=JWT` | JWT | MANAGER, ADMIN | Visibilidad completa de sucursal |
-| `/ws/diner?table_token=TOKEN` | Table Token HMAC | N/A (sesión de mesa) | Actualizaciones de pedido personal |
-
-Adicionalmente, el Gateway expone endpoints de observabilidad:
-
-- `/ws/health` - Verificación básica de disponibilidad
-- `/ws/health/detailed` - Estado de Redis, pools, conexiones activas
-- `/ws/metrics` - Métricas en formato Prometheus para scraping
+El proyecto experimentó una refactorización arquitectónica significativa, identificada internamente como ARCH-MODULAR, que transformó archivos monolíticos de casi mil líneas de código en orquestadores delgados que delegan responsabilidades específicas a módulos especializados. El connection manager se redujo de novecientas ochenta y siete líneas a aproximadamente cuatrocientas sesenta y tres, mientras que el redis subscriber pasó de seiscientas sesenta y seis líneas a cerca de trescientas veintiséis. Esta transformación no solo mejoró dramáticamente la mantenibilidad del código base sino que también habilitó testing unitario granular de cada componente y permitió la evolución independiente de subsistemas sin afectar otras partes del Gateway.
 
 ---
 
-## Capítulo 2: Gestión de Conexiones
+## Capítulo 1: Topología del Proyecto y Organización de Módulos
 
-### 2.1 El Connection Manager como Orquestador
+El WebSocket Gateway reside en la carpeta ws_gateway ubicada en la raíz del proyecto Integrador. Su organización interna refleja una arquitectura de componentes donde cada módulo posee una responsabilidad única y claramente definida, siguiendo el principio de responsabilidad única que constituye la S en los principios SOLID.
 
-El `ConnectionManager` representa la fachada principal para todas las operaciones de conexión. Tras la refactorización ARCH-MODULAR-08, este archivo se transformó de una clase monolítica de 987 líneas a un orquestador delgado de 463 líneas que compone módulos especializados:
+El archivo main.py representa el punto de entrada de la aplicación FastAPI con aproximadamente doscientas ochenta líneas de código. Este módulo configura la aplicación, define el lifespan manager que orquesta el ciclo de vida completo del servicio, y registra los endpoints WebSocket junto con los endpoints de salud y métricas. Aquí se inicializan los workers de broadcasting, se establecen las suscripciones a Redis, se configuran las tareas de mantenimiento periódico como la limpieza de conexiones inactivas, y se define el consumidor de Redis Streams para eventos críticos que requieren entrega garantizada.
 
-```python
-class ConnectionManager:
-    def __init__(self) -> None:
-        # Componentes core
-        self._lock_manager = LockManager()
-        self._metrics = MetricsCollector()
-        self._heartbeat_tracker = HeartbeatTracker(timeout_seconds=self.HEARTBEAT_TIMEOUT)
-        self._rate_limiter = WebSocketRateLimiter(
-            max_messages=settings.ws_message_rate_limit,  # 20/segundo
-            window_seconds=settings.ws_message_rate_window,
-        )
-        self._index = ConnectionIndex()
+Los dos orquestadores principales, connection_manager.py y redis_subscriber.py, fueron refactorizados desde implementaciones monolíticas a coordinadores delgados que actúan como fachadas componiendo módulos especializados mediante inyección de dependencias. El connection manager ahora coordina cuatro módulos extraídos: ConnectionLifecycle para la aceptación y desconexión de clientes, ConnectionBroadcaster para envío paralelo mediante worker pools, ConnectionCleanup para eliminación de conexiones muertas o inactivas, y ConnectionStats para agregación de estadísticas de rendimiento. De manera análoga, el redis subscriber coordina módulos para validación de eventos, tracking de eventos perdidos, y procesamiento por lotes.
 
-        # Composición de módulos especializados
-        self._lifecycle = ConnectionLifecycle(...)  # Connect/disconnect
-        self._cleanup = ConnectionCleanup(...)      # Limpieza de stale/dead
-        self._broadcaster = ConnectionBroadcaster(...)  # Envío paralelo
-        self._stats = ConnectionStats(...)          # Agregación de estadísticas
-```
+El directorio core contiene los módulos extraídos de los orquestadores originales, organizados por dominio funcional. El subdirectorio connection agrupa cuatro módulos esenciales. El archivo lifecycle.py maneja la aceptación y desconexión de clientes WebSocket, implementando la verificación de límites de conexión, la validación de parámetros, y el registro en índices. El archivo broadcaster.py implementa el envío paralelo mediante worker pools con diez workers que procesan envíos concurrentemente, incluyendo la estrategia híbrida que selecciona automáticamente entre modo legacy para audiencias pequeñas y modo worker pool para broadcasts masivos. El archivo cleanup.py gestiona la identificación y eliminación de conexiones muertas o stale mediante el patrón de dos fases que evita errores de modificación de diccionarios durante iteración. El archivo stats.py agrega estadísticas de rendimiento incluyendo conteos de conexiones, broadcasts y eventos.
 
-Esta composición permite que cada aspecto de la gestión de conexiones sea probado, mantenido y evolucionado independientemente. Los métodos públicos del manager simplemente delegan al módulo apropiado:
+El subdirectorio subscriber dentro de core contiene módulos para el procesamiento de eventos Redis. El archivo drop_tracker.py monitorea y genera alertas cuando la tasa de eventos perdidos supera umbrales configurados, implementando una ventana deslizante de observación con cooldown entre alertas para evitar saturación del sistema de logging. El archivo validator.py valida esquemas de eventos entrantes verificando la presencia de campos requeridos como type, tenant_id y branch_id, y que el tipo de evento sea uno de los tipos conocidos y válidos. El archivo processor.py procesa lotes de eventos eficientemente, desacoplando la recepción de Redis del envío a conexiones WebSocket para mantener baja latencia.
 
-```python
-async def connect(self, websocket, user_id, branch_ids, ...):
-    await self._lifecycle.connect(websocket, user_id, branch_ids, ...)
-
-async def send_to_branch(self, branch_id, payload, tenant_id=None):
-    return await self._broadcaster.send_to_branch(branch_id, payload, tenant_id)
-```
-
-### 2.2 ConnectionIndex: Índices de Alta Velocidad
-
-El sistema mantiene múltiples índices para localizar conexiones en tiempo O(1) según diferentes criterios. El `ConnectionIndex` encapsula estas estructuras junto con operaciones de registro y búsqueda:
-
-```python
-class ConnectionIndex:
-    # Índices primarios
-    by_user: dict[int, set[WebSocket]]        # user_id → conexiones
-    by_branch: dict[int, set[WebSocket]]      # branch_id → conexiones
-    by_sector: dict[int, set[WebSocket]]      # sector_id → conexiones (waiters)
-    by_session: dict[int, set[WebSocket]]     # session_id → conexiones (diners)
-
-    # Índices por rol
-    admins_by_branch: dict[int, set[WebSocket]]   # Admins/managers por sucursal
-    kitchen_by_branch: dict[int, set[WebSocket]]  # Personal de cocina por sucursal
-
-    # Mappings inversos
-    _ws_to_user: dict[WebSocket, int]         # Conexión → user_id
-    _ws_to_tenant: dict[WebSocket, int | None] # Conexión → tenant_id
-    _ws_to_branches: dict[WebSocket, list[int]] # Conexión → branch_ids
-```
-
-El diseño de índices múltiples permite broadcasts selectivos sin iterar sobre todas las conexiones activas. Cuando un evento debe llegar solo a mozos del sector "Terraza", el sistema consulta directamente `by_sector[terraza_id]` y obtiene el conjunto exacto de conexiones destinatarias.
-
-### 2.3 Sistema de Locks Fragmentados
-
-Para manejar alta concurrencia sin contención excesiva, el Gateway implementa locks fragmentados (sharded locks) en el `LockManager`:
-
-```python
-class LockManager:
-    connection_counter_lock: asyncio.Lock     # Contador global de conexiones
-    _branch_locks: dict[int, asyncio.Lock]    # Un lock por sucursal
-    _user_locks: dict[int, asyncio.Lock]      # Un lock por usuario
-    sector_lock: asyncio.Lock                  # Operaciones de sector
-    session_lock: asyncio.Lock                 # Operaciones de sesión
-    dead_connections_lock: asyncio.Lock        # Limpieza de conexiones muertas
-```
-
-Cuando un mozo se conecta a la sucursal 5, solo se adquiere el lock de esa sucursal específica, permitiendo que conexiones a otras sucursales procedan en paralelo. Esta estrategia reduce la contención en aproximadamente un 90% comparado con un lock global único.
-
-El orden de adquisición de locks está estrictamente definido para prevenir deadlocks:
-
-1. `connection_counter_lock` (global, primero siempre)
-2. `user_lock` (por usuario, en orden ascendente de user_id)
-3. `branch_locks` (por sucursal, en orden ascendente de branch_id)
-4. Locks secundarios (`sector_lock`, `session_lock`, `dead_connections_lock`)
-
-El `LockManager` incluye lógica de cleanup automático para evitar acumulación infinita de locks:
-
-```python
-# WSConstants define límites
-MAX_CACHED_LOCKS = 500           # Máximo de locks cacheados
-LOCK_CLEANUP_THRESHOLD = 400     # Umbral para trigger de limpieza (80%)
-LOCK_CLEANUP_HYSTERESIS_RATIO = 0.8  # Reduce a 80% del threshold (previene thrashing)
-```
-
-### 2.4 ConnectionLifecycle: Registro y Desregistro
-
-El módulo `ConnectionLifecycle` encapsula toda la lógica de aceptación y limpieza de conexiones:
-
-```python
-async def connect(
-    self,
-    websocket: WebSocket,
-    user_id: int,
-    branch_ids: list[int],
-    sector_ids: list[int] | None = None,
-    is_admin: bool = False,
-    is_kitchen: bool = False,
-    timeout: float = WSConstants.WS_ACCEPT_TIMEOUT,
-    tenant_id: int | None = None,
-) -> None:
-    # 1. Verificar shutdown
-    if self._shutdown:
-        raise ConnectionError("Server is shutting down")
-
-    # 2. Validar parámetros
-    self._validate_branch_ids(branch_ids, user_id)
-    if sector_ids:
-        self._validate_sector_ids(sector_ids, user_id, tenant_id)
-
-    # 3. Verificar límite global (atómico)
-    async with self._lock_manager.connection_counter_lock:
-        if self._total_connections >= self._max_total_connections:
-            self._metrics.increment_connection_rejected_limit_sync()
-            raise ConnectionError(f"Server at capacity ({self._max_total_connections})")
-        self._total_connections += 1
-
-    # 4. Aceptar WebSocket
-    try:
-        await asyncio.wait_for(websocket.accept(), timeout=timeout)
-    except (asyncio.TimeoutError, Exception):
-        await self._decrement_connection_count()
-        raise
-
-    # 5. Registrar en índices
-    await self._register_connection(websocket, user_id, branch_ids, ...)
-```
-
-La validación incluye advertencias para patrones sospechosos como mozos con más de `MAX_SECTORS_PER_WAITER` (10) sectores asignados o IDs de sector duplicados, que podrían indicar configuración incorrecta.
-
-### 2.5 HeartbeatTracker y Limpieza de Conexiones
-
-El `HeartbeatTracker` mantiene un registro preciso de la última actividad de cada conexión:
-
-```python
-class HeartbeatTracker:
-    def __init__(self, timeout_seconds: float = 60.0):
-        self._last_heartbeat: dict[WebSocket, float] = {}
-        self._timeout = timeout_seconds
-        self._lock = threading.Lock()  # Thread-safe para sync operations
-
-    def record(self, ws: WebSocket) -> None:
-        with self._lock:
-            self._last_heartbeat[ws] = time.time()
-
-    def get_stale_connections(self) -> list[WebSocket]:
-        threshold = time.time() - self._timeout
-        with self._lock:
-            return [ws for ws, t in self._last_heartbeat.items() if t < threshold]
-```
-
-El protocolo de heartbeat funciona así:
-1. Cliente envía `{"type": "ping"}` cada 30 segundos
-2. Servidor responde `{"type": "pong"}` y actualiza timestamp
-3. Tarea de limpieza ejecuta cada 30 segundos
-4. Conexiones sin heartbeat en 60 segundos se marcan como stale
-5. Conexiones stale se cierran con código 1001 (GOING_AWAY)
-
-El `ConnectionCleanup` implementa un patrón de dos fases para evitar errores de "dictionary changed size during iteration":
-
-```python
-async def cleanup_stale_connections(self) -> int:
-    # Fase 1: Tomar snapshot bajo lock
-    stale = await self.get_stale_connections()
-
-    # Fase 2: Cerrar fuera del lock (operaciones I/O)
-    for ws in stale:
-        try:
-            await ws.close(code=WSCloseCode.GOING_AWAY, reason="Heartbeat timeout")
-        except Exception:
-            pass
-
-    # Fase 3: Desregistrar con double-check
-    for ws in stale:
-        await self._disconnect_callback(ws)
-
-    return len(stale)
-```
+El directorio components organiza funcionalidad transversal por dominio de responsabilidad, proporcionando una capa de abstracción adicional sobre los módulos core. Esta separación refleja dos niveles de abstracción complementarios: mientras core contiene los módulos extraídos directamente de los orquestadores monolíticos originales conservando su lógica fundamental, components organiza funcionalidad transversal facilitando la composición y reutilización de comportamientos comunes.
 
 ---
 
-## Capítulo 3: Broadcasting Paralelo
+## Capítulo 2: El Punto de Entrada y Gestión del Ciclo de Vida
 
-### 3.1 ConnectionBroadcaster con Worker Pool
+El archivo main.py configura la aplicación FastAPI y orquesta el ciclo de vida completo del Gateway mediante una función de lifespan asíncrona decorada con el context manager de asynccontextmanager. Esta función constituye el corazón de la orquestación del servicio, iniciando y deteniendo múltiples subsistemas de forma coordinada y ordenada.
 
-El módulo `ConnectionBroadcaster` representa una de las optimizaciones más significativas del Gateway. Para broadcasts a muchas conexiones, utiliza un worker pool que procesa envíos en paralelo verdadero:
+Durante la fase de startup, el sistema inicializa cinco componentes críticos que operarán en paralelo durante la vida del servicio. Primero, se inicializa el broadcaster del connection manager llamando a manager.broadcaster.initialize(), lo que arranca el worker pool con diez workers que procesan envíos de mensajes concurrentemente mediante una cola asíncrona con capacidad máxima de cinco mil tareas pendientes, proporcionando backpressure cuando el sistema experimenta picos de carga. Segundo, se crea una instancia singleton del EventRouter mediante init_event_router() que centraliza la validación y enrutamiento de eventos, evitando la creación de múltiples instancias que podrían causar inconsistencias o condiciones de carrera en el routing.
 
-```python
-class ConnectionBroadcaster:
-    DEFAULT_WORKER_COUNT = 10  # Workers paralelos
-    QUEUE_MAX_SIZE = 5000      # Backpressure: max tareas pendientes
+Tercero, se inicia la tarea del suscriptor Redis Pub/Sub creando una coroutine que ejecuta subscriber.start() como background task. Esta tarea escucha eventos en canales de sucursal, sector y sesión mediante suscripciones por patrón que permiten capturar dinámicamente todos los canales relevantes sin conocerlos de antemano. Cuarto, se lanza el consumidor de Redis Streams para eventos críticos que requieren entrega garantizada, complementando el sistema Pub/Sub con semánticas de at-least-once delivery. Quinto, se activa la tarea de limpieza de heartbeat mediante create_task(heartbeat_cleanup_task()) que ejecuta periódicamente cada treinta segundos para remover conexiones que han permanecido inactivas por más del timeout configurado.
 
-    async def start_workers(self) -> None:
-        """Inicia el pool en lifespan startup."""
-        self._queue = asyncio.Queue(maxsize=self.QUEUE_MAX_SIZE)
-        self._running = True
+La fase de shutdown procede de manera ordenada y segura para evitar pérdida de datos o corrupción de estado. Primero se cancelan las tareas de suscripción y consumo de eventos verificando que existan antes de llamar cancel() y esperando su finalización con suppress de CancelledError, asegurando que no se procesen eventos nuevos durante el cierre. Luego se detiene el worker pool de broadcasting llamando a manager.broadcaster.shutdown() con un timeout de cinco segundos, permitiendo que los envíos en progreso finalicen graciosamente antes de forzar la terminación de workers que no respondan. A continuación se espera la finalización de cualquier operación de limpieza de locks pendiente. Finalmente se liberan los recursos del repositorio de sectores mediante cleanup_sector_repository() y se cierran los pools de conexiones Redis para liberar todos los recursos del sistema.
 
-        for i in range(self._worker_count):
-            worker = asyncio.create_task(
-                self._worker_loop(i),
-                name=f"broadcast_worker_{i}"
-            )
-            self._workers.append(worker)
-```
+El Gateway expone diferentes endpoints WebSocket diferenciados por rol y método de autenticación, cada uno manejado por una clase de endpoint especializada que hereda de las clases base definidas en components/endpoints. El endpoint /ws/waiter acepta tokens JWT y permite conexiones de usuarios con roles WAITER, MANAGER o ADMIN, entregando notificaciones filtradas por los sectores asignados al mozo según su configuración del día actual. El endpoint /ws/kitchen también utiliza autenticación JWT pero está destinado a personal con roles KITCHEN, MANAGER o ADMIN, recibiendo únicamente las comandas que han sido enviadas a cocina y requieren preparación. El endpoint /ws/admin proporciona visibilidad completa de sucursal para usuarios MANAGER o ADMIN mediante autenticación JWT, recibiendo todos los eventos de la sucursal sin filtrado. El endpoint /ws/diner utiliza table tokens HMAC en lugar de JWT, permitiendo que los comensales reciban actualizaciones sobre el estado de sus pedidos personales sin necesidad de cuentas de usuario en el sistema.
 
-Cada worker ejecuta un loop que consume tareas de la cola:
-
-```python
-async def _worker_loop(self, worker_id: int) -> None:
-    while self._running:
-        try:
-            task = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            ws, payload, result_future = task
-
-            success = await self._send_to_connection_internal(ws, payload)
-            if result_future and not result_future.done():
-                result_future.set_result(success)
-        except asyncio.TimeoutError:
-            continue  # No hay tareas, seguir esperando
-        finally:
-            self._queue.task_done()
-```
-
-### 3.2 Estrategia Híbrida de Broadcasting
-
-El broadcaster utiliza una estrategia híbrida que selecciona el método óptimo según el tamaño del broadcast:
-
-```python
-async def _broadcast_to_connections(
-    self,
-    connections: list[WebSocket],
-    payload: dict[str, Any],
-    context: str = "broadcast",
-) -> int:
-    if not connections:
-        return 0
-
-    # Broadcasts grandes (>50 conexiones): usa worker pool
-    if self._running and self._queue and len(connections) > self._batch_size:
-        return await self._broadcast_via_workers(connections, payload, context)
-
-    # Broadcasts pequeños: modo legacy (lotes secuenciales)
-    return await self._broadcast_legacy(connections, payload, context)
-```
-
-**Modo Worker Pool** (>50 conexiones):
-- Cada envío se encola como tupla `(ws, payload, future)`
-- 10 workers procesan en paralelo verdadero
-- Futures rastrean resultados para conteo de éxito/fallo
-- Tiempo de broadcast reducido de ~4 segundos a ~160ms para 400 conexiones
-
-**Modo Legacy** (≤50 conexiones):
-```python
-async def _broadcast_legacy(self, connections, payload, context):
-    for i in range(0, len(connections), self._batch_size):
-        batch = connections[i:i + self._batch_size]
-        results = await asyncio.gather(
-            *[self._send_to_connection(ws, payload) for ws in batch],
-            return_exceptions=True
-        )
-```
-
-### 3.3 Filtrado Multi-Tenant
-
-El `TenantFilter` garantiza aislamiento estricto entre restaurantes (tenants):
-
-```python
-def filter_by_tenant(
-    self,
-    connections: list[WebSocket],
-    tenant_id: int | None,
-) -> list[WebSocket]:
-    if tenant_id is None:
-        return connections  # Sin filtro si no se especifica tenant
-    return self._index.filter_by_tenant(connections, tenant_id)
-```
-
-Cada conexión almacena su `tenant_id` durante el registro. Antes de cualquier broadcast, el filtro verifica que solo conexiones del mismo tenant reciban el mensaje. Crucialmente, esta verificación ocurre **dentro del lock de rama** para prevenir condiciones de carrera:
-
-```python
-async def send_to_branch(self, branch_id, payload, tenant_id=None):
-    branch_lock = await self._lock_manager.get_branch_lock(branch_id)
-    async with branch_lock:
-        connections = list(self._index.get_branch_connections(branch_id))
-        connections = self.filter_by_tenant(connections, tenant_id)  # DENTRO del lock
-    return await self._broadcast_to_connections(connections, payload, ...)
-```
-
-### 3.4 Rate Limiting de Broadcasts
-
-El broadcaster implementa rate limiting para broadcasts globales usando una deque con timestamps:
-
-```python
-async def broadcast(self, payload: dict[str, Any]) -> int:
-    now = time.time()
-    window_start = now - 1.0
-
-    # Contar broadcasts recientes en ventana de 1 segundo
-    recent_count = sum(1 for ts in self._broadcast_timestamps if ts > window_start)
-
-    if recent_count >= self._broadcast_rate_limit:
-        logger.warning("Broadcast rate limit exceeded, dropping message")
-        self._metrics.increment_broadcast_rate_limited_sync()
-        return 0
-
-    # O(1) append debido a deque con maxlen
-    self._broadcast_timestamps.append(now)
-
-    all_connections = self._index.get_all_connections()
-    return await self._broadcast_to_connections(list(all_connections), payload, "global")
-```
-
-El límite por defecto es `MAX_BROADCASTS_PER_SECOND = 100` broadcasts globales por segundo.
+Adicionalmente, el Gateway expone tres endpoints de observabilidad esenciales para el monitoreo operacional. El endpoint /ws/health responde a solicitudes GET con una verificación básica de disponibilidad del servicio retornando status healthy. El endpoint /ws/health/detailed ofrece información extendida ejecutando verificaciones asíncronas de Redis, reportando el estado de los pools de conexión, estadísticas de conexiones activas desglosadas por tipo, y el estado del circuit breaker. El endpoint /ws/metrics expone métricas en formato Prometheus para integración con sistemas de monitoreo y alerting, formateando los contadores del MetricsCollector según la especificación de Prometheus con líneas HELP y TYPE.
 
 ---
 
-## Capítulo 4: Suscripción a Eventos Redis
+## Capítulo 3: El Connection Manager como Orquestador Central
 
-### 4.1 Arquitectura del Suscriptor
+El ConnectionManager representa la fachada principal para todas las operaciones relacionadas con conexiones WebSocket, residiendo en el archivo connection_manager.py con aproximadamente cuatrocientas sesenta y tres líneas de código tras la refactorización ARCH-MODULAR-08. Esta clase actúa como punto de entrada unificado que coordina múltiples subsistemas especializados, proporcionando una interfaz coherente mientras delega la complejidad a módulos internos que pueden ser testeados y mantenidos independientemente.
 
-El `RedisSubscriber` establece una conexión persistente con Redis y escucha eventos publicados por la API REST. Tras la refactorización ARCH-MODULAR-09, se transformó en un orquestador delgado que delega a módulos especializados:
+El constructor del ConnectionManager inicializa los componentes core necesarios mediante inyección de dependencias a través de la clase ConnectionManagerDependencies definida en components/core/dependencies.py. Esta clase contenedora agrupa todas las dependencias como singletons que pueden ser reemplazados durante testing. El LockManager proporciona coordinación de concurrencia mediante locks fragmentados por sucursal y usuario. El MetricsCollector centraliza estadísticas con operaciones thread-safe para contextos tanto async como sync. El HeartbeatTracker detecta conexiones inactivas manteniendo timestamps de última actividad. El WebSocketRateLimiter previene abuso limitando mensajes por conexión. El ConnectionIndex proporciona búsqueda rápida mediante múltiples índices.
 
-```python
-# Global drop rate tracker (singleton)
-_drop_rate_tracker = get_drop_tracker(
-    window_seconds=60.0,
-    alert_threshold_percent=5.0,
-    alert_cooldown_seconds=300.0,
-)
+La verdadera potencia del diseño radica en la composición de módulos especializados del directorio core/connection. El objeto _lifecycle de tipo ConnectionLifecycle encapsula toda la lógica de registro y desregistro de conexiones, incluyendo verificación de límites, validación de parámetros, aceptación del WebSocket con timeout, y actualización de índices. El objeto _cleanup de tipo ConnectionCleanup maneja la identificación y eliminación de conexiones muertas o stale mediante el patrón de dos fases. El objeto _broadcaster de tipo ConnectionBroadcaster implementa el envío paralelo de mensajes mediante worker pools con estrategia híbrida de selección. El objeto _stats de tipo ConnectionStats agrega y expone estadísticas de rendimiento consultando los índices y el metrics collector.
 
-async def run_subscriber(
-    channels: list[str],
-    on_message: Callable[[dict], Awaitable[None]],
-) -> None:
-    redis_pool = await get_redis_pool()
-    pubsub = redis_pool.pubsub()
-    await pubsub.psubscribe(*channels)
+Esta composición permite que cada aspecto de la gestión de conexiones sea probado, mantenido y evolucionado independientemente sin afectar otros componentes. Los métodos públicos del manager simplemente delegan al módulo apropiado con mínima lógica de coordinación: una llamada a connect() invoca internamente _lifecycle.connect(), mientras que send_to_branch() delega a _broadcaster.send_to_branch(). Este patrón de delegación mantiene el código del manager legible y facilita la sustitución de implementaciones durante testing mediante el contenedor de dependencias.
 
-    event_queue: deque[dict] = deque(maxlen=MAX_EVENT_QUEUE_SIZE)  # 5000
-
-    while True:
-        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-
-        if msg is None:
-            # Procesar cola durante tiempo idle
-            if event_queue:
-                await process_event_batch(event_queue, on_message, _drop_rate_tracker)
-            continue
-
-        # Delegar a módulo de procesamiento
-        handle_incoming_message(msg, event_queue, events_dropped, _drop_rate_tracker)
-```
-
-### 4.2 Canales de Suscripción
-
-Los canales están definidos en `WSConstants` para evitar discrepancias entre publicador y suscriptor:
-
-```python
-class WSConstants:
-    # Canales Redis Pub/Sub
-    REDIS_CHANNEL_BRANCH_WAITERS = "branch:*:waiters"   # Eventos para mozos
-    REDIS_CHANNEL_BRANCH_KITCHEN = "branch:*:kitchen"  # Eventos para cocina
-    REDIS_CHANNEL_BRANCH_ADMIN = "branch:*:admin"      # Eventos para admin
-    REDIS_CHANNEL_SECTOR_WAITERS = "sector:*:waiters"  # Eventos por sector específico
-    REDIS_CHANNEL_SESSION = "session:*"                # Eventos de sesión (diners)
-
-    REDIS_SUBSCRIPTION_CHANNELS = (
-        REDIS_CHANNEL_BRANCH_WAITERS,
-        REDIS_CHANNEL_BRANCH_KITCHEN,
-        REDIS_CHANNEL_BRANCH_ADMIN,
-        REDIS_CHANNEL_SECTOR_WAITERS,
-        REDIS_CHANNEL_SESSION,
-    )
-```
-
-Los patrones con wildcard (`*`) permiten suscribirse dinámicamente a todas las sucursales y sectores sin conocerlos de antemano. La estructura `<entidad>:<id>:<destinatario>` permite routing granular donde el backend publica a canales específicos según el tipo de evento.
-
-### 4.3 EventDropRateTracker
-
-El `EventDropRateTracker` monitorea eventos que no pueden ser procesados y genera alertas cuando la tasa de pérdida supera umbrales configurados:
-
-```python
-class EventDropRateTracker:
-    def __init__(
-        self,
-        window_seconds: float = 60.0,       # Ventana deslizante
-        alert_threshold_percent: float = 5.0,  # Alertar si >5% se pierden
-        alert_cooldown_seconds: float = 300.0, # 5 min entre alertas
-    ):
-        max_entries = int(window_seconds * 1000)  # Bounded memory
-        self._window: deque[tuple[float, int, int]] = deque(maxlen=max_entries)
-
-    def record_dropped(self) -> None:
-        now = time.time()
-        with self._lock:
-            self._cleanup_window(now)
-            self._window.append((now, 0, 1))  # (timestamp, processed, dropped)
-            self._total_dropped += 1
-            self._check_alert(now)
-
-    def _check_alert(self, now: float) -> None:
-        if now - self._last_alert_time < self._alert_cooldown:
-            return
-
-        window_total = sum(p + d for _, p, d in self._window)
-        if window_total == 0:
-            return
-
-        drop_rate = sum(d for _, _, d in self._window) / window_total
-        if drop_rate > self._alert_threshold:
-            self._last_alert_time = now
-            logger.error(
-                "CRITICAL: Event drop rate exceeds threshold!",
-                drop_rate_percent=round(drop_rate * 100, 2),
-                threshold_percent=round(self._alert_threshold * 100, 2),
-            )
-```
-
-### 4.4 Validación de Esquema de Eventos
-
-El módulo `validator.py` verifica que los eventos contengan los campos requeridos antes del procesamiento:
-
-```python
-REQUIRED_EVENT_FIELDS = frozenset({"type", "tenant_id", "branch_id"})
-OPTIONAL_EVENT_FIELDS = frozenset({"session_id", "sector_id", "table_id", "entity", ...})
-VALID_EVENT_TYPES = frozenset({
-    "ROUND_PENDING", "ROUND_CONFIRMED", "ROUND_SUBMITTED",
-    "ROUND_IN_KITCHEN", "ROUND_READY", "ROUND_SERVED", "ROUND_CANCELED",
-    "SERVICE_CALL_CREATED", "SERVICE_CALL_ACKED", "SERVICE_CALL_CLOSED",
-    "TABLE_SESSION_STARTED", "TABLE_CLEARED", "TABLE_STATUS_CHANGED",
-    "TICKET_IN_PROGRESS", "TICKET_READY", "TICKET_DELIVERED",
-    "ENTITY_CREATED", "ENTITY_UPDATED", "ENTITY_DELETED",
-    ...
-})
-
-def validate_event_schema_pure(data: dict) -> tuple[bool, str]:
-    """Validación pura sin efectos secundarios."""
-    if not isinstance(data, dict):
-        return False, "not_dict"
-
-    missing = REQUIRED_EVENT_FIELDS - set(data.keys())
-    if missing:
-        return False, f"missing_fields:{','.join(missing)}"
-
-    event_type = data.get("type")
-    if event_type not in VALID_EVENT_TYPES:
-        return False, f"unknown_type:{event_type}"
-
-    return True, ""
-```
-
-### 4.5 Circuit Breaker para Redis
-
-El `CircuitBreaker` ubicado en `ws_gateway/components/resilience/circuit_breaker.py` protege al Gateway contra cascadas de fallos cuando Redis experimenta problemas:
-
-```python
-class CircuitState(Enum):
-    CLOSED = "closed"      # Normal: requests pasan
-    OPEN = "open"          # Fallo: requests rechazados
-    HALF_OPEN = "half_open"  # Recuperación: prueba limitada
-
-class CircuitBreaker:
-    def __init__(
-        self,
-        name: str,
-        failure_threshold: int = 5,      # Fallos antes de abrir
-        recovery_timeout: float = 30.0,   # Segundos en OPEN antes de probar
-        half_open_max_calls: int = 3,    # Pruebas permitidas en HALF_OPEN
-    ):
-        # CRIT-AUD-01 FIX: Lock unificado para sync y async
-        self._lock = threading.Lock()  # Thread-safe en cualquier contexto
-
-    def record_failure(self, error: BaseException | None = None) -> None:
-        with self._lock:
-            self._failed_calls += 1
-            self._failure_count += 1
-            self._last_failure_time = time.time()
-
-            if self._state == CircuitState.HALF_OPEN:
-                self._transition_to(CircuitState.OPEN)
-            elif self._state == CircuitState.CLOSED:
-                if self._failure_count >= self._failure_threshold:
-                    self._transition_to(CircuitState.OPEN)
-
-    def record_success(self) -> None:
-        with self._lock:
-            self._successful_calls += 1
-            if self._state == CircuitState.HALF_OPEN:
-                self._transition_to(CircuitState.CLOSED)
-            elif self._state == CircuitState.CLOSED:
-                self._failure_count = 0  # Reset en éxito
-```
-
-El uso de un único `threading.Lock` (CRIT-AUD-01 FIX) resuelve race conditions que ocurrían cuando `asyncio.Lock` y operaciones sync modificaban el mismo estado desde diferentes contextos.
-
-### 4.6 Redis Streams para Eventos Críticos
-
-Además de Pub/Sub, el Gateway implementa un consumidor de Redis Streams para eventos críticos que requieren entrega garantizada:
-
-```python
-# Constantes de Streams
-REDIS_STREAM_EVENTS = "events:critical"
-REDIS_STREAM_DLQ = "events:dlq"
-REDIS_CONSUMER_GROUP = "ws_gateway_group"
-STREAM_MAX_RETRIES = 3
-
-async def run_stream_consumer(on_event: Callable[[dict], Awaitable[None]]):
-    """
-    Consumer Group pattern para entrega garantizada:
-    1. Crea Consumer Group si no existe (MKSTREAM)
-    2. Lee mensajes nuevos con XREADGROUP
-    3. Procesa y ACK cada mensaje exitoso
-    4. XAUTOCLAIM para mensajes pendientes huérfanos
-    5. Mensajes con 3+ fallos van a DLQ
-    """
-    redis = await get_redis_pool()
-
-    # Crear grupo si no existe
-    try:
-        await redis.xgroup_create(STREAM_EVENTS, CONSUMER_GROUP, mkstream=True)
-    except Exception:
-        pass  # Grupo ya existe
-
-    while True:
-        # Leer mensajes nuevos
-        messages = await redis.xreadgroup(
-            CONSUMER_GROUP, consumer_name,
-            {STREAM_EVENTS: ">"},
-            count=100, block=5000
-        )
-
-        for stream, entries in messages:
-            for msg_id, fields in entries:
-                try:
-                    await on_event(fields)
-                    await redis.xack(STREAM_EVENTS, CONSUMER_GROUP, msg_id)
-                except Exception as e:
-                    # Incrementar retry count
-                    retry_count = int(fields.get("_retry_count", 0)) + 1
-                    if retry_count >= STREAM_MAX_RETRIES:
-                        await redis.xadd(STREAM_DLQ, {
-                            "original_id": msg_id,
-                            "error": str(e),
-                            "retry_count": retry_count,
-                            "original_data": json.dumps(fields),
-                        })
-                        await redis.xack(STREAM_EVENTS, CONSUMER_GROUP, msg_id)
-```
+El manager también expone propiedades de conveniencia que proporcionan acceso a submódulos para código que necesita funcionalidad específica. La propiedad broadcaster retorna el objeto _broadcaster permitiendo acceso directo a métodos de envío especializados. La propiedad lifecycle retorna el objeto _lifecycle para operaciones de registro avanzadas. Estas propiedades mantienen la encapsulación mientras permiten acceso controlado cuando es necesario.
 
 ---
 
-## Capítulo 5: Autenticación y Autorización
+## Capítulo 4: Sistema de Índices para Búsqueda de Conexiones
 
-### 5.1 Estrategias de Autenticación
+El sistema mantiene múltiples índices para localizar conexiones en tiempo constante O(1) según diferentes criterios de búsqueda, implementados en la clase ConnectionIndex ubicada en components/connection/index.py. Esta clase encapsula las estructuras de datos junto con las operaciones de registro, búsqueda y eliminación, actuando como un value object que representa el estado actual de todas las conexiones del sistema.
 
-El Gateway implementa el patrón Strategy para soportar diferentes métodos de autenticación a través de clases en `components/auth/strategies.py`:
+Los índices primarios organizan conexiones por atributo clave utilizando diccionarios que mapean identificadores a conjuntos de WebSockets. El diccionario by_user mapea identificadores de usuario a conjuntos de sus conexiones activas, permitiendo enviar mensajes a todas las sesiones de un usuario específico cuando este tiene múltiples dispositivos conectados. El diccionario by_branch agrupa conexiones por sucursal, fundamental para broadcasts de eventos de negocio que deben llegar a todo el personal de una ubicación específica. El diccionario by_sector mantiene conexiones de mozos organizadas por sector asignado, habilitando notificaciones dirigidas solo al personal responsable de ciertas mesas cuando un evento solo es relevante para el área específica del restaurante. El diccionario by_session agrupa conexiones de comensales por sesión de mesa, permitiendo que todos los participantes de una mesa reciban actualizaciones de su pedido compartido en tiempo real.
 
-```python
-@dataclass(frozen=True, slots=True)
-class AuthResult:
-    """Resultado inmutable de autenticación."""
-    success: bool
-    data: dict[str, Any] | None = None
-    error_message: str | None = None
-    close_code: int = WSCloseCode.AUTH_FAILED
-    audit_reason: str | None = None
+Los índices por rol proporcionan acceso rápido a conexiones con permisos específicos que requieren tratamiento diferenciado. El diccionario admins_by_branch contiene conexiones de administradores y managers por sucursal, utilizado para eventos que requieren visibilidad de gestión como confirmaciones de pedidos o alertas operativas. El diccionario kitchen_by_branch agrupa personal de cocina por sucursal, destinatarios de comandas y actualizaciones de preparación que solo son relevantes para el área de producción.
 
-    @classmethod
-    def ok(cls, data: dict[str, Any]) -> "AuthResult":
-        return cls(success=True, data=data)
+Los mappings inversos permiten obtener información sobre una conexión específica sin iterar sobre todos los índices, operación que sería costosa en un sistema con cientos de conexiones. El diccionario _ws_to_user mapea cada WebSocket a su user_id asociado, permitiendo identificar al propietario de una conexión durante operaciones de limpieza. El diccionario _ws_to_tenant mapea cada conexión a su tenant_id para filtrado multi-tenant que garantiza aislamiento entre restaurantes. El diccionario _ws_to_branches almacena los branch_ids a los que cada conexión tiene acceso, utilizado durante verificaciones de autorización.
 
-    @classmethod
-    def fail(cls, message: str, close_code: int = WSCloseCode.AUTH_FAILED,
-             audit_reason: str = "auth_failed") -> "AuthResult":
-        return cls(success=False, error_message=message,
-                   close_code=close_code, audit_reason=audit_reason)
-
-    @classmethod
-    def forbidden(cls, message: str, audit_reason: str = "forbidden") -> "AuthResult":
-        return cls(success=False, error_message=message,
-                   close_code=WSCloseCode.FORBIDDEN, audit_reason=audit_reason)
-```
-
-La clase `JWTAuthStrategy` valida tokens JWT con verificación de roles:
-
-```python
-class JWTAuthStrategy(AuthStrategy, OriginValidationMixin):
-    def __init__(self, required_roles: list[str], reject_refresh_tokens: bool = True):
-        self._required_roles = required_roles
-        self._reject_refresh_tokens = reject_refresh_tokens
-
-    async def authenticate(self, websocket: WebSocket, token: str) -> AuthResult:
-        # 1. Validar origen
-        if not self.validate_origin(websocket):
-            return AuthResult.forbidden("Origin not allowed", audit_reason="invalid_origin")
-
-        # 2. Verificar JWT
-        try:
-            claims = verify_jwt(token)
-        except HTTPException:
-            return AuthResult.fail("Authentication failed", audit_reason="jwt_validation_failed")
-
-        # 3. Rechazar refresh tokens
-        if self._reject_refresh_tokens and claims.get("type") == "refresh":
-            return AuthResult.fail("Authentication failed", audit_reason="refresh_token_used")
-
-        # 4. Verificar roles
-        roles = claims.get("roles", [])
-        if not roles:
-            return AuthResult.forbidden("Access denied - no roles", audit_reason="empty_roles")
-
-        if not any(role in roles for role in self._required_roles):
-            return AuthResult.forbidden("Access denied", audit_reason="insufficient_role")
-
-        return AuthResult.ok(claims)
-```
-
-La estrategia `TableTokenAuthStrategy` valida tokens HMAC de sesión de mesa para comensales:
-
-```python
-class TableTokenAuthStrategy(AuthStrategy, OriginValidationMixin):
-    async def authenticate(self, websocket: WebSocket, token: str) -> AuthResult:
-        if not self.validate_origin(websocket):
-            return AuthResult.forbidden("Origin not allowed", audit_reason="invalid_origin")
-
-        try:
-            token_data = verify_table_token(token)
-            return AuthResult.ok(token_data)
-        except HTTPException:
-            return AuthResult.fail("Authentication failed",
-                                   audit_reason="table_token_validation_failed")
-```
-
-### 5.2 Revalidación Periódica de Tokens
-
-Las conexiones WebSocket son de larga duración, pero los tokens expiran. El Gateway implementa revalidación periódica diferenciada:
-
-```python
-# WSConstants
-JWT_REVALIDATION_INTERVAL = 300.0           # 5 minutos para staff
-TABLE_TOKEN_REVALIDATION_INTERVAL = 1800.0  # 30 minutos para diners
-```
-
-**JWT Revalidation** (endpoints staff - WaiterEndpoint, KitchenEndpoint, AdminEndpoint):
-
-La clase base `JWTWebSocketEndpoint` implementa revalidación en su loop de mensajes:
-
-```python
-async def _message_loop(self) -> None:
-    while True:
-        # Revalidar JWT periódicamente
-        if not await self._jwt_revalidation_check():
-            break  # Token expirado/revocado, cerrar conexión
-
-        # Procesar mensaje...
-```
-
-**Table Token Revalidation** (DinerEndpoint - SEC-HIGH-01 FIX):
-
-```python
-class DinerEndpoint(WebSocketEndpointBase):
-    async def _pre_message_hook(self) -> bool:
-        """Revalida table tokens para sesiones largas (2+ horas)."""
-        current_time = time.time()
-        time_since_revalidation = current_time - self._last_token_revalidation
-
-        if time_since_revalidation < WSConstants.TABLE_TOKEN_REVALIDATION_INTERVAL:
-            return True  # No es tiempo de revalidar
-
-        try:
-            token_data = verify_table_token(self.table_token)
-
-            # Verificar session_id sigue coincidiendo
-            if token_data.get("session_id") != self._session_id:
-                await self.websocket.close(
-                    code=WSCloseCode.AUTH_FAILED,
-                    reason="Session mismatch"
-                )
-                return False
-
-            self._last_token_revalidation = current_time
-            return True
-
-        except Exception:
-            await self.websocket.close(
-                code=WSCloseCode.AUTH_FAILED,
-                reason="Token expired"
-            )
-            return False
-```
-
-### 5.3 Validación de Origen
-
-Todos los endpoints validan el header `Origin` para prevenir ataques CSRF a través de la función compartida:
-
-```python
-def validate_websocket_origin(origin: str | None, settings) -> bool:
-    """
-    HIGH-NEW-03 FIX: Validación centralizada de origen.
-
-    En desarrollo: permite origen ausente.
-    En producción: requiere origen en lista permitida.
-    """
-    if not origin:
-        return settings.environment == "development"
-    return origin in settings.allowed_origins
-```
-
-Conexiones con origen inválido reciben código de cierre 4003 (FORBIDDEN).
+El diseño de índices múltiples permite broadcasts selectivos sin necesidad de iterar sobre todas las conexiones activas del sistema, lo cual degradaría el rendimiento bajo carga. Cuando un evento debe llegar únicamente a los mozos del sector Terraza, el sistema consulta directamente by_sector con el identificador del sector y obtiene inmediatamente el conjunto exacto de conexiones destinatarias, sin examinar las cientos de otras conexiones que podrían estar activas simultáneamente en otros sectores, sucursales o roles.
 
 ---
 
-## Capítulo 6: Endpoints WebSocket
+## Capítulo 5: Locks Fragmentados y Prevención de Deadlocks
 
-### 6.1 Jerarquía de Clases
+Para manejar alta concurrencia sin contención excesiva que degradaría el rendimiento, el Gateway implementa un sistema de locks fragmentados coordinado por el LockManager ubicado en components/connection/locks.py. Esta estrategia divide la sincronización en múltiples locks independientes, permitiendo que operaciones no relacionadas procedan en paralelo sin bloquearse mutuamente.
 
-Los endpoints WebSocket heredan de clases base que encapsulan comportamiento común, eliminando aproximadamente 300 líneas de código duplicado:
+El sistema define diferentes tipos de locks según su alcance y el recurso que protegen. El connection_counter_lock protege el contador global de conexiones activas como un recurso compartido crítico, asegurando que los límites de capacidad se respeten atómicamente cuando múltiples conexiones intentan registrarse simultáneamente. Los branch_locks proporcionan un lock por cada sucursal almacenados en un defaultdict, de modo que operaciones en sucursales diferentes no compiten por el mismo recurso y pueden ejecutarse en paralelo completo. Los user_locks ofrecen un lock por cada usuario, permitiendo que conexiones de diferentes usuarios se manejen concurrentemente sin interferencia.
 
-```python
-class WebSocketEndpointBase(ABC):
-    """Base abstracta con ciclo de vida completo."""
+Locks adicionales protegen estructuras de datos específicas que cruzan los límites de usuario o sucursal. El sector_lock protege el índice by_sector durante actualizaciones que afectan múltiples sectores. El session_lock protege el índice by_session para conexiones de comensales. El dead_connections_lock protege el conjunto de conexiones marcadas para limpieza diferida.
 
-    def __init__(
-        self,
-        websocket: WebSocket,
-        manager: ConnectionManager,
-        endpoint_name: str,
-    ):
-        self.websocket = websocket
-        self.manager = manager
-        self.endpoint_name = endpoint_name
+Cuando un mozo se conecta a la sucursal número cinco, el sistema solo adquiere el lock de esa sucursal específica mediante get_branch_lock(5). Esto permite que conexiones simultáneas a otras sucursales procedan sin bloqueo alguno. Esta estrategia de fragmentación reduce la contención en aproximadamente un noventa por ciento comparado con un lock global único, mejora crítica para sostener cientos de conexiones concurrentes durante las horas pico de operación.
 
-    async def run(self) -> None:
-        """Ejecuta el ciclo de vida completo del endpoint."""
-        auth_data = await self.validate_auth()
-        if auth_data is None:
-            return  # Auth falló, conexión ya cerrada
+El orden de adquisición de locks está estrictamente definido para prevenir deadlocks, siguiendo una jerarquía clara documentada en el código. Primero siempre se adquiere el connection_counter_lock como lock global de máxima prioridad que controla el recurso más fundamental. Luego los user_locks en orden ascendente de user_id cuando se necesitan múltiples locks de usuario simultáneamente. Después los branch_locks también en orden ascendente de branch_id para mantener consistencia. Finalmente los locks secundarios sector_lock, session_lock y dead_connections_lock que protegen estructuras auxiliares.
 
-        context = await self.create_context(auth_data)
-        await self.register_connection(context)
+Para garantizar el cumplimiento del orden de locks, el módulo lock_sequence.py implementa un context manager especializado que valida la secuencia de adquisición en tiempo de ejecución, desarrollado bajo la iniciativa ARCH-AUDIT-02. La clase LockSequence utiliza contextvars.ContextVar para rastrear el lock actualmente mantenido en cada contexto de ejecución asíncrona. Cuando se intenta adquirir un nuevo lock, el context manager compara su orden numérico definido en la enumeración LockOrder con el del lock actual. Si el nuevo lock tiene un orden menor o igual al actual, se lanza DeadlockRiskError inmediatamente con información detallada sobre ambos locks, antes de que pueda ocurrir el bloqueo que sería imposible de diagnosticar. Esta detección convierte bugs potencialmente catastróficos de deadlock en excepciones claras durante desarrollo.
 
-        try:
-            await self._message_loop()
-        finally:
-            await self.unregister_connection(context)
-
-    @abstractmethod
-    async def validate_auth(self) -> dict[str, Any] | None: ...
-    @abstractmethod
-    async def create_context(self, auth_data: dict) -> WebSocketContext: ...
-    @abstractmethod
-    async def register_connection(self, context: WebSocketContext) -> None: ...
-    @abstractmethod
-    async def unregister_connection(self, context: WebSocketContext) -> None: ...
-
-
-class JWTWebSocketEndpoint(WebSocketEndpointBase):
-    """Añade autenticación JWT y revalidación periódica."""
-
-    def __init__(self, ..., token: str, required_roles: list[str]):
-        super().__init__(...)
-        self.token = token
-        self._auth_strategy = JWTAuthStrategy(required_roles)
-        self._last_jwt_revalidation = time.time()
-
-    async def validate_auth(self) -> dict[str, Any] | None:
-        result = await self._auth_strategy.authenticate(self.websocket, self.token)
-        if not result.success:
-            await self.websocket.close(
-                code=result.close_code,
-                reason=result.error_message or "Authentication failed"
-            )
-            return None
-        return result.data
-```
-
-### 6.2 WaiterEndpoint
-
-El endpoint de mozos incluye funcionalidad específica como el comando `refresh_sectors`:
-
-```python
-class WaiterEndpoint(JWTWebSocketEndpoint):
-    def __init__(self, websocket: WebSocket, manager: ConnectionManager, token: str):
-        super().__init__(
-            websocket=websocket,
-            manager=manager,
-            endpoint_name="/ws/waiter",
-            token=token,
-            required_roles=["WAITER", "MANAGER", "ADMIN"],
-        )
-        self._sector_ids: list[int] = []
-
-    async def create_context(self, auth_data: dict[str, Any]) -> WebSocketContext:
-        self._user_id = int(auth_data["sub"])
-        raw_tenant_id = auth_data.get("tenant_id")
-        self._tenant_id = int(raw_tenant_id) if raw_tenant_id is not None else None
-        self._branch_ids = list(auth_data.get("branch_ids", []))
-        roles = auth_data.get("roles", [])
-
-        # Obtener asignaciones de sector para waiters
-        if "WAITER" in roles and self._tenant_id is not None:
-            self._sector_ids = await get_waiter_sector_ids(self._user_id, self._tenant_id)
-
-        self._is_admin_or_manager = any(role in roles for role in ["MANAGER", "ADMIN"])
-
-        return WebSocketContext.from_jwt_claims(
-            self.websocket, auth_data, self.endpoint_name,
-            sector_ids=self._sector_ids, is_admin=self._is_admin_or_manager,
-        )
-
-    async def handle_message(self, data: str) -> None:
-        if data == MSG_REFRESH_SECTORS:
-            # Revalidar JWT primero
-            if not await self.revalidate_jwt(self.token):
-                await self.websocket.close(code=WSCloseCode.AUTH_FAILED)
-                return
-
-            # Refrescar asignaciones de sector
-            new_sector_ids = await get_waiter_sector_ids(self._user_id, self._tenant_id)
-            await self.manager.update_sectors(self.websocket, new_sector_ids)
-            await self.websocket.send_text(f"sectors_updated:{','.join(map(str, new_sector_ids))}")
-            self._sector_ids = new_sector_ids
-```
-
-Los mozos reciben eventos filtrados por sector. Un mozo asignado a "Terraza" solo recibe notificaciones de mesas en terraza, no del interior. Los eventos `ROUND_PENDING` y `TABLE_SESSION_STARTED` son excepciones que se envían a todos los mozos de la sucursal para asegurar visibilidad.
-
-### 6.3 KitchenEndpoint
-
-El endpoint de cocina es más simple, recibiendo eventos de rondas desde SUBMITTED hasta SERVED:
-
-```python
-class KitchenEndpoint(JWTWebSocketEndpoint):
-    def __init__(self, websocket: WebSocket, manager: ConnectionManager, token: str):
-        super().__init__(
-            websocket=websocket,
-            manager=manager,
-            endpoint_name="/ws/kitchen",
-            token=token,
-            required_roles=["KITCHEN", "MANAGER", "ADMIN"],
-        )
-
-    async def register_connection(self, context: WebSocketContext) -> None:
-        await self.manager.connect(
-            self.websocket,
-            self._user_id,
-            self._branch_ids,
-            is_admin=self._is_admin_or_manager,
-            is_kitchen=True,  # Marca como conexión de cocina
-            tenant_id=self._tenant_id,
-        )
-```
-
-Los eventos PENDING y CONFIRMED no llegan a cocina ya que representan estados previos a la aprobación por el mozo y administrador. Solo cuando el round pasa a SUBMITTED aparece en las terminales de cocina.
-
-### 6.4 DinerEndpoint
-
-El endpoint de comensales usa autenticación por table token en lugar de JWT:
-
-```python
-class DinerEndpoint(WebSocketEndpointBase):
-    def __init__(
-        self,
-        websocket: WebSocket,
-        manager: ConnectionManager,
-        table_token: str,
-    ):
-        super().__init__(websocket, manager, "/ws/diner")
-        self.table_token = table_token
-        self._last_token_revalidation = time.time()
-
-    async def validate_auth(self) -> dict[str, Any] | None:
-        if not self._validate_origin():
-            await self.websocket.close(code=WSCloseCode.FORBIDDEN)
-            return None
-
-        try:
-            token_data = verify_table_token(self.table_token)
-            return token_data
-        except HTTPException:
-            await self.websocket.close(code=WSCloseCode.AUTH_FAILED)
-            return None
-
-    async def register_connection(self, context: WebSocketContext) -> None:
-        # user_id negativo para evitar colisión con IDs de usuario reales
-        self._pseudo_user_id = -self._session_id
-
-        await self.manager.connect(
-            self.websocket,
-            self._pseudo_user_id,
-            [self._branch_id],
-            tenant_id=self._tenant_id,
-        )
-        await self.manager.register_session(self.websocket, self._session_id)
-```
+El LockManager incluye además lógica de limpieza automática para evitar la acumulación infinita de locks en memoria que ocurriría si cada nueva sucursal o usuario creara un lock permanente. Se definen constantes que establecen un máximo de quinientos locks cacheados como MAX_CACHED_LOCKS, con un umbral de limpieza LOCK_CLEANUP_THRESHOLD al ochenta por ciento de capacidad que dispara la limpieza cuando se alcanza. Un ratio de histéresis LOCK_CLEANUP_HYSTERESIS_RATIO del ochenta por ciento previene el fenómeno de thrashing donde la limpieza ocurriría demasiado frecuentemente alternando entre estados de limpiar y llenar.
 
 ---
 
-## Capítulo 7: Rate Limiting y Protección
+## Capítulo 6: Ciclo de Vida de Conexiones
 
-### 7.1 Límite de Mensajes por Conexión
+El módulo ConnectionLifecycle ubicado en core/connection/lifecycle.py encapsula toda la lógica de aceptación y limpieza de conexiones, proporcionando una interfaz clara para el registro y desregistro de clientes WebSocket con manejo robusto de errores y condiciones excepcionales.
 
-El `WebSocketRateLimiter` previene abuso de conexiones individuales:
+El proceso de conexión sigue una secuencia cuidadosamente ordenada de verificaciones y registros diseñada para fallar rápidamente ante condiciones inválidas. Primero se verifica si el servidor está en proceso de shutdown consultando una bandera interna, rechazando conexiones nuevas durante el cierre gracioso para evitar registrar conexiones que inmediatamente serían cerradas. Luego se validan los parámetros proporcionados incluyendo los branch_ids del usuario que deben ser una lista no vacía, y para mozos, los sector_ids asignados que determinan qué eventos recibirán. La validación incluye advertencias de logging para patrones sospechosos como mozos con más de diez sectores asignados o identificadores duplicados en las listas, que podrían indicar configuración incorrecta en el sistema de administración o intentos de manipulación.
 
-```python
-class WebSocketRateLimiter:
-    def __init__(
-        self,
-        max_messages: int = 20,      # 20 mensajes
-        window_seconds: float = 1.0,  # por segundo
-    ):
-        self._limits: dict[WebSocket, deque[float]] = {}
-        self._max_messages = max_messages
-        self._window_seconds = window_seconds
+La verificación del límite global de conexiones ocurre de manera atómica bajo el connection_counter_lock para prevenir condiciones de carrera donde múltiples conexiones simultáneas podrían exceder el límite. Si el servidor está a capacidad máxima de mil conexiones, se incrementa el contador de conexiones rechazadas en las métricas para monitoreo, se registra un warning con detalles de la conexión rechazada, y se lanza una excepción indicando la condición que el endpoint traducirá en un cierre con código apropiado. Si hay capacidad disponible, se incrementa el contador de conexiones activas antes de liberar el lock, reservando el espacio para esta conexión.
 
-    async def is_allowed(self, ws: WebSocket) -> bool:
-        now = time.time()
-        timestamps = self._limits.setdefault(ws, deque(maxlen=self._max_messages * 2))
+La aceptación del WebSocket se realiza llamando a websocket.accept() con un timeout configurable mediante asyncio.wait_for para prevenir conexiones colgadas que consumirían recursos indefinidamente esperando un handshake que nunca completa. El timeout por defecto es de diez segundos, suficiente para conexiones lentas pero no tanto como para desperdiciar recursos en clientes problemáticos. Si la aceptación falla por timeout, excepción de WebSocket, o cualquier otra excepción, se decrementa el contador de conexiones que fue incrementado previamente antes de propagar el error, manteniendo la consistencia del estado interno del contador.
 
-        # Limpiar timestamps fuera de ventana
-        while timestamps and timestamps[0] < now - self._window_seconds:
-            timestamps.popleft()
+Finalmente, el registro en índices añade la conexión a todas las estructuras de datos relevantes según los atributos del usuario autenticado. Se registra en el índice by_user con el user_id, en by_branch para cada branch_id autorizado iterando sobre la lista, en los mappings inversos _ws_to_user y _ws_to_tenant, y para mozos en by_sector para cada sector_id asignado. Para administradores se registra adicionalmente en admins_by_branch, y para personal de cocina en kitchen_by_branch.
 
-        if len(timestamps) >= self._max_messages:
-            return False
-
-        timestamps.append(now)
-        return True
-```
-
-Conexiones que exceden 20 mensajes/segundo reciben código de cierre 4029 (RATE_LIMITED).
-
-### 7.2 Límites de Conexiones
-
-El Gateway implementa límites a múltiples niveles:
-
-```python
-# Configuración desde settings.py
-MAX_TOTAL_CONNECTIONS = 1000      # Límite global
-MAX_CONNECTIONS_PER_USER = 3      # Por usuario
-
-async def connect(self, websocket, user_id, ...):
-    # 1. Verificar límite global
-    async with self._lock_manager.connection_counter_lock:
-        if self._total_connections >= self._max_total_connections:
-            self._metrics.increment_connection_rejected_limit_sync()
-            raise ConnectionError(f"Server at capacity ({self._max_total_connections})")
-        self._total_connections += 1
-
-    # 2. Verificar límite por usuario (dentro de user_lock)
-    user_lock = await self._lock_manager.get_user_lock(user_id)
-    async with user_lock:
-        user_connections = self._index.get_user_connections(user_id)
-        if len(user_connections) >= self._max_connections_per_user:
-            await self._decrement_connection_count()
-            raise ConnectionError(f"User {user_id} exceeded max connections")
-```
-
-### 7.3 Códigos de Cierre WebSocket
-
-El Gateway define códigos de cierre semánticos en `WSCloseCode`:
-
-```python
-class WSCloseCode(IntEnum):
-    NORMAL = 1000              # Cierre normal solicitado
-    GOING_AWAY = 1001          # Servidor apagándose o cliente navegando
-    POLICY_VIOLATION = 1008    # Mensaje viola política (formato, contenido)
-    MESSAGE_TOO_BIG = 1009     # Mensaje excede 64KB
-    SERVER_OVERLOADED = 1013   # Servidor sobrecargado
-    AUTH_FAILED = 4001         # Token inválido, expirado o revocado
-    FORBIDDEN = 4003           # Origen inválido o rol insuficiente
-    RATE_LIMITED = 4029        # Demasiados mensajes por segundo
-```
+El proceso de desconexión realiza las operaciones inversas de manera robusta, tolerando el caso donde algunos índices ya fueron limpiados por operaciones concurrentes. Se remueve la conexión de cada índice donde fue registrada utilizando discard() en lugar de remove() para que la ausencia del elemento no cause excepción. Los mappings inversos se eliminan con pop() usando default None. El contador global se decrementa bajo el lock correspondiente. Esta robustez es necesaria porque una conexión puede ser limpiada tanto por un cierre normal iniciado por el cliente como por la tarea de limpieza de conexiones muertas, y ambos paths deben funcionar correctamente sin importar cuál ejecuta primero.
 
 ---
 
-## Capítulo 8: Métricas y Monitoreo
+## Capítulo 7: Broadcasting Paralelo y Worker Pool
 
-### 8.1 MetricsCollector Thread-Safe
+El módulo ConnectionBroadcaster ubicado en core/connection/broadcaster.py representa una de las optimizaciones más significativas del Gateway, implementando un sistema de envío paralelo que reduce dramáticamente el tiempo de distribución de mensajes a grandes audiencias de cuatro segundos a aproximadamente ciento sesenta milisegundos para cuatrocientas conexiones.
 
-El `MetricsCollector` centraliza estadísticas del Gateway con operaciones thread-safe:
+El broadcaster mantiene un pool de diez workers configurables que procesan envíos de mensajes concurrentemente, implementados como tareas asíncronas que ejecutan loops infinitos consumiendo de una cola compartida. Durante el startup de la aplicación llamando al método initialize(), se crea una cola asíncrona asyncio.Queue con capacidad máxima de cinco mil tareas pendientes. Esta capacidad acotada proporciona backpressure cuando el sistema experimenta picos de carga: si los workers no pueden procesar tan rápido como llegan los envíos, la cola eventualmente se llena y los intentos de encolar nuevas tareas esperan, propagando la presión hacia atrás en lugar de consumir memoria infinitamente.
 
-```python
-class MetricsCollector:
-    def __init__(self):
-        self._lock = asyncio.Lock()
-        self._sync_lock = threading.Lock()  # CRIT-WS-08 FIX
-        self._broadcast = BroadcastMetrics()
-        self._connection = ConnectionMetrics()
-        self._event = EventMetrics()
+Cada worker ejecuta un loop infinito en el método _worker que consume tareas de la cola compartida. El loop espera una tarea llamando a queue.get() con un timeout de un segundo mediante wait_for, permitiendo verificar periódicamente la bandera _running para determinar si el worker debe detenerse durante el shutdown. Cuando una tarea llega, el worker extrae los tres elementos de la tupla: el WebSocket destinatario, el payload serializado a enviar, y un asyncio.Future opcional para reportar el resultado. El envío se realiza llamando a websocket.send_text() capturando cualquier excepción. El resultado booleano indicando éxito o fallo se registra en el Future si fue proporcionado mediante set_result(), permitiendo al código llamante contar cuántos envíos fueron exitosos versus fallidos para métricas.
 
-    # Métodos async para uso normal
-    async def increment_broadcast_total(self) -> None:
-        async with self._lock:
-            self._broadcast.total += 1
+El shutdown del worker pool procede de manera ordenada para permitir que envíos en progreso completen. Se establece la bandera _running en False indicando que los workers deben detenerse. Luego se espera la finalización de todos los workers con asyncio.gather usando un timeout configurable de cinco segundos. Los workers que no terminen dentro del timeout porque están procesando envíos lentos se cancelan forzosamente mediante cancel() en cada tarea, asegurando que el shutdown no se bloquee indefinidamente ante conexiones problemáticas.
 
-    # Métodos sync para hot paths (CRIT-WS-08 FIX)
-    def increment_broadcast_total_sync(self) -> None:
-        with self._sync_lock:
-            self._broadcast.total += 1
+El broadcaster implementa una estrategia híbrida que selecciona automáticamente el método de envío óptimo según el tamaño del broadcast, balanceando entre overhead de coordinación del worker pool y paralelismo efectivo. Para broadcasts pequeños con cincuenta conexiones o menos, el sistema utiliza el modo legacy que procesa en lotes secuenciales mediante asyncio.gather() con return_exceptions=True. Este enfoque tiene menor overhead de coordinación ya que no requiere encolar tareas y esperar Futures, siendo más eficiente para audiencias reducidas donde el paralelismo adicional no justifica el costo.
 
-    def get_snapshot_sync(self) -> dict[str, Any]:
-        """Snapshot para health checks (sync)."""
-        with self._sync_lock:
-            return {
-                "broadcasts_total": self._broadcast.total,
-                "broadcasts_failed": self._broadcast.failed,
-                "broadcasts_rate_limited": self._broadcast.rate_limited,
-                "connections_rejected_limit": self._connection.rejected_limit,
-                "connections_rejected_rate_limit": self._connection.rejected_rate_limit,
-                "events_processed": self._event.processed,
-                "events_dropped": self._event.dropped,
-                ...
-            }
-```
+Para broadcasts grandes que superan las cincuenta conexiones, el sistema activa el modo de worker pool encolando cada envío como una tupla en la cola compartida. Cada tupla contiene el WebSocket destinatario, el payload ya serializado, y un Future creado con loop.create_future() para rastrear el resultado. Los diez workers procesan estas tareas en paralelo verdadero, distribuyendo el trabajo de envío entre múltiples contextos de ejecución simultáneos. Al finalizar, se recolectan todos los Futures para contar éxitos y fallos que se registran en métricas.
 
-El uso de `threading.Lock` separado para métodos sync (CRIT-WS-08 FIX) garantiza thread safety incluso en implementaciones de Python sin GIL.
-
-### 8.2 Endpoint Prometheus
-
-El endpoint `/ws/metrics` expone métricas en formato Prometheus para scraping:
-
-```
-# HELP wsgateway_connections_total Total connections since startup
-# TYPE wsgateway_connections_total counter
-wsgateway_connections_total 1542
-
-# HELP wsgateway_connections_active Current active connections
-# TYPE wsgateway_connections_active gauge
-wsgateway_connections_active 42
-
-# HELP wsgateway_broadcasts_total Total broadcasts sent
-# TYPE wsgateway_broadcasts_total counter
-wsgateway_broadcasts_total 8234
-
-# HELP wsgateway_broadcasts_failed Broadcasts with failures
-# TYPE wsgateway_broadcasts_failed counter
-wsgateway_broadcasts_failed 12
-
-# HELP wsgateway_events_dropped_total Events dropped
-# TYPE wsgateway_events_dropped_total counter
-wsgateway_events_dropped_total{reason="invalid_schema"} 3
-wsgateway_events_dropped_total{reason="no_recipients"} 45
-wsgateway_events_dropped_total{reason="circuit_open"} 0
-
-# HELP wsgateway_circuit_breaker_state Circuit breaker current state
-# TYPE wsgateway_circuit_breaker_state gauge
-wsgateway_circuit_breaker_state{name="redis_subscriber"} 0
-```
-
-### 8.3 Health Checks
-
-El endpoint `/ws/health/detailed` reporta estado detallado de componentes:
-
-```json
-{
-    "status": "healthy",
-    "timestamp": "2026-01-31T15:30:00Z",
-    "components": {
-        "redis_async": {
-            "status": "healthy",
-            "latency_ms": 2.3,
-            "pool_size": 50
-        },
-        "redis_sync": {
-            "status": "healthy",
-            "pool_size": 20
-        },
-        "connections": {
-            "active": 42,
-            "max": 1000,
-            "by_type": {
-                "waiter": 12,
-                "kitchen": 5,
-                "admin": 3,
-                "diner": 22
-            }
-        },
-        "circuit_breaker": {
-            "state": "closed",
-            "failure_count": 0,
-            "rejected_calls": 0
-        },
-        "broadcast_workers": {
-            "running": true,
-            "worker_count": 10,
-            "queue_size": 0
-        }
-    }
-}
-```
+Las mediciones de rendimiento demuestran el impacto transformador de esta optimización. Un broadcast a cuatrocientas conexiones que tomaría aproximadamente cuatro segundos en modo secuencial puro se completa en alrededor de ciento sesenta milisegundos usando el worker pool, una mejora de veinticinco veces que resulta crítica para mantener la sensación de tiempo real en la interfaz de usuario donde delays perceptibles destruirían la experiencia.
 
 ---
 
-## Capítulo 9: Resiliencia y Recuperación
+## Capítulo 8: Aislamiento Multi-Tenant
 
-### 9.1 Reintentos con Jitter Decorrelacionado
+El TenantFilter ubicado en components/broadcast/tenant_filter.py garantiza aislamiento estricto entre diferentes restaurantes que comparten la infraestructura del Gateway. Este componente actúa como guardián que previene fugas de información entre organizaciones, un requerimiento crítico de seguridad y privacidad en un sistema multi-tenant.
 
-Las reconexiones a Redis utilizan backoff exponencial con jitter decorrelacionado para prevenir el "thundering herd":
+El filtrado opera verificando que cada conexión candidata pertenezca al mismo tenant_id que el evento siendo distribuido. Cuando un evento especifica un tenant_id en su payload, el filtro examina cada conexión consultando el mapping inverso _ws_to_tenant y verifica que el valor coincida exactamente. Las conexiones sin tenant_id asociado en el mapping o con un tenant_id diferente se excluyen silenciosamente del broadcast sin generar errores, simplemente no reciben el mensaje. Si el evento no especifica tenant_id con valor null o ausente, el filtro permite todas las conexiones pasar, comportamiento útil para mensajes del sistema, broadcasts globales autorizados, o eventos de infraestructura que no contienen datos de negocio sensibles.
 
-```python
-# En ws_gateway/components/resilience/retry.py
-class DecorrelatedJitter:
-    """Jitter que previene sincronización de reintentos."""
+Un aspecto crítico del diseño identificado como CRIT-DEEP-02 FIX es que el filtrado por tenant ocurre dentro del lock de rama, no después de liberarlo. Esta decisión previene una condición de carrera sutil pero peligrosa que sería difícil de detectar en testing pero catastrófica en producción. Si el filtrado ocurriera después de liberar el lock, nuevas conexiones de otros tenants podrían registrarse entre el momento de liberar el lock y el momento del envío, potencialmente recibiendo mensajes destinados a otro tenant. Al filtrar dentro del lock, se garantiza una vista consistente de las conexiones durante toda la operación de broadcast, eliminando la ventana de vulnerabilidad.
 
-    def calculate(self, attempt: int, config: RetryConfig) -> float:
-        if attempt == 0:
-            return config.base_delay
-
-        # Exponential backoff
-        exp_delay = config.base_delay * (2 ** attempt)
-        capped_delay = min(exp_delay, config.max_delay)
-
-        # Decorrelated jitter: random entre base y delay calculado
-        return random.uniform(config.base_delay, capped_delay)
-
-def create_redis_retry_config(
-    max_delay: float = 60.0,
-    max_attempts: int = 10,
-) -> RetryConfig:
-    return RetryConfig(
-        base_delay=1.0,
-        max_delay=max_delay,
-        max_attempts=max_attempts,
-        jitter_strategy=DecorrelatedJitter(),
-    )
-```
-
-### 9.2 Limpieza de Conexiones Muertas
-
-El `ConnectionCleanup` implementa un patrón de dos fases para evitar race conditions:
-
-```python
-async def cleanup_dead_connections(self) -> int:
-    # Fase 1: Obtener lista de conexiones marcadas como muertas
-    async with self._lock_manager.dead_connections_lock:
-        dead_snapshot = list(self._dead_connections)
-        self._dead_connections.clear()
-
-    if not dead_snapshot:
-        return 0
-
-    # Fase 2: Desregistrar cada una (puede adquirir otros locks)
-    cleaned = 0
-    for ws in dead_snapshot:
-        try:
-            await self._disconnect_callback(ws)
-            cleaned += 1
-        except Exception as e:
-            logger.debug("Error cleaning dead connection: %s", str(e))
-
-    return cleaned
-```
-
-Las conexiones se marcan como "muertas" cuando un envío falla. El cleanup real ocurre de forma asíncrona para no bloquear broadcasts.
-
-### 9.3 Caché de Sectores con TTL
-
-El `SectorAssignmentRepository` cachea asignaciones de mozos a sectores para reducir queries a la base de datos:
-
-```python
-class SectorCache:
-    def __init__(self, ttl_seconds: float = 300.0):  # 5 minutos
-        self._cache: dict[int, tuple[list[int], float]] = {}
-        self._lock = threading.Lock()
-
-    def get(self, user_id: int) -> list[int] | None:
-        with self._lock:
-            if user_id not in self._cache:
-                return None
-            sectors, timestamp = self._cache[user_id]
-            if time.time() - timestamp > self._ttl:
-                del self._cache[user_id]
-                return None
-            return sectors
-
-    def set(self, user_id: int, sectors: list[int]) -> None:
-        with self._lock:
-            self._cache[user_id] = (sectors, time.time())
-```
-
-El TTL de 5 minutos balancea entre reducir queries y permitir actualizaciones razonablemente frecuentes cuando se reasignan mozos a diferentes sectores.
+El método filter_connections implementa el filtrado recibiendo una lista de conexiones y el tenant_id objetivo. Si tenant_id es None, retorna la lista sin modificación. Si tiene valor, itera sobre las conexiones construyendo una nueva lista solo con aquellas cuyo tenant_id en el mapping coincide. El resultado se retorna para que el broadcaster proceda con el envío solo a las conexiones autorizadas.
 
 ---
 
-## Capítulo 10: Flujo Completo de Eventos
+## Capítulo 9: Suscripción a Eventos Redis
 
-### 10.1 Ejemplo: Nuevo Pedido (ROUND_PENDING)
+El RedisSubscriber ubicado en redis_subscriber.py establece una conexión persistente con Redis y escucha eventos publicados por la API REST, actuando como puente entre el backend que genera eventos y las conexiones WebSocket que los consumen. Tras la refactorización ARCH-MODULAR-09, se transformó en un orquestador delgado de aproximadamente trescientas veintiséis líneas que coordina módulos especializados para validación, tracking de eventos perdidos, y procesamiento.
 
-Cuando un comensal envía un pedido desde pwaMenu:
+El suscriptor utiliza el patrón Pub/Sub de Redis con suscripciones por patrón mediante psubscribe, permitiendo escuchar dinámicamente todos los canales que coincidan con ciertos patrones sin necesidad de conocer de antemano los identificadores específicos de sucursales, sectores y sesiones que varían entre instalaciones y cambian en tiempo de ejecución cuando se crean o eliminan entidades.
 
-1. **API REST** crea la ronda en PostgreSQL con status `PENDING`
-2. **API REST** publica evento a Redis usando `publish_round_event`:
-   ```python
-   await publish_event(redis, f"branch:{branch_id}:waiters", {
-       "type": "ROUND_PENDING",
-       "tenant_id": 1,
-       "branch_id": 5,
-       "round_id": 123,
-       "table_id": 42,
-       "table_code": "INT-05",
-       "diner_count": 3
-   })
-   # También a admin channel
-   await publish_event(redis, f"branch:{branch_id}:admin", {...})
-   ```
+El sistema define cinco patrones de canales principales registrados en WSConstants. El patrón branch:*:waiters captura eventos destinados a mozos de cualquier sucursal, como notificaciones de nuevos pedidos o llamadas de servicio. El patrón branch:*:kitchen captura eventos para personal de cocina, incluyendo comandas nuevas y actualizaciones de estado de preparación. El patrón branch:*:admin captura eventos para administradores y managers con visibilidad completa de la operación. El patrón sector:*:waiters permite notificaciones dirigidas a mozos de sectores específicos, útil cuando un evento solo es relevante para el personal de cierta área del restaurante. El patrón session:* captura eventos para comensales de sesiones específicas, como actualizaciones del estado de su pedido individual.
 
-3. **RedisSubscriber** recibe ambos mensajes via `psubscribe`
-4. **validate_event_schema** verifica campos requeridos y tipo válido
-5. **EventRouter** determina destinatarios:
-   - Canal `branch:5:waiters` → todos los mozos de sucursal 5
-   - Canal `branch:5:admin` → admins/managers de sucursal 5
-6. **TenantFilter** filtra conexiones por `tenant_id=1`
-7. **ConnectionBroadcaster** envía a conexiones:
-   - 3 admins conectados al Dashboard
-   - 8 mozos de la sucursal en pwaWaiter
-8. **Dashboard** muestra alerta visual con animación amarilla
-9. **pwaWaiter** muestra notificación de nuevo pedido pendiente
+El loop principal del suscriptor mantiene una cola interna de eventos pendientes implementada como collections.deque con capacidad máxima de cinco mil elementos que proporciona backpressure natural. Cuando llega un mensaje de Redis mediante get_message(), se valida usando el módulo validator y se encola si es válido. Durante períodos de inactividad cuando get_message() retorna None porque no hay mensajes pendientes, se procesa la cola acumulada en lotes de hasta cincuenta eventos, distribuyendo la carga de procesamiento de manera eficiente sin bloquear la recepción de nuevos mensajes.
 
-### 10.2 Ejemplo: Round Confirmado y Enviado a Cocina
+El módulo EventDropRateTracker ubicado en core/subscriber/drop_tracker.py monitorea la salud del pipeline de eventos como singleton global, generando alertas cuando la tasa de eventos perdidos supera umbrales configurados. El tracker mantiene una ventana deslizante implementada como deque de tuplas con timestamp, eventos procesados y eventos perdidos. Cuando se registra un evento perdido mediante record_drop(), el tracker calcula la tasa de pérdida sobre la ventana actual de sesenta segundos. Si esta tasa supera el umbral configurado del cinco por ciento, se genera una alerta de nivel CRITICAL con detalles sobre la tasa actual y el umbral. Un cooldown de cinco minutos entre alertas previene la saturación del sistema de logging durante problemas sostenidos que generarían alertas cada pocos segundos.
 
-Flujo cuando mozo confirma y admin envía a cocina:
+---
 
-1. **Mozo confirma** en pwaWaiter → `PATCH /api/kitchen/rounds/{id}` con `status=CONFIRMED`
-2. **Evento ROUND_CONFIRMED** publicado a `branch:{id}:admin`
-3. **Dashboard** recibe evento, muestra botón "Enviar a Cocina"
-4. **Admin envía** → `PATCH /api/kitchen/rounds/{id}` con `status=SUBMITTED`
-5. **Evento ROUND_SUBMITTED** publicado a:
-   - `branch:{id}:kitchen` → terminales de cocina
-   - `branch:{id}:admin` → dashboard
-   - `branch:{id}:waiters` → mozos
-6. **KitchenEndpoint** recibe evento, muestra comanda en columna "Nuevos"
+## Capítulo 10: Validación de Eventos y Enrutamiento
 
-### 10.3 Ejemplo: Plato Listo (ROUND_READY)
+El módulo validator.py en core/subscriber verifica que los eventos contengan los campos requeridos antes del procesamiento, actuando como primera línea de defensa contra eventos malformados, corruptos, o maliciosamente construidos que podrían causar errores en el procesamiento posterior.
 
-Cuando cocina marca un plato como listo:
+El sistema define conjuntos inmutables frozensets de campos requeridos y opcionales que no pueden modificarse en runtime. Los campos requeridos incluyen type que indica el tipo de evento como ROUND_SUBMITTED o TABLE_SESSION_STARTED, tenant_id que identifica el restaurante origen, y branch_id que identifica la sucursal específica. Los campos opcionales incluyen session_id para eventos relacionados con sesiones de mesa, sector_id para eventos que deben filtrarse por sector, table_id para eventos de mesa específica, entity para el payload de datos del evento, y otros específicos de ciertos tipos.
 
-1. **API REST** actualiza estado a `READY`
-2. **Eventos publicados** a múltiples canales:
-   - `branch:{id}:kitchen` → otras terminales de cocina
-   - `branch:{id}:admin` → dashboard
-   - `branch:{id}:waiters` → mozos para servir
-   - `session:{id}` → comensales de la mesa
-3. **Dashboard** muestra alerta visual, badge verde en mesa
-4. **pwaWaiter** notifica al mozo responsable para servir
-5. **pwaMenu** actualiza estado del pedido del comensal con feedback visual
+La función de validación validate_event_schema implementa verificación pura sin efectos secundarios, retornando una tupla de booleano indicando validez y string con información de diagnóstico. Primero verifica que el dato sea un diccionario usando isinstance, rechazando listas, strings u otros tipos con razón not_dict. Segundo verifica que todos los campos requeridos estén presentes iterando sobre REQUIRED_FIELDS y construyendo lista de faltantes, rechazando con razón missing_fields:type,branch_id si hay campos ausentes. Tercero verifica que el tipo de evento sea uno de los tipos conocidos consultando el conjunto VALID_EVENT_TYPES, rechazando con razón unknown_type:INVALID_EVENT si es desconocido.
+
+El EventRouter ubicado en components/events/router.py centraliza la lógica de enrutamiento determinando qué conexiones deben recibir cada tipo de evento basándose en el canal de origen y el tipo de evento. El router mantiene conjuntos inmutables que clasifican eventos por su audiencia objetivo. SESSION_EVENTS contiene eventos que deben llegar a comensales de sesiones específicas como ROUND_READY o CART_ITEM_ADDED. BRANCH_WIDE_EVENTS contiene eventos que deben llegar a toda la sucursal sin filtrado de sector como ROUND_PENDING y TABLE_SESSION_STARTED, necesarios para que cualquier mozo cercano pueda atender.
+
+El método route_event recibe el evento validado y el canal de origen, retornando una lista de conexiones destinatarias. Extrae el tipo de evento y los identificadores relevantes del payload. Consulta el ConnectionIndex para obtener las conexiones candidatas según el tipo de canal. Aplica el TenantFilter para garantizar aislamiento multi-tenant. Para eventos de mozo, verifica si el evento está en BRANCH_WIDE_EVENTS para determinar si debe enviarse a todos los mozos o solo a los del sector especificado.
+
+---
+
+## Capítulo 11: Autenticación mediante Estrategias
+
+El Gateway implementa el patrón Strategy para soportar diferentes métodos de autenticación de manera extensible y mantenible. Las clases de estrategia residen en el módulo components/auth/strategies.py y encapsulan toda la lógica de verificación de credenciales, permitiendo agregar nuevos métodos de autenticación sin modificar código existente.
+
+El resultado de autenticación se representa mediante la dataclass inmutable AuthResult con frozen=True y slots=True para optimización de memoria. La dataclass encapsula el éxito o fallo de la autenticación junto con información contextual. El campo success indica si la autenticación fue exitosa. El campo data contiene los datos extraídos del token para éxitos, como claims del JWT o datos del table token. El campo error contiene el mensaje de error para fallos. El campo close_code contiene el código de cierre WebSocket apropiado para fallos. El campo audit_reason proporciona información para logging de seguridad. Los métodos de clase ok(), fail() y forbidden() proporcionan constructores convenientes para los casos comunes con valores predeterminados apropiados.
+
+La estrategia JWTAuthStrategy maneja autenticación mediante tokens JWT para personal del restaurante incluyendo mozos, cocina y administradores. El constructor recibe la lista de roles requeridos para el endpoint específico. El método authenticate ejecuta una secuencia de verificaciones. Primero valida el origen de la conexión WebSocket contra la lista de orígenes permitidos llamando a validate_websocket_origin, rechazando conexiones de orígenes desconocidos con código FORBIDDEN y razón invalid_origin. Segundo verifica la firma y validez del JWT llamando a verify_jwt del módulo de seguridad compartido, rechazando tokens expirados o malformados con código AUTH_FAILED. La estrategia rechaza específicamente tokens que contienen el claim token_type con valor refresh, que son refresh tokens que solo deben usarse para obtener nuevos access tokens y no para autenticación directa de WebSocket. Finalmente verifica que el usuario tenga al menos uno de los roles requeridos comparando la lista de roles del token con required_roles.
+
+La estrategia TableTokenAuthStrategy maneja autenticación mediante tokens HMAC para comensales conectados a sesiones de mesa. Estos tokens no contienen roles ya que los comensales no tienen identidad de usuario en el sistema tradicional de gestión de personal. El método authenticate primero valida el origen de la conexión. Luego valida criptográficamente el token HMAC llamando a verify_table_token que verifica la firma usando la clave secreta configurada. El token contiene información sobre session_id, branch_id y tenant_id que se extraen y retornan en el AuthResult para uso posterior durante el registro de la conexión.
+
+---
+
+## Capítulo 12: Endpoints WebSocket y Jerarquía de Clases
+
+Los endpoints WebSocket heredan de clases base que encapsulan comportamiento común, eliminando aproximadamente trescientas líneas de código duplicado que existían cuando cada endpoint implementaba su propio ciclo de vida completo con lógica repetida de autenticación, registro, loop de mensajes y limpieza.
+
+La clase abstracta WebSocketEndpointBase ubicada en components/endpoints/base.py define el ciclo de vida completo de un endpoint como template method. El constructor acepta el WebSocket de la conexión, el ConnectionManager para registro, y un nombre de endpoint utilizado para logging contextual y métricas. El método run() ejecuta la secuencia completa del ciclo de vida: primero llama validate_auth() para verificar credenciales, luego create_context() para construir el contexto de usuario, después register_connection() para añadir a índices, ejecuta el loop de mensajes llamando a _message_loop(), y finalmente en bloque finally llama unregister_connection() para garantizar limpieza incluso ante excepciones inesperadas.
+
+La clase define cuatro métodos abstractos mediante @abstractmethod que las subclases deben implementar proporcionando la lógica específica de cada tipo de endpoint. El método validate_auth() realiza la autenticación específica y retorna los datos extraídos del token como diccionario, o None si la autenticación falla indicando que la conexión debe cerrarse. El método create_context() construye un objeto WebSocketContext con la información del usuario autenticado para uso durante el ciclo de vida. El método register_connection() añade la conexión a los índices apropiados del ConnectionManager según el tipo de usuario. El método unregister_connection() realiza la limpieza inversa removiendo de índices cuando la conexión termina.
+
+La clase JWTWebSocketEndpoint extiende la base añadiendo autenticación JWT y revalidación periódica para conexiones de larga duración. El constructor adicional acepta el token JWT como string y la lista de roles requeridos. La implementación de validate_auth() instancia JWTAuthStrategy con los roles requeridos e invoca authenticate(). El método _message_loop() sobrescrito incluye verificación periódica cada cinco minutos del intervalo JWT_REVALIDATION_INTERVAL, verificando que el token siga siendo válido consultando la lista de revocación en Redis y comprobando que no haya expirado. Si la revalidación falla porque el token fue revocado o expiró, la conexión se cierra con código AUTH_FAILED.
+
+El WaiterEndpoint extiende JWTWebSocketEndpoint con funcionalidad específica para personal de servicio. Durante create_context() extrae información del JWT y consulta las asignaciones de sector actuales llamando a get_waiter_sector_ids() del SectorAssignmentRepository. Durante register_connection() invoca al manager indicando is_admin basado en el rol y proporcionando sector_ids. El endpoint implementa el comando especial refresh_sectors que permite actualizar asignaciones de sector sin desconectarse, útil cuando un supervisor reasigna sectores durante el turno. Al recibir el comando, revalida el JWT, consulta nuevas asignaciones, actualiza índices del manager, y envía confirmación al cliente.
+
+El KitchenEndpoint es más simple, aceptando roles KITCHEN, MANAGER y ADMIN, registrando con is_kitchen=True para indexación en kitchen_by_branch. El AdminEndpoint proporciona visibilidad completa de sucursal registrando con is_admin=True. El DinerEndpoint difiere significativamente usando TableTokenAuthStrategy en lugar de JWT, registrando con user_id pseudo-negativo derivado de session_id para evitar colisiones, y en el índice de sesiones para recibir eventos de mesa.
+
+---
+
+## Capítulo 13: Rate Limiting y Protección
+
+El WebSocketRateLimiter ubicado en components/connection/rate_limiter.py previene que conexiones individuales abusen del sistema enviando mensajes a tasas excesivas, ya sea por error de programación en el cliente como un loop infinito, o por intento malicioso de agotar recursos del servidor.
+
+El limiter mantiene un diccionario que mapea cada WebSocket a una deque de timestamps de mensajes recientes con maxlen igual al límite para auto-evicción de timestamps antiguos. El método is_allowed implementa verificación en dos pasos. Primero obtiene o crea la deque para la conexión, limpiando timestamps que han salido de la ventana de tiempo de un segundo comparando con el tiempo actual. Segundo cuenta cuántos timestamps permanecen en la deque. Si el conteo es menor al límite de veinte mensajes por defecto, añade el timestamp actual y retorna True permitiendo el mensaje. Si el conteo alcanza o supera el límite, retorna False indicando rechazo.
+
+Las conexiones que exceden el límite de veinte mensajes por segundo reciben código de cierre 4029 asignado en WSCloseCode.RATE_LIMITED, un código personalizado en el rango 4000+ que permite a los clientes distinguir entre un cierre por rate limiting versus otros tipos de cierre como autenticación o política. Un cliente bien implementado podría reconectarse después de un breve delay de backoff, mientras que uno defectuoso debería investigar por qué está generando tantos mensajes.
+
+El módulo components/redis/lua_scripts.py implementa rate limiting atómico adicional usando scripts Lua ejecutados directamente en Redis para operaciones que requieren atomicidad garantizada entre múltiples claves o comandos. El problema con operaciones Redis separadas como GET seguido de INCREMENT es que entre leer el contador actual y escribir el nuevo valor, otra request podría leer el mismo valor original, resultando en un conteo incorrecto que permite más requests de las autorizadas. Los scripts Lua se ejecutan atómicamente en el servidor Redis como una única operación indivisible, garantizando que toda la secuencia ocurre sin interrupciones de otras operaciones.
+
+El script RATE_LIMIT_SCRIPT recibe como argumentos el key de Redis, el límite máximo, el tamaño de ventana en segundos, y el timestamp actual. Primero obtiene el contador actual con GET. Si el contador existe y está en el límite, retorna inmediatamente una tupla indicando rechazo junto con el conteo actual y el TTL restante para que el cliente sepa cuánto esperar. Si hay espacio disponible, incrementa el contador con INCR y establece el TTL con EXPIRE si es el primer incremento de la ventana. Finalmente retorna éxito con el nuevo conteo y TTL.
+
+---
+
+## Capítulo 14: Heartbeat y Limpieza de Conexiones
+
+El HeartbeatTracker ubicado en components/connection/heartbeat.py mantiene un registro preciso de la última actividad de cada conexión, permitiendo identificar y cerrar conexiones que han quedado inactivas por problemas de red, clientes congelados, o desconexiones no detectadas.
+
+El tracker mantiene un diccionario _timestamps que mapea cada WebSocket al timestamp flotante de su último heartbeat registrado. Un threading.Lock protege esta estructura para operaciones thread-safe, necesario porque algunas operaciones de limpieza pueden ejecutarse desde contextos síncronos mientras el registro de heartbeats ocurre en contextos async. El timeout por defecto se configura en sesenta segundos, significando que conexiones sin actividad reportada por más de un minuto se consideran stale y candidatas para cierre.
+
+El protocolo de heartbeat funciona como un intercambio simple de mensajes de vida entre cliente y servidor. El cliente envía un mensaje con type igual a ping cada treinta segundos como keep-alive. El servidor al recibir este mensaje responde inmediatamente con un mensaje type pong y llama a tracker.record(websocket) para actualizar el timestamp de la conexión en el diccionario interno. La tarea heartbeat_cleanup_task ejecuta cada treinta segundos en background, llamando a tracker.get_stale_connections() para identificar conexiones cuyo último heartbeat ocurrió hace más del timeout. Las conexiones identificadas como stale se cierran con código 1001 GOING_AWAY, indicando que el servidor está terminando la conexión debido a inactividad detectada.
+
+El ConnectionCleanup implementa un patrón de dos fases para la limpieza que evita el error RuntimeError de dictionary changed size during iteration que ocurriría si se modificara el diccionario de conexiones mientras se itera sobre él durante la limpieza. En la primera fase de snapshot, se toma una copia de las conexiones stale bajo el lock del tracker mediante list(). En la segunda fase de cierre, se procede a cerrar cada conexión fuera del lock ya que las operaciones de I/O de red no deben bloquear otras operaciones del tracker que podrían estar registrando heartbeats de otras conexiones. En la tercera fase de desregistro, se desregistra cada conexión del ConnectionIndex con una verificación adicional double-check consultando si la conexión aún existe antes de intentar removerla, manejando el caso donde la conexión ya fue desregistrada por otra operación concurrente como un cierre normal iniciado por el cliente.
+
+---
+
+## Capítulo 15: Circuit Breaker para Resiliencia Redis
+
+El CircuitBreaker ubicado en components/resilience/circuit_breaker.py protege al Gateway contra cascadas de fallos cuando Redis experimenta problemas de conectividad, saturación, o rendimiento degradado que causarían timeouts acumulados.
+
+El circuit breaker implementa tres estados distintos representados en la enumeración CircuitState. En estado CLOSED las operaciones proceden normalmente y el breaker simplemente monitorea contando éxitos y fallos consecutivos. Cuando el contador de fallos consecutivos alcanza el umbral configurable de cinco por defecto, el breaker transiciona a estado OPEN donde todas las operaciones se rechazan inmediatamente sin intentar contactar Redis, previniendo la acumulación de timeouts que degradarían el rendimiento general y potencialmente agotarían recursos como threads o conexiones de pool. Después del timeout de recuperación de treinta segundos por defecto, el breaker transiciona automáticamente a estado HALF_OPEN donde permite un número limitado de operaciones de prueba para verificar si Redis se ha recuperado. Si estas pruebas tienen éxito registrado mediante record_success(), el breaker regresa a CLOSED; si fallan con record_failure(), vuelve a OPEN por otro período de timeout.
+
+Un aspecto crítico de la implementación identificado como CRIT-AUD-01 FIX es el uso de un único threading.Lock para todas las operaciones de sincronización que modifican o leen estado interno. Las implementaciones anteriores que mezclaban asyncio.Lock para operaciones async y threading.Lock para operaciones sync experimentaban race conditions cuando ambos tipos de operaciones modificaban el mismo estado del breaker simultáneamente. El lock unificado basado en threading funciona correctamente en ambos contextos de ejecución, garantizando consistencia del estado interno sin importar desde qué tipo de código se invoque.
+
+El método get_stats proporciona información sobre el estado actual del breaker para health checks y métricas. Este método también adquiere el lock antes de leer estado para garantizar un snapshot consistente sin lecturas parciales, identificado como MED-DEEP-01 FIX. Retorna un diccionario con el estado actual como string, el contador de fallos recientes, el número de operaciones rechazadas mientras estuvo abierto, y el timestamp de la última transición de estado.
+
+---
+
+## Capítulo 16: Redis Streams para Eventos Críticos
+
+Además del sistema Pub/Sub tradicional que proporciona entrega best-effort, el Gateway implementa un consumidor completo de Redis Streams para eventos críticos que requieren entrega garantizada como pagos y estados de pedido importantes. Esta funcionalidad desarrollada bajo la iniciativa ARCH-STREAM-01 complementa Pub/Sub proporcionando semánticas de at-least-once delivery donde los mensajes nunca se pierden aunque puedan entregarse más de una vez.
+
+Redis Streams difiere fundamentalmente de Pub/Sub en su modelo de persistencia y entrega. Mientras Pub/Sub descarta mensajes inmediatamente si no hay suscriptores activos en el momento exacto de publicación, Streams persiste los mensajes en el servidor Redis y permite a los consumidores procesarlos a su propio ritmo, retomando desde donde quedaron después de desconexiones. Los Consumer Groups permiten que múltiples instancias del Gateway compartan el procesamiento de un stream distribuyendo mensajes entre ellas, con Redis rastreando internamente qué mensajes ha procesado cada consumidor mediante la Pending Entries List.
+
+El StreamConsumer implementa el patrón de Consumer Group con varias características robustas de producción. Durante la inicialización en el método start(), crea el Consumer Group si no existe usando XGROUP CREATE con la opción MKSTREAM para crear también el stream subyacente si es necesario, evitando errores en instalaciones nuevas donde los streams aún no existen. El loop principal lee lotes de mensajes usando XREADGROUP con el especificador mayor-que para recibir solo mensajes nuevos, con un timeout de bloqueo BLOCK de mil milisegundos que permite verificar periódicamente si el consumidor debe detenerse durante shutdown.
+
+La recuperación de mensajes pendientes constituye una característica distintiva del consumidor que garantiza que ningún mensaje se pierda por fallos de instancias. Redis mantiene una Pending Entries List con mensajes que fueron entregados a consumidores pero nunca confirmados mediante XACK, típicamente porque el consumidor murió antes de completar el procesamiento exitoso. Cada treinta ciclos del loop principal, el consumidor ejecuta XAUTOCLAIM para reclamar mensajes que han estado pendientes por más de treinta segundos, presumiblemente abandonados por consumidores fallidos de otras instancias. Cada mensaje recuperado incrementa un contador de reintentos almacenado en los metadatos; aquellos que exceden tres reintentos se mueven a la Dead Letter Queue ya que probablemente tienen un problema inherente que impide su procesamiento exitoso.
+
+La Dead Letter Queue implementada bajo RES-LOW-01 proporciona un destino para mensajes que no pueden procesarse exitosamente después de múltiples intentos. En lugar de descartar estos mensajes perdiendo datos potencialmente valiosos, el sistema los preserva en un stream separado con sufijo :dlq junto con metadatos ricos. Se almacena el stream de origen, el ID del mensaje original, el payload serializado como JSON, la razón del fallo o excepción capturada, el contador de reintentos alcanzado, y el timestamp del momento del fallo. Este registro permite análisis posterior para identificar patrones de fallo, debugging de problemas de integración, y recuperación manual de datos si es necesario.
+
+El backoff exponencial con jitter protege contra el thundering herd cuando múltiples consumidores intentan reconectarse simultáneamente después de una falla de Redis que afectó a todas las instancias. El delay base de un segundo se multiplica exponencialmente por dos elevado al número de intento hasta un máximo de sesenta segundos. El jitter decorrelacionado implementado en DecorrelatedJitter añade aleatoriedad eligiendo un valor uniforme entre el delay base y el delay calculado, distribuyendo los reintentos en el tiempo para evitar oleadas sincronizadas que sobrecargarían el servidor Redis en recuperación.
+
+---
+
+## Capítulo 17: Métricas y Observabilidad
+
+El MetricsCollector ubicado en components/metrics/collector.py centraliza estadísticas del Gateway con operaciones diseñadas para funcionar correctamente tanto en contextos asíncronos como síncronos sin causar deadlocks o inconsistencias.
+
+El collector agrupa métricas en categorías representadas como dataclasses internas. BroadcastMetrics contiene total de broadcasts enviados, cantidad con fallos parciales o totales, y cantidad rechazados por rate limiting global. ConnectionMetrics contiene rechazos por límite de capacidad alcanzado y rechazos por rate limiting individual. EventMetrics contiene total procesados exitosamente y perdidos desglosados por razón incluyendo esquema inválido, sin destinatarios, y circuit breaker abierto.
+
+La implementación utiliza dos locks separados identificado como CRIT-WS-08 FIX. Un asyncio.Lock para operaciones asíncronas normales que constituyen la mayoría del código del Gateway. Un threading.Lock para operaciones síncronas que ocurren en ciertos paths como callbacks de bibliotecas externas o código de limpieza. Esta dualidad resuelve problemas que ocurrían cuando operaciones del mismo contador se ejecutaban desde diferentes contextos de ejecución que requerían diferentes tipos de lock. Los métodos vienen en pares: increment_broadcast_total() para uso async adquiriendo el lock async, y increment_broadcast_total_sync() para uso sync adquiriendo el lock de threading.
+
+El método get_snapshot_sync() proporciona una vista consistente de todas las métricas en un momento dado, utilizado para health checks detallados y el endpoint de métricas Prometheus. El snapshot se captura bajo el lock sync para asegurar que todos los valores corresponden al mismo instante sin actualizaciones parciales que darían una vista inconsistente.
+
+El PrometheusFormatter ubicado en components/metrics/prometheus.py formatea las métricas para exposición en el endpoint /ws/metrics siguiendo la especificación de Prometheus. Cada métrica incluye líneas de comentario con HELP describiendo qué mide en lenguaje humano, y TYPE indicando si es counter para valores siempre crecientes, gauge para valores que pueden subir y bajar, o histogram para distribuciones. El formato permite labels entre llaves para dimensionar métricas, por ejemplo wsgateway_events_dropped_total con label reason igual a invalid_schema versus reason igual a no_recipients. Las métricas clave expuestas incluyen conexiones totales desde startup, conexiones activas actuales, broadcasts totales y fallidos, y estado del circuit breaker como gauge numérico.
+
+---
+
+## Capítulo 18: Flujo Completo de un Evento en Práctica
+
+Cuando un comensal confirma su pedido en la aplicación pwaMenu, se desencadena una secuencia de eventos que ilustra el funcionamiento integrado de todo el sistema desde la acción del usuario hasta la notificación en todas las pantallas relevantes.
+
+El proceso comienza en la API REST donde el endpoint de creación de rondas valida el pedido contra el menú vigente, lo persiste en PostgreSQL con estado PENDING, y procede a notificar a las partes interesadas. La función publish_round_event construye el payload del evento y publica a múltiples canales Redis usando el pool async. Primero al canal branch seguido del branch_id y :waiters para que los mozos sepan que hay un nuevo pedido por verificar en la mesa. Luego al canal branch seguido del branch_id y :admin para visibilidad en el Dashboard de gestión donde los administradores monitorizan la operación.
+
+El RedisSubscriber del Gateway recibe ambos mensajes a través de su suscripción por patrón que captura todos los canales que coinciden con branch:*:waiters y branch:*:admin. Cada mensaje pasa por validación de esquema en el módulo validator que verifica la presencia de los campos requeridos type, tenant_id y branch_id, y que el tipo de evento ROUND_PENDING sea uno de los tipos válidos registrados en el conjunto VALID_EVENT_TYPES.
+
+El EventRouter determina los destinatarios apropiados según el canal de origen parseando el nombre del canal. El mensaje del canal branch:5:waiters se rutea consultando el índice by_branch para obtener conexiones de mozos de la sucursal cinco, verificando que ROUND_PENDING está en BRANCH_WIDE_EVENTS para enviarlo a todos los mozos sin filtrado de sector. El mensaje del canal branch:5:admin se rutea a las conexiones en el índice admins_by_branch con clave cinco.
+
+Antes del envío, el TenantFilter verifica dentro del lock de rama que cada conexión candidata pertenezca al mismo tenant_id que el evento consultando el mapping inverso, garantizando que restaurantes diferentes que comparten la infraestructura no reciban eventos ajenos. El ConnectionBroadcaster evalúa el número de destinatarios y selecciona el método de envío apropiado. Para unas pocas conexiones usa el modo legacy con asyncio.gather. Para muchas conexiones encola en el worker pool para envío paralelo.
+
+En el Dashboard, la recepción del evento ROUND_PENDING activa la lógica de actualización visual en el store de mesas. La mesa correspondiente muestra una animación de pulso amarillo indicando orden pendiente, el badge de estado cambia a mostrar Pendiente en amarillo, y si el administrador tiene habilitadas las notificaciones de audio, suena un sonido discreto. En pwaWaiter, los mozos ven una notificación de nuevo pedido que requiere verificación física en la mesa antes de poder avanzar el estado.
+
+Cuando el mozo verifica el pedido y el administrador lo envía a cocina con estado SUBMITTED, el KitchenEndpoint recibe el evento ROUND_SUBMITTED y lo entrega a las conexiones en kitchen_by_branch. Las terminales de cocina muestran la nueva comanda en la columna Nuevos, listando los productos a preparar con sus modificaciones y notas especiales del comensal. Este flujo completo desde que el comensal toca el botón hasta que ve la confirmación y la cocina recibe la comanda típicamente toma menos de doscientos milisegundos de transmisión a través del Gateway, creando la ilusión de actualizaciones instantáneas.
 
 ---
 
 ## Conclusión
 
-El WebSocket Gateway representa el sistema nervioso central del ecosistema Integrador, transmitiendo información en tiempo real entre todos los actores del restaurante. Su arquitectura modular, resultado de la refactorización ARCH-MODULAR, separó responsabilidades en componentes especializados que pueden evolucionar independientemente.
+El WebSocket Gateway representa el sistema nervioso central del ecosistema Integrador, transmitiendo información en tiempo real entre todos los actores de un restaurante desde comensales hasta personal de cocina. Su arquitectura modular, resultado de la refactorización ARCH-MODULAR, separó responsabilidades en componentes especializados ubicados en los directorios core y components que pueden evolucionar independientemente sin afectar la estabilidad del sistema.
 
-Los patrones implementados reflejan decisiones arquitectónicas orientadas tanto a la mantenibilidad como al rendimiento:
+Los patrones implementados reflejan decisiones arquitectónicas orientadas tanto a la mantenibilidad como al rendimiento bajo carga. El sistema de locks fragmentados mediante el LockManager reduce la contención en aproximadamente noventa por ciento durante operaciones concurrentes, permitiendo que múltiples sucursales operen con total independencia. El mecanismo de LockSequence previene deadlocks validando el orden de adquisición en tiempo de ejecución, convirtiendo bugs potencialmente catastróficos en excepciones claras durante desarrollo.
 
-- **Locks fragmentados** reducen contención 90% en operaciones concurrentes
-- **Worker pool** para broadcasting reduce tiempo de entrega de 4s a 160ms
-- **Circuit breaker** con lock unificado previene cascadas de fallos
-- **Strategy pattern** para autenticación permite extensibilidad sin modificar código existente
-- **Observer pattern** en broadcaster desacopla métricas de lógica de negocio
-- **Dos fases de cleanup** previenen race conditions en limpieza de conexiones
+El worker pool de broadcasting con diez workers reduce el tiempo de entrega de mensajes de cuatro segundos a ciento sesenta milisegundos para broadcasts de cuatrocientas conexiones, una mejora de veinticinco veces esencial para mantener la sensación de tiempo real. El circuit breaker con lock unificado previene cascadas de fallos cuando Redis experimenta problemas, permitiendo degradación graceful en lugar de colapso total del servicio.
 
-La separación entre `connection_manager.py` (orquestador) y los módulos de `core/` (implementación) facilita testing unitario con mocks inyectados vía `ConnectionManagerDependencies`. Nuevos endpoints heredan de clases base existentes, nuevos tipos de eventos se integran definiendo su enrutamiento, y las métricas se extienden simplemente añadiendo observers al broadcaster.
+El patrón Strategy para autenticación mediante JWTAuthStrategy y TableTokenAuthStrategy permite extensibilidad sin modificar código existente. El patrón Template Method en las clases de endpoint elimina trescientas líneas de código duplicado. El TenantFilter garantiza aislamiento multi-tenant filtrando dentro del lock para prevenir condiciones de carrera.
 
-Esta arquitectura sustenta la experiencia fluida que usuarios finales perciben al ver actualizaciones instantáneas en sus dispositivos: desde el momento que un comensal confirma su pedido hasta que el plato aparece marcado como "listo" en todas las pantallas relevantes, el Gateway garantiza que la información fluya en milisegundos.
+Los scripts Lua atómicos eliminan race conditions en rate limiting. El Stream Consumer con recuperación de mensajes pendientes garantiza entrega de eventos críticos incluso cuando instancias fallan. La Dead Letter Queue preserva mensajes fallidos para análisis en lugar de perderlos silenciosamente.
+
+Esta arquitectura sustenta la experiencia fluida que los usuarios perciben al ver actualizaciones instantáneas en sus dispositivos, desde el momento que un comensal confirma su pedido hasta que el plato aparece marcado como listo en todas las pantallas del ecosistema, creando la sensación de un sistema vivo y reactivo que responde instantáneamente a cada acción.

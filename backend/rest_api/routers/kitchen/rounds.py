@@ -34,6 +34,7 @@ from shared.infrastructure.events import (
     ROUND_READY,
     ROUND_SERVED,
 )
+from rest_api.services.events.outbox_service import write_round_outbox_event
 
 
 router = APIRouter(prefix="/api/kitchen", tags=["kitchen"])
@@ -241,6 +242,31 @@ async def update_round_status(
     pre_commit_session = round_obj.session
     pre_commit_table = pre_commit_session.table if pre_commit_session else None
     pre_commit_sector_id = pre_commit_table.sector_id if pre_commit_table else None
+    pre_commit_table_id = pre_commit_table.id if pre_commit_table else None
+
+    # OUTBOX-PATTERN: For SUBMITTED and READY, use outbox for guaranteed delivery
+    # Other status changes use direct Redis publishing (acceptable latency vs reliability tradeoff)
+    use_outbox = new_status in ["SUBMITTED", "READY"]
+
+    if use_outbox:
+        # Write outbox event BEFORE commit (atomic with business data)
+        event_type_map = {
+            "SUBMITTED": ROUND_SUBMITTED,
+            "READY": ROUND_READY,
+        }
+        write_round_outbox_event(
+            db=db,
+            tenant_id=round_obj.tenant_id,
+            event_type=event_type_map[new_status],
+            round_id=round_obj.id,
+            branch_id=round_obj.branch_id,
+            session_id=round_obj.table_session_id,
+            table_id=pre_commit_table_id,
+            round_number=round_obj.round_number,
+            sector_id=pre_commit_sector_id,
+            actor_user_id=int(ctx["sub"]),
+            actor_role=ctx["roles"][0] if ctx.get("roles") else "UNKNOWN",
+        )
 
     try:
         db.commit()
@@ -260,34 +286,34 @@ async def update_round_status(
     # HIGH-KITCHEN-01 FIX: Use pre-commit data instead of re-querying
     sector_id = pre_commit_sector_id
 
-    # Publish event
-    event_type_map = {
-        "CONFIRMED": ROUND_CONFIRMED,
-        "SUBMITTED": ROUND_SUBMITTED,
-        "IN_KITCHEN": ROUND_IN_KITCHEN,
-        "READY": ROUND_READY,
-        "SERVED": ROUND_SERVED,
-    }
+    # For non-outbox events, publish directly to Redis (CONFIRMED, IN_KITCHEN, SERVED)
+    if not use_outbox:
+        event_type_map = {
+            "CONFIRMED": ROUND_CONFIRMED,
+            "IN_KITCHEN": ROUND_IN_KITCHEN,
+            "SERVED": ROUND_SERVED,
+        }
 
-    redis = None
-    try:
-        redis = await get_redis_client()
-        await publish_round_event(
-            redis_client=redis,
-            event_type=event_type_map[new_status],
-            tenant_id=round_obj.tenant_id,
-            branch_id=round_obj.branch_id,
-            table_id=session.table_id if session else None,
-            session_id=round_obj.table_session_id,
-            round_id=round_obj.id,
-            round_number=round_obj.round_number,
-            actor_user_id=int(ctx["sub"]),
-            actor_role=ctx["roles"][0] if ctx.get("roles") else "UNKNOWN",
-            sector_id=sector_id,  # SECTOR-DISPATCH FIX
-        )
-    except Exception as e:
-        logger.error("Failed to publish round status event", round_id=round_id, new_status=new_status, error=str(e))
-    # Note: Don't close pooled Redis connection - pool manages lifecycle
+        redis = None
+        try:
+            redis = await get_redis_client()
+            await publish_round_event(
+                redis_client=redis,
+                event_type=event_type_map[new_status],
+                tenant_id=round_obj.tenant_id,
+                branch_id=round_obj.branch_id,
+                table_id=session.table_id if session else None,
+                session_id=round_obj.table_session_id,
+                round_id=round_obj.id,
+                round_number=round_obj.round_number,
+                actor_user_id=int(ctx["sub"]),
+                actor_role=ctx["roles"][0] if ctx.get("roles") else "UNKNOWN",
+                sector_id=sector_id,  # SECTOR-DISPATCH FIX
+            )
+        except Exception as e:
+            logger.error("Failed to publish round status event", round_id=round_id, new_status=new_status, error=str(e))
+        # Note: Don't close pooled Redis connection - pool manages lifecycle
+    # Note: SUBMITTED and READY events are handled by outbox processor (guaranteed delivery)
 
     # Build response using pre-loaded relationships (no additional queries)
     # Note: After db.refresh(), relationships need to be re-queried

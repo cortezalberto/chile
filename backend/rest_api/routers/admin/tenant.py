@@ -2,14 +2,15 @@
 Tenant (Restaurant) management endpoints.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, status
 
 from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select,
+    Depends, Session, select,
     get_db, current_user, Tenant,
     require_admin,
 )
 from shared.utils.admin_schemas import TenantOutput, TenantUpdate
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(tags=["admin-tenant"])
@@ -48,6 +49,16 @@ def update_tenant(
     for key, value in update_data.items():
         setattr(tenant, key, value)
 
-    db.commit()
-    db.refresh(tenant)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(tenant)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update tenant", tenant_id=tenant.id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update tenant - please try again",
+        )
     return TenantOutput.model_validate(tenant)
+

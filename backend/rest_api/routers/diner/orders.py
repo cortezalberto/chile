@@ -59,6 +59,16 @@ from shared.infrastructure.events import (
     SERVICE_CALL_CREATED,
     CART_CLEARED,
 )
+from rest_api.services.events.outbox_service import write_service_call_outbox_event
+from rest_api.services.domain import RoundService, ServiceCallService, BillingService
+from rest_api.services.domain.round_service import (
+    DuplicateRoundError,
+    SessionNotActiveError,
+    ProductNotAvailableError,
+)
+from rest_api.services.domain.billing_service import (
+    CheckNotFoundError,
+)
 
 
 router = APIRouter(prefix="/api/diner", tags=["diner"])
@@ -261,6 +271,7 @@ def submit_round(
     """
     Submit a new round of orders.
     
+    REF-01: Uses RoundService for thin controller pattern.
     Creates a new round with the specified items and schedules a 
     ROUND_PENDING event to be published in the background.
 
@@ -271,134 +282,41 @@ def submit_round(
     branch_id = table_ctx["branch_id"]
     tenant_id = table_ctx["tenant_id"]
 
-    # CRIT-IDEMP-01 FIX: Check for existing round with same idempotency key
-    if x_idempotency_key:
-        existing_round = db.scalar(
-            select(Round).where(
-                Round.table_session_id == session_id,
-                Round.idempotency_key == x_idempotency_key,
-                Round.status != "CANCELED",
-            )
-        )
-        if existing_round:
-            logger.info("Idempotent round submission detected",
-                       session_id=session_id,
-                       round_id=existing_round.id,
-                       idempotency_key=x_idempotency_key[:8] + "...")
-            return SubmitRoundResponse(
-                session_id=session_id,
-                round_id=existing_round.id,
-                round_number=existing_round.round_number,
-                status=existing_round.status,
-            )
+    service = RoundService(db)
 
-    # DEF-HIGH-01 FIX: Allow round submission in both OPEN and PAYING states
-    session = db.scalar(
-        select(TableSession).where(
-            TableSession.id == session_id,
-            TableSession.status.in_(["OPEN", "PAYING"]),
+    try:
+        new_round, sector_id = service.submit_round(
+            tenant_id=tenant_id,
+            branch_id=branch_id,
+            session_id=session_id,
+            table_id=table_id,
+            request=body,
+            idempotency_key=x_idempotency_key,
         )
-    )
-
-    if not session:
+    except DuplicateRoundError as e:
+        # Idempotent response - return existing round
+        logger.info(
+            "Idempotent round submission detected",
+            session_id=session_id,
+            round_id=e.round_id,
+        )
+        return SubmitRoundResponse(
+            session_id=session_id,
+            round_id=e.round_id,
+            round_number=e.round_number,
+            status=e.status,
+        )
+    except SessionNotActiveError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Session is not active or does not exist",
         )
-
-    # FIX: Get table's sector_id for targeted waiter notifications
-    table = db.scalar(select(Table).where(Table.id == table_id))
-    sector_id = table.sector_id if table else None
-
-    # CRIT-29-01 FIX: Use SELECT FOR UPDATE to prevent race condition
-    locked_session = db.scalar(
-        select(TableSession)
-        .where(TableSession.id == session_id)
-        .with_for_update()
-    )
-    if not locked_session:
+    except ProductNotAvailableError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session not found",
+            detail=f"Product {e.product_id} not available in this branch",
         )
-
-    # Get next round number
-    max_round = db.scalar(
-        select(func.max(Round.round_number))
-        .where(Round.table_session_id == session_id)
-    ) or 0
-    next_round_number = max_round + 1
-
-    # Create the round with PENDING status
-    new_round = Round(
-        tenant_id=tenant_id,
-        branch_id=branch_id,
-        table_session_id=session_id,
-        round_number=next_round_number,
-        status="PENDING",
-        submitted_at=datetime.now(timezone.utc),
-        idempotency_key=x_idempotency_key,
-    )
-    db.add(new_round)
-    db.flush()
-
-    # REC-03 FIX: Batch fetch all products and branch prices
-    product_ids = [item.product_id for item in body.items]
-
-    products_query = db.execute(
-        select(Product, BranchProduct)
-        .join(BranchProduct, Product.id == BranchProduct.product_id)
-        .where(
-            Product.id.in_(product_ids),
-            Product.is_active.is_(True),
-            BranchProduct.branch_id == branch_id,
-            BranchProduct.is_available == True,
-        )
-    ).all()
-
-    # Build lookup dict
-    product_lookup: dict[int, tuple] = {
-        product.id: (product, branch_product)
-        for product, branch_product in products_query
-    }
-
-    # Validate all products are available
-    for item in body.items:
-        if item.product_id not in product_lookup:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Product {item.product_id} not available in this branch",
-            )
-
-    # REC-03 FIX: Batch create all round items
-    round_items_to_add = []
-    for item in body.items:
-        product, branch_product = product_lookup[item.product_id]
-
-        round_item = RoundItem(
-            tenant_id=tenant_id,
-            branch_id=branch_id,
-            round_id=new_round.id,
-            product_id=product.id,
-            qty=item.qty,
-            unit_price_cents=branch_product.price_cents,
-            notes=item.notes,
-        )
-        round_items_to_add.append(round_item)
-
-    db.add_all(round_items_to_add)
-
-    # SHARED-CART: Clear cart_items after creating round
-    db.execute(
-        CartItem.__table__.delete().where(CartItem.session_id == session_id)
-    )
-
-    # AUDIT FIX: Wrap commit in try-except
-    try:
-        db.commit()
-        db.refresh(new_round)
     except Exception as e:
-        db.rollback()
         logger.error("Failed to submit round", session_id=session_id, error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -414,7 +332,7 @@ def submit_round(
         table_id=table_id,
         session_id=session_id,
         round_id=new_round.id,
-        round_number=next_round_number,
+        round_number=new_round.round_number,
         actor_user_id=None,
         actor_role="DINER",
         sector_id=sector_id,
@@ -432,7 +350,7 @@ def submit_round(
     return SubmitRoundResponse(
         session_id=session_id,
         round_id=new_round.id,
-        round_number=next_round_number,
+        round_number=new_round.round_number,
         status=new_round.status,
     )
 
@@ -446,9 +364,8 @@ def get_session_rounds(
     """
     Get all rounds for a session.
 
+    REF-01: Uses RoundService for thin controller pattern.
     Returns the history of orders with their current status.
-
-    AUDIT FIX: Uses batch loading to prevent N+1 queries.
     """
     # Verify session matches token
     if table_ctx["session_id"] != session_id:
@@ -457,57 +374,8 @@ def get_session_rounds(
             detail="Session does not match token",
         )
 
-    rounds = db.execute(
-        select(Round)
-        .where(Round.table_session_id == session_id)
-        .order_by(Round.round_number)
-    ).scalars().all()
-
-    if not rounds:
-        return []
-
-    # AUDIT FIX: Batch load all items and products at once instead of per-round
-    round_ids = [r.id for r in rounds]
-
-    # Single query to get all items with their products
-    all_items = db.execute(
-        select(RoundItem, Product)
-        .join(Product, RoundItem.product_id == Product.id)
-        .where(RoundItem.round_id.in_(round_ids))
-    ).all()
-
-    # Group items by round_id
-    items_by_round: dict[int, list[tuple]] = {rid: [] for rid in round_ids}
-    for item, product in all_items:
-        items_by_round[item.round_id].append((item, product))
-
-    result = []
-    for round_obj in rounds:
-        items = items_by_round.get(round_obj.id, [])
-
-        item_outputs = [
-            RoundItemOutput(
-                id=item.id,
-                product_id=item.product_id,
-                product_name=product.name,
-                qty=item.qty,
-                unit_price_cents=item.unit_price_cents,
-                notes=item.notes,
-            )
-            for item, product in items
-        ]
-
-        result.append(
-            RoundOutput(
-                id=round_obj.id,
-                round_number=round_obj.round_number,
-                status=round_obj.status,
-                items=item_outputs,
-                created_at=round_obj.created_at,
-            )
-        )
-
-    return result
+    service = RoundService(db)
+    return service.get_session_rounds(session_id)
 
 
 @router.post("/service-call", response_model=ServiceCallOutput)
@@ -598,6 +466,21 @@ def create_service_call(
         status="OPEN",
     )
     db.add(service_call)
+    db.flush()  # Get ID before writing outbox event
+
+    # OUTBOX-PATTERN: Write event atomically with business data (guaranteed delivery)
+    write_service_call_outbox_event(
+        db=db,
+        tenant_id=tenant_id,
+        event_type=SERVICE_CALL_CREATED,
+        call_id=service_call.id,
+        branch_id=branch_id,
+        session_id=session_id,
+        table_id=table_id,
+        call_type=body.type,
+        sector_id=sector_id,
+        actor_role="DINER",
+    )
 
     # AUDIT FIX: Wrap commit in try-except
     try:
@@ -611,20 +494,7 @@ def create_service_call(
             detail="Failed to create service call - please try again",
         )
 
-    # Schedule event publication in background
-    background_tasks.add_task(
-        _bg_publish_service_call_event,
-        event_type=SERVICE_CALL_CREATED,
-        tenant_id=tenant_id,
-        branch_id=branch_id,
-        table_id=table_id,
-        session_id=session_id,
-        call_id=service_call.id,
-        call_type=body.type,
-        actor_user_id=None,
-        actor_role="DINER",
-        sector_id=sector_id,
-    )
+    # Note: Event publishing is now handled by outbox processor (guaranteed delivery)
 
     return ServiceCallOutput(
         id=service_call.id,
@@ -647,6 +517,7 @@ def get_session_total(
     """
     Get the total amount for a session.
 
+    REF-01: Uses BillingService for thin controller pattern.
     Calculates total from all rounds (excluding CANCELED).
     """
     if table_ctx["session_id"] != session_id:
@@ -655,30 +526,8 @@ def get_session_total(
             detail="Session does not match token",
         )
 
-    # Calculate total from all round items
-    total_cents = db.scalar(
-        select(func.sum(RoundItem.unit_price_cents * RoundItem.qty))
-        .join(Round, RoundItem.round_id == Round.id)
-        .where(
-            Round.table_session_id == session_id,
-            Round.status != "CANCELED",
-        )
-    ) or 0
-
-    # Check if there's an active check
-    check = db.scalar(
-        select(Check)
-        .where(Check.table_session_id == session_id)
-        .order_by(Check.created_at.desc())
-    )
-
-    return {
-        "session_id": session_id,
-        "total_cents": total_cents,
-        "paid_cents": check.paid_cents if check else 0,
-        "check_id": check.id if check else None,
-        "check_status": check.status if check else None,
-    }
+    service = BillingService(db)
+    return service.get_session_total(session_id)
 
 
 @router.get("/check", response_model=CheckDetailOutput)
@@ -689,81 +538,22 @@ def get_diner_check(
     """
     Get the current check detail for the diner's session.
 
+    REF-01: Uses BillingService for thin controller pattern.
     Returns full breakdown of items and payments.
     Used by diner to see their bill before/during payment.
     """
     session_id = table_ctx["session_id"]
     table_id = table_ctx["table_id"]
 
-    # Get the check for this session
-    check = db.scalar(
-        select(Check)
-        .where(Check.table_session_id == session_id)
-        .order_by(Check.created_at.desc())
-    )
-
-    if not check:
+    service = BillingService(db)
+    
+    try:
+        return service.get_check_detail(session_id=session_id, table_id=table_id)
+    except CheckNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No check found for this session. Request check first.",
         )
-
-    # Get table code
-    table = db.scalar(select(Table).where(Table.id == table_id))
-
-    # Get all items from all rounds (non-canceled)
-    items_query = db.execute(
-        select(RoundItem, Product, Round.round_number)
-        .join(Product, RoundItem.product_id == Product.id)
-        .join(Round, RoundItem.round_id == Round.id)
-        .where(
-            Round.table_session_id == session_id,
-            Round.status != "CANCELED",
-        )
-        .order_by(Round.round_number, RoundItem.id)
-    ).all()
-
-    items = [
-        CheckItemOutput(
-            product_name=product.name,
-            qty=item.qty,
-            unit_price_cents=item.unit_price_cents,
-            subtotal_cents=item.qty * item.unit_price_cents,
-            notes=item.notes,
-            round_number=round_number,
-        )
-        for item, product, round_number in items_query
-    ]
-
-    # Get payments
-    payments = db.execute(
-        select(Payment)
-        .where(Payment.check_id == check.id)
-        .order_by(Payment.created_at)
-    ).scalars().all()
-
-    payment_outputs = [
-        PaymentOutput(
-            id=p.id,
-            provider=p.provider,
-            status=p.status,
-            amount_cents=p.amount_cents,
-            created_at=p.created_at,
-        )
-        for p in payments
-    ]
-
-    return CheckDetailOutput(
-        id=check.id,
-        status=check.status,
-        total_cents=check.total_cents,
-        paid_cents=check.paid_cents,
-        remaining_cents=max(0, check.total_cents - check.paid_cents),
-        items=items,
-        payments=payment_outputs,
-        created_at=check.created_at,
-        table_code=table.code if table else None,
-    )
 
 
 # =============================================================================

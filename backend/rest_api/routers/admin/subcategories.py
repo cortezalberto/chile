@@ -1,11 +1,13 @@
 """
 Subcategory management endpoints.
+
+PERF-BGTASK-01: Uses FastAPI BackgroundTasks for event publishing.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select, func,
+    Depends, Session, select, func,
     get_db, current_user, Subcategory, Category,
     soft_delete, set_created_by, set_updated_by,
     get_user_id, get_user_email, publish_entity_deleted,
@@ -13,6 +15,7 @@ from rest_api.routers.admin._base import (
 )
 from shared.utils.validators import validate_image_url
 from shared.utils.admin_schemas import SubcategoryOutput, SubcategoryCreate, SubcategoryUpdate
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(tags=["admin-subcategories"])
@@ -110,8 +113,18 @@ def create_subcategory(
     )
     set_created_by(subcategory, get_user_id(user), get_user_email(user))
     db.add(subcategory)
-    db.commit()
-    db.refresh(subcategory)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(subcategory)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create subcategory", category_id=body.category_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create subcategory - please try again",
+        )
     return SubcategoryOutput.model_validate(subcategory)
 
 
@@ -153,18 +166,31 @@ def update_subcategory(
 
     set_updated_by(subcategory, get_user_id(user), get_user_email(user))
 
-    db.commit()
-    db.refresh(subcategory)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(subcategory)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update subcategory", subcategory_id=subcategory_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update subcategory - please try again",
+        )
     return SubcategoryOutput.model_validate(subcategory)
 
 
 @router.delete("/subcategories/{subcategory_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_subcategory(
     subcategory_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(require_admin),
 ) -> None:
-    """Soft delete a subcategory. Requires ADMIN role."""
+    """Soft delete a subcategory. Requires ADMIN role.
+
+    PERF-BGTASK-01: Uses BackgroundTasks for async event publishing.
+    """
     subcategory = db.scalar(
         select(Subcategory).where(
             Subcategory.id == subcategory_id,
@@ -196,4 +222,5 @@ def delete_subcategory(
         entity_name=subcategory_name,
         branch_id=branch_id,
         actor_user_id=get_user_id(user),
+        background_tasks=background_tasks,
     )

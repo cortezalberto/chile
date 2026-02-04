@@ -1,11 +1,13 @@
 """
 Branch management endpoints.
+
+PERF-BGTASK-01: Uses FastAPI BackgroundTasks for event publishing.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select,
+    Depends, Session, select,
     get_db, current_user, Branch,
     soft_delete, set_created_by, set_updated_by,
     get_user_id, get_user_email, publish_entity_deleted,
@@ -13,6 +15,7 @@ from rest_api.routers.admin._base import (
     is_admin, validate_branch_access,
 )
 from shared.utils.admin_schemas import BranchOutput, BranchCreate, BranchUpdate
+from shared.config.logging import rest_api_logger as logger
 
 
 router = APIRouter(tags=["admin-branches"])
@@ -87,8 +90,18 @@ def create_branch(
     )
     set_created_by(branch, get_user_id(user), get_user_email(user))
     db.add(branch)
-    db.commit()
-    db.refresh(branch)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(branch)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create branch", tenant_id=user["tenant_id"], error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create branch - please try again",
+        )
     return BranchOutput.model_validate(branch)
 
 
@@ -126,18 +139,31 @@ def update_branch(
 
     set_updated_by(branch, get_user_id(user), get_user_email(user))
 
-    db.commit()
-    db.refresh(branch)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(branch)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update branch", branch_id=branch_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update branch - please try again",
+        )
     return BranchOutput.model_validate(branch)
 
 
 @router.delete("/branches/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_branch(
     branch_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(require_admin),
 ) -> None:
-    """Soft delete a branch. Requires ADMIN role."""
+    """Soft delete a branch. Requires ADMIN role.
+
+    PERF-BGTASK-01: Uses BackgroundTasks for async event publishing.
+    """
     branch = db.scalar(
         select(Branch).where(
             Branch.id == branch_id,
@@ -156,10 +182,12 @@ def delete_branch(
 
     soft_delete(db, branch, get_user_id(user), get_user_email(user))
 
+    # PERF-BGTASK-01: Pass BackgroundTasks for proper lifecycle management
     publish_entity_deleted(
         tenant_id=tenant_id,
         entity_type="branch",
         entity_id=branch_id,
         entity_name=branch_name,
         actor_user_id=get_user_id(user),
+        background_tasks=background_tasks,
     )

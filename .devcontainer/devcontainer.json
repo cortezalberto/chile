@@ -1,0 +1,111 @@
+{
+    "name": "Integrador Dev",
+    "dockerComposeFile": [
+        "../devOps/docker-compose.yml",
+        "docker-compose.dev.yml"
+    ],
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "bradlc.vscode-tailwindcss",
+                "dbaeumer.vscode-eslint",
+                "esbenp.prettier-vscode",
+                "ms-azuretools.vscode-docker",
+                "mtxr.sqltools",
+                "mtxr.sqltools-driver-pg",
+                "redhat.vscode-yaml",
+                "GitHub.copilot",
+                "eamodio.gitlens",
+                "formulahendry.auto-rename-tag",
+                "christian-kohler.path-intellisense"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/workspace/backend/.venv/bin/python",
+                "python.linting.enabled": true,
+                "python.linting.pylintEnabled": false,
+                "python.linting.flake8Enabled": true,
+                "python.formatting.provider": "black",
+                "python.formatting.blackPath": "/workspace/backend/.venv/bin/black",
+                "editor.formatOnSave": true,
+                "editor.defaultFormatter": "esbenp.prettier-vscode",
+                "[python]": {
+                    "editor.defaultFormatter": "ms-python.python"
+                },
+                "files.exclude": {
+                    "**/__pycache__": true,
+                    "**/.pytest_cache": true,
+                    "**/node_modules": true,
+                    "**/.git": true
+                },
+                "typescript.tsdk": "node_modules/typescript/lib",
+                "eslint.workingDirectories": [
+                    "./Dashboard",
+                    "./pwaMenu",
+                    "./pwaWaiter"
+                ],
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "20"
+        },
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.12"
+        },
+        "ghcr.io/devcontainers/features/git:1": {}
+    },
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
+    "postStartCommand": "bash .devcontainer/post-start.sh",
+    "forwardPorts": [
+        5176,
+        5177,
+        5178,
+        8000,
+        8001,
+        5432,
+        6380
+    ],
+    "portsAttributes": {
+        "5176": {
+            "label": "pwaMenu",
+            "onAutoForward": "notify"
+        },
+        "5177": {
+            "label": "Dashboard",
+            "onAutoForward": "notify"
+        },
+        "5178": {
+            "label": "pwaWaiter",
+            "onAutoForward": "notify"
+        },
+        "8000": {
+            "label": "REST API",
+            "onAutoForward": "notify"
+        },
+        "8001": {
+            "label": "WS Gateway",
+            "onAutoForward": "notify"
+        },
+        "5432": {
+            "label": "PostgreSQL",
+            "onAutoForward": "silent"
+        },
+        "6380": {
+            "label": "Redis",
+            "onAutoForward": "silent"
+        }
+    },
+    "remoteUser": "vscode",
+    "containerEnv": {
+        "PYTHONPATH": "/workspace/backend",
+        "DATABASE_URL": "postgresql+psycopg://postgres:postgres@db:5432/menu_ops",
+        "REDIS_URL": "redis://redis:6379"
+    }
+}

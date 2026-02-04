@@ -15,6 +15,12 @@ from rest_api.core.middlewares import register_middlewares
 from shared.config.settings import settings
 from shared.security.rate_limit import limiter, rate_limit_exceeded_handler
 
+# OBS-01: OpenTelemetry instrumentation
+from shared.infrastructure.telemetry import setup_telemetry
+
+# OBS-02: Correlation ID middleware
+from shared.infrastructure.correlation import CorrelationIdMiddleware
+
 # Import routers (canonical paths - Clean Architecture)
 from rest_api.routers.auth import router as auth_router
 from rest_api.routers.public.catalog import router as catalog_router
@@ -34,16 +40,53 @@ from rest_api.routers.content.recipes import router as recipes_router
 from rest_api.routers.content.ingredients import router as ingredients_router
 from rest_api.routers.content.catalogs import router as catalogs_router
 
+# OBS-01: Prometheus metrics endpoint
+from rest_api.routers.metrics import router as metrics_router
+
 
 # =============================================================================
 # Create FastAPI Application
 # =============================================================================
 
+# DX-03: Enhanced API documentation
 app = FastAPI(
     title="Integrador REST API",
-    description="Restaurant management system API",
-    version="0.1.0",
+    description="""
+## Restaurant Management System API
+
+### Modules
+- **Auth**: JWT-based authentication for staff and table tokens for diners
+- **Admin**: Dashboard CRUD operations for menu, categories, and settings
+- **Kitchen**: Order processing and round management
+- **Waiter**: Table management and service calls
+- **Diner**: Customer ordering via PWA
+
+### Rate Limits
+- Public endpoints: 100/min
+- Authenticated: 30/min
+- Login: 5/min per email
+
+### WebSocket Events
+Real-time updates are delivered through the WebSocket Gateway on port 8001.
+See `/ws/docs` for real-time event documentation.
+
+### Authentication
+- Staff: Bearer JWT token in Authorization header
+- Diners: X-Table-Token header with table session token
+""",
+    version="2.0.0",
     lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_tags=[
+        {"name": "auth", "description": "Authentication and authorization"},
+        {"name": "admin", "description": "Administrative CRUD operations"},
+        {"name": "kitchen", "description": "Kitchen workflow and round management"},
+        {"name": "waiter", "description": "Waiter operations and service calls"},
+        {"name": "diner", "description": "Customer ordering and session management"},
+        {"name": "billing", "description": "Payments and check management"},
+        {"name": "public", "description": "Public endpoints (catalog, health)"},
+    ],
 )
 
 # =============================================================================
@@ -54,6 +97,10 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
+# OBS-02: Correlation ID middleware (adds X-Request-ID to all requests)
+# Register early so correlation ID is available to all other middlewares
+app.add_middleware(CorrelationIdMiddleware)
+
 # Security middlewares (headers, content-type validation)
 # NOTE: Register BEFORE CORS - middlewares execute in reverse order
 register_middlewares(app)
@@ -61,6 +108,11 @@ register_middlewares(app)
 # CORS configuration - MUST be registered LAST to execute FIRST
 # This ensures preflight OPTIONS requests are handled before other middlewares
 configure_cors(app)
+
+# OBS-01: Setup OpenTelemetry instrumentation
+# This auto-instruments FastAPI, SQLAlchemy, and Redis for distributed tracing
+# Only active in production/staging unless OTEL_ENABLED=true
+setup_telemetry(app)
 
 # =============================================================================
 # Register Routers
@@ -84,6 +136,7 @@ _routers = [
     kitchen_tickets_router,
     customer_router,
     cart_router,
+    metrics_router,  # OBS-01: Prometheus metrics
 ]
 
 for router in _routers:

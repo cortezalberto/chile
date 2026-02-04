@@ -1,19 +1,26 @@
 """
 Table management endpoints including batch creation.
+
+PERF-BGTASK-01: Uses FastAPI BackgroundTasks for event publishing.
 """
 
 import re
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from rest_api.routers.admin._base import (
-    Depends, HTTPException, status, Session, select,
+    Depends, Session, select,
     get_db, current_user, Table, Branch, BranchSector,
     soft_delete, set_created_by, set_updated_by,
     get_user_id, get_user_email, publish_entity_deleted,
     require_admin, require_admin_or_manager,
     is_admin, validate_branch_access, filter_by_accessible_branches,
-    Round, TableSession,  # For active round statuses
+    Round, TableSession,
 )
+from shared.utils.admin_schemas import (
+    TableOutput, TableCreate, TableUpdate,
+    TableBulkCreate, TableBulkResult,
+)
+from shared.config.logging import rest_api_logger as logger
 from shared.utils.admin_schemas import (
     TableOutput, TableCreate, TableUpdate,
     TableBulkCreate, TableBulkResult,
@@ -173,8 +180,18 @@ def create_table(
     )
     set_created_by(table, get_user_id(user), get_user_email(user))
     db.add(table)
-    db.commit()
-    db.refresh(table)
+
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(table)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to create table", branch_id=body.branch_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create table - please try again",
+        )
     return TableOutput.model_validate(table)
 
 
@@ -212,20 +229,31 @@ def update_table(
 
     set_updated_by(table, get_user_id(user), get_user_email(user))
 
-    db.commit()
-    db.refresh(table)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        db.refresh(table)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to update table", table_id=table_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update table - please try again",
+        )
     return TableOutput.model_validate(table)
 
 
 @router.delete("/tables/{table_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_table(
     table_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: dict = Depends(require_admin_or_manager),
 ) -> None:
     """Soft delete a table. Requires ADMIN or MANAGER role.
 
     MANAGER users can only delete tables in their assigned branches.
+    PERF-BGTASK-01: Uses BackgroundTasks for async event publishing.
     """
     table = db.scalar(
         select(Table).where(
@@ -257,6 +285,7 @@ def delete_table(
         entity_name=table_code,
         branch_id=branch_id,
         actor_user_id=get_user_id(user),
+        background_tasks=background_tasks,
     )
 
 
@@ -327,10 +356,18 @@ def batch_create_tables(
             db.add(table)
             created_tables.append(table)
 
-    db.commit()
-
-    for table in created_tables:
-        db.refresh(table)
+    # AUDIT-FIX: Wrap commit in try-except for consistent error handling
+    try:
+        db.commit()
+        for table in created_tables:
+            db.refresh(table)
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to batch create tables", branch_id=body.branch_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create tables - please try again",
+        )
 
     return TableBulkResult(
         created_count=len(created_tables),

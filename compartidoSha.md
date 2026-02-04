@@ -1,468 +1,273 @@
-# La Capa Compartida: Corazón del Backend
+# La Capa Compartida: Fundamento Arquitectónico del Backend
 
-## Introducción y Visión Arquitectónica
+**Versión 3.0 - Febrero 2026**
 
-La carpeta `backend/shared/` constituye el núcleo fundacional del sistema Integrador. Esta capa representa un componente crítico de la arquitectura, diseñada para albergar todos aquellos módulos, utilidades y servicios que trascienden los límites de una única aplicación y deben ser accesibles tanto por la REST API (`rest_api/`) como por el WebSocket Gateway (`ws_gateway/`). Su existencia responde a un principio arquitectónico fundamental: la centralización de responsabilidades transversales evita la duplicación de código y garantiza comportamiento consistente en todo el ecosistema.
+## Introducción
 
-El diseño de esta capa sigue los principios de Clean Architecture, donde los módulos compartidos representan el círculo más interno de la aplicación. Las capas externas (routers, endpoints WebSocket) dependen de esta capa, pero nunca al revés. Esta dirección unidireccional de dependencias permite que los cambios en la lógica de presentación no afecten a los servicios fundamentales del sistema.
+La carpeta backend/shared/ constituye el núcleo fundacional del sistema Integrador, representando aproximadamente nueve mil líneas de código distribuidas en cuarenta y un archivos especializados organizados en cuatro módulos principales. Esta capa trasciende la noción convencional de utilidades compartidas para convertirse en el verdadero sistema nervioso de la aplicación, donde convergen todas las decisiones fundamentales de seguridad, configuración, comunicación inter-servicios y gestión de estado distribuido.
 
-La estructura actual refleja una organización por responsabilidad funcional:
+El diseño de esta capa adhiere rigurosamente a los principios de Clean Architecture, ocupando el círculo más interno del sistema. Las capas externas, tanto la REST API como el WebSocket Gateway, dependen exclusivamente de este núcleo compartido, pero nunca ocurre lo inverso. Esta dirección unidireccional de dependencias garantiza que modificaciones en la lógica de presentación o en los endpoints no perturben los servicios fundamentales, permitiendo evolución independiente de cada componente sin efectos secundarios inesperados.
 
-```
-backend/shared/
-├── config/              # Configuración centralizada
-│   ├── settings.py      # Variables de entorno y constantes configurables
-│   ├── logging.py       # Sistema de logging estructurado
-│   └── constants.py     # Constantes de dominio y validación de estados
-├── security/            # Autenticación y autorización
-│   ├── auth.py          # JWT y tokens de mesa
-│   ├── password.py      # Hashing con bcrypt
-│   ├── token_blacklist.py  # Revocación de tokens via Redis
-│   └── rate_limit.py    # Protección contra abuso
-├── infrastructure/      # Conexiones a servicios externos
-│   ├── db.py            # SQLAlchemy y gestión de sesiones
-│   ├── events/          # Sistema de eventos Redis pub/sub y streams
-│   │   ├── circuit_breaker.py
-│   │   ├── event_schema.py
-│   │   ├── channels.py
-│   │   ├── redis_pool.py
-│   │   ├── publisher.py
-│   │   ├── routing.py
-│   │   ├── domain_publishers.py
-│   │   └── health_checks.py
-│   └── redis/
-│       └── constants.py  # Prefijos y TTLs centralizados
-└── utils/               # Utilidades de propósito general
-    ├── exceptions.py    # Excepciones HTTP centralizadas
-    ├── validators.py    # Validación de entrada y seguridad
-    ├── health.py        # Decoradores para health checks
-    ├── schemas.py       # Schemas Pydantic compartidos
-    └── admin_schemas.py # Schemas específicos de admin API
-```
+La arquitectura interna de la capa refleja una organización meticulosa por responsabilidad funcional que ha evolucionado a través de múltiples iteraciones de refactorización. El módulo de configuración, con aproximadamente mil ciento trece líneas, centraliza todas las variables de entorno, constantes de dominio y sistemas de logging estructurado. El módulo de seguridad, con mil setecientas veinticinco líneas, encapsula la totalidad de la lógica de autenticación desde verificación de tokens JWT hasta revocación en tiempo real mediante Redis y rate limiting. El módulo de infraestructura, el más extenso con tres mil trescientas cuarenta y ocho líneas, gestiona las conexiones a PostgreSQL y Redis incluyendo un sofisticado sistema de eventos basado en publicación/suscripción con circuit breaker para resiliencia. Finalmente, el módulo de utilidades con dos mil setecientas cincuenta y nueve líneas provee excepciones estandarizadas, validadores de seguridad, health checks con timeout, y los schemas Pydantic que definen el contrato de la API.
 
 ---
 
-## Capítulo 1: Configuración Centralizada
+## Capítulo 1: El Sistema de Configuración
 
-### El Sistema de Settings
+El módulo de configuración reside en el directorio config/ y comprende tres archivos fundamentales que establecen la fuente única de verdad para todo el sistema. Esta centralización elimina completamente la dispersión de valores hardcodeados que plagaba versiones anteriores del código y que generaba inconsistencias difíciles de rastrear entre diferentes partes de la aplicación.
 
-El archivo `settings.py` implementa el patrón de configuración mediante Pydantic BaseSettings, una aproximación moderna que combina la flexibilidad de variables de entorno con la seguridad de tipos de Python. La clase `Settings` actúa como el único punto de verdad para todas las configuraciones del sistema, eliminando la dispersión de valores hardcodeados y facilitando la configuración por ambiente.
+El archivo settings.py implementa el patrón de configuración centralizada mediante Pydantic BaseSettings, una aproximación que combina la flexibilidad de variables de entorno con la seguridad de tipos estáticos de Python. La clase Settings, que abarca aproximadamente ciento setenta y nueve líneas de código cuidadosamente documentado, actúa como el único punto de verdad para todas las configuraciones del sistema.
 
-La arquitectura de configuración contempla múltiples dominios funcionales. En primer lugar, la conectividad a bases de datos queda definida mediante `database_url`, cuyo valor por defecto apunta a PostgreSQL local pero puede ser sobreescrito via la variable de entorno `DATABASE_URL`. De manera similar, `redis_url` establece la conexión al broker de mensajería, con el puerto 6380 como valor por defecto que coincide con la configuración de Docker Compose del proyecto.
+La conectividad a bases de datos queda definida mediante el atributo database_url, cuyo valor por defecto construye una cadena de conexión PostgreSQL apuntando a localhost en el puerto 5432 con la base de datos integrador. Esta configuración puede sobreescribirse mediante la variable de entorno DATABASE_URL, permitiendo que el mismo código opere en entornos de desarrollo, staging y producción sin modificación alguna. De manera análoga, redis_url establece la conexión al broker de mensajería utilizando el puerto 6380 como valor por defecto en lugar del convencional 6379, una decisión deliberada que coincide con la configuración de Docker Compose del proyecto y evita conflictos con instalaciones Redis locales preexistentes.
 
-El subsistema de autenticación JWT recibe especial atención en la configuración. Los tokens de acceso mantienen una vida útil deliberadamente corta de 15 minutos (`jwt_access_token_expire_minutes`), una decisión de diseño documentada como SEC-01 que reduce la ventana de exposición en caso de compromiso. Los tokens de refresco extienden esta duración a 7 días, permitiendo sesiones prolongadas sin intervención del usuario. El artefacto CRIT-04 documenta la reducción del tiempo de vida de tokens de mesa de 8 a 3 horas, una medida de hardening para limitar la exposición de tokens compartidos en contextos públicos.
+El subsistema de autenticación JWT recibe tratamiento particularmente detallado en la configuración. Los tokens de acceso mantienen una vida útil deliberadamente corta de quince minutos, expresada en el atributo jwt_access_token_expire_minutes. Esta decisión reduce drásticamente la ventana de exposición en caso de que un token sea comprometido, ya que un atacante tendría apenas un cuarto de hora para explotar credenciales robadas antes de que expiren naturalmente. Los tokens de refresco extienden esta duración a siete días mediante jwt_refresh_token_expire_days, permitiendo sesiones prolongadas sin requerir intervención explícita del usuario para re-autenticarse mientras mantienen la seguridad mediante tokens de acceso de corta duración.
 
-La configuración de WebSocket incorpora límites operacionales críticos para la estabilidad del sistema bajo carga. El parámetro `ws_max_connections_per_user` limita a 3 las conexiones simultáneas por usuario, previniendo el agotamiento de recursos por clientes problemáticos. El límite global `ws_max_total_connections` de 500 conexiones establece un techo de capacidad que protege al servidor de colapso por sobrecarga. El rate limiting por conexión (`ws_message_rate_limit` de 30 mensajes por segundo) previene ataques de denegación de servicio a nivel de protocolo.
+Los tokens de mesa diseñados para comensales que escanean códigos QR recibieron una reducción significativa de tiempo de vida en el artefacto CRIT-04 FIX. Originalmente configurados para ocho horas, estos tokens ahora expiran tras tres horas de uso, una medida de hardening que limita la exposición en contextos públicos donde múltiples personas podrían observar o fotografiar un código QR antes de que sea utilizado legítimamente por el comensal autorizado.
 
-Los pools de Redis reciben configuración diferenciada para operaciones síncronas y asíncronas. El pool asíncrono (`redis_pool_max_connections`: 50) soporta las operaciones de pub/sub y eventos en tiempo real, mientras que el pool síncrono (`redis_sync_pool_max_connections`: 20) atiende operaciones bloqueantes como verificación de tokens y rate limiting. Esta separación, documentada como LOAD-LEVEL2, evita que operaciones de bloqueo afecten la latencia del sistema de eventos.
+La configuración de cookies HttpOnly introducida en SEC-09 representa una medida crítica de mitigación contra ataques de Cross-Site Scripting. Los parámetros cookie_secure, cookie_samesite y cookie_domain controlan el comportamiento detallado de estas cookies que almacenan los tokens de refresco. En ambiente de desarrollo cookie_secure permanece en False para permitir transmisión sobre HTTP local sin cifrar, pero en producción este valor debe activarse para requerir HTTPS exclusivamente. El valor lax de cookie_samesite ofrece un balance calculado entre protección CSRF y usabilidad, permitiendo que las cookies se envíen durante navegación top-level mientras bloquean requests cross-site automáticos.
 
-El método `validate_production_secrets()` implementa una validación de arranque que previene despliegues inseguros. En ambiente de producción, el sistema rechaza iniciar si detecta secretos débiles o por defecto, garantizando que JWT_SECRET y TABLE_TOKEN_SECRET cumplan requisitos mínimos de 32 caracteres y no coincidan con valores conocidos como inseguros.
+La configuración de WebSocket incorpora límites operacionales críticos para mantener la estabilidad del sistema bajo carga sostenida. El parámetro ws_max_connections_per_user establece un límite de tres conexiones simultáneas por usuario, previniendo el agotamiento de recursos por clientes problemáticos que podrían abrir múltiples pestañas del navegador. El límite global ws_max_total_connections de quinientas conexiones establece un techo absoluto de capacidad que protege al servidor de colapso por sobrecarga. El rate limiting por conexión expresado en ws_message_rate_limit con treinta mensajes por segundo previene ataques de denegación de servicio a nivel de protocolo WebSocket.
 
-### Configuración de Cookies HttpOnly (SEC-09)
+Los pools de Redis reciben configuración diferenciada para operaciones síncronas y asíncronas, una arquitectura documentada como LOAD-LEVEL2. El pool asíncrono con redis_pool_max_connections configurado en cincuenta conexiones soporta las operaciones de publicación/suscripción y eventos en tiempo real donde la naturaleza no bloqueante es esencial. El pool síncrono con redis_sync_pool_max_connections en veinte conexiones atiende operaciones inherentemente bloqueantes como verificación de tokens contra blacklist y rate limiting. Esta separación evita que operaciones síncronas que deben esperar respuesta antes de continuar degraden la latencia del sistema de eventos en tiempo real.
 
-La implementación de SEC-09 introduce cookies HttpOnly para tokens de refresco, una medida crítica contra ataques XSS. Los parámetros `cookie_secure`, `cookie_samesite` y `cookie_domain` controlan el comportamiento de estas cookies. En desarrollo, `cookie_secure` permanece en False para permitir HTTP local, pero en producción debe activarse para requerir HTTPS. El valor "lax" de `samesite` ofrece un balance entre seguridad CSRF y usabilidad, permitiendo navegación top-level mientras bloquea requests cross-site automáticos.
-
-### El Sistema de Logging Estructurado
-
-El módulo `logging.py` implementa un sistema de logging dual que adapta su formato según el ambiente de ejecución. La clase `StructuredFormatter` produce logs en formato JSON para producción, facilitando la ingestión por herramientas de observabilidad como ELK Stack o CloudWatch. La clase `DevelopmentFormatter` genera logs coloreados y legibles para desarrollo local, mejorando la experiencia del desarrollador durante debugging.
-
-La clase `StructuredLogger` extiende el logger estándar de Python para soportar contexto adicional mediante keyword arguments. Esta capacidad permite adjuntar metadata estructurada a cada entrada de log:
-
-```python
-logger.info("User logged in", user_id=123, branch_id=5, role="WAITER")
-```
-
-El sistema incluye funciones de enmascaramiento para protección de PII (Personally Identifiable Information). La función `mask_email()` transforma direcciones como "user@example.com" en "us***@example.com", preservando suficiente información para debugging mientras protege la identidad del usuario. De manera similar, `mask_jti()` trunca identificadores JWT para logs de seguridad, y `mask_user_id()` oculta parcialmente IDs de usuario en contextos sensibles.
-
-Las funciones de auditoría de seguridad (`audit_ws_connection()`, `audit_auth_event()`, `audit_rate_limit_event()`, `audit_token_event()`) proporcionan un trail de auditoría estructurado para eventos críticos de seguridad. Estas funciones utilizan un logger dedicado `security.audit` que puede configurarse para persistencia especializada o alertas en tiempo real.
-
-### Constantes de Dominio
-
-El archivo `constants.py` centraliza todas las constantes de dominio del sistema, eliminando "magic strings" dispersos en el código. La clase `Roles` define los cuatro roles del sistema (ADMIN, MANAGER, KITCHEN, WAITER) junto con agrupaciones semánticas como `MANAGEMENT_ROLES` (ADMIN, MANAGER) y `STAFF_ROLES` que simplifican las verificaciones de permisos.
-
-Las clases de estado (`RoundStatus`, `TableStatus`, `SessionStatus`, `CheckStatus`, etc.) definen no solo los valores posibles sino también agrupaciones semánticas. Por ejemplo, `RoundStatus.ACTIVE` lista todos los estados donde un pedido está en proceso, mientras que `RoundStatus.KITCHEN_VISIBLE` indica qué estados son visibles en la pantalla de cocina.
-
-El diccionario `ROUND_TRANSITIONS` codifica la máquina de estados de pedidos, definiendo transiciones válidas:
-
-```
-PENDING → CONFIRMED → SUBMITTED → IN_KITCHEN → READY → SERVED
-```
-
-El diccionario `ROUND_TRANSITION_ROLES` agrega restricciones de rol a cada transición, implementando un control de acceso basado en el flujo de trabajo. Solo meseros pueden confirmar pedidos pendientes, solo management puede enviar a cocina, y solo cocina puede marcar como listo.
-
-Las funciones de validación (`validate_round_status()`, `validate_round_transition()`, `get_allowed_round_transitions()`) proporcionan una API declarativa para verificar estados y transiciones, evitando lógica de validación dispersa en múltiples routers.
-
-La clase `ErrorMessages` centraliza mensajes de error en español, garantizando consistencia lingüística en toda la API. Mensajes como "Categoría no encontrada" o "Permisos insuficientes" se definen una sola vez y se referencian en todo el código.
+El método validate_production_secrets implementa una validación de arranque que previene despliegues inseguros en producción. Cuando el ambiente está configurado como production, el sistema rechaza iniciar si detecta que JWT_SECRET o TABLE_TOKEN_SECRET contienen valores por defecto conocidos o strings con menos de treinta y dos caracteres. Esta validación actúa como última línea de defensa contra configuraciones inseguras que podrían pasar desapercibidas durante el proceso de despliegue.
 
 ---
 
-## Capítulo 2: El Sistema de Seguridad
+## Capítulo 2: Logging Estructurado y Observabilidad
 
-### Autenticación JWT y Tokens de Mesa
+El módulo logging.py con aproximadamente cuatrocientas dieciocho líneas de código implementa un sistema de logging dual que adapta su formato según el ambiente de ejecución detectado, proporcionando trazabilidad completa de operaciones con correlación de requests distribuidos.
 
-El archivo `auth.py` implementa un sistema de autenticación dual que soporta tanto personal del restaurante (via JWT) como comensales en mesa (via tokens de mesa). Esta dualidad refleja los dos flujos de autenticación fundamentales del sistema: empleados que inician sesión con credenciales, y clientes que escanean códigos QR.
+La clase StructuredFormatter produce logs en formato JSON para ambientes de producción, donde cada entrada incluye timestamp, nivel, mensaje, nombre del logger, identificador de request correlacionado, y cualquier metadata adicional como campos JSON independientes. Este formato facilita enormemente la ingestión por herramientas de observabilidad como ELK Stack, CloudWatch, Datadog o cualquier sistema capaz de parsear JSON estructurado. Los campos adicionales incluyen información de excepción cuando está disponible y ubicación del código fuente en modo debug para facilitar el diagnóstico.
 
-La función `sign_jwt()` genera tokens firmados con HS256, incluyendo claims estándar (iss, aud, iat, exp) más claims personalizados del dominio (sub, tenant_id, branch_ids, roles). El artefacto CRIT-AUTH-04 documenta la adición de `jti` (JWT ID) a cada token, un identificador único que habilita la revocación individual de tokens sin invalidar toda la sesión del usuario.
+La clase DevelopmentFormatter genera logs coloreados y legibles para desarrollo local, donde la prioridad es la comprensión humana rápida durante sesiones de debugging. Los colores varían según el nivel del log: cian para debug, verde para información, amarillo para warnings, rojo para errores, y magenta para críticos. El identificador de request aparece atenuado como prefijo entre corchetes para no distraer del contenido principal mientras permanece disponible para correlación manual.
 
-La verificación de tokens (`verify_jwt()`) implementa múltiples capas de validación. Primero, la librería PyJWT valida firma, expiración, issuer y audience. Luego, validaciones adicionales (SHARED-HIGH-03) verifican la presencia y formato de claims requeridos: `sub` debe ser un string numérico válido, `tenant_id` debe ser un entero positivo, y `type` debe ser "access" o "refresh". Finalmente, la función consulta la blacklist de Redis para verificar revocación.
+La clase StructuredLogger extiende el logger estándar de Python para soportar contexto adicional mediante keyword arguments. Esta capacidad transforma logs simples en registros ricos en metadata que facilitan debugging post-mortem y análisis de comportamiento del sistema. Una llamada con mensaje User logged in y argumentos user_id, branch_id y role produce una entrada que incluye toda esa información como campos JSON independientes, permitiendo filtrado y agregación en sistemas de log management.
 
-El patrón fail-closed (SHARED-HIGH-01) gobierna el manejo de errores durante la verificación. Si Redis no está disponible para verificar la blacklist, el sistema deniega acceso en lugar de asumirlo. Esta decisión prioriza seguridad sobre disponibilidad, evitando que una falla de Redis permita el uso de tokens potencialmente revocados.
+El sistema incluye funciones especializadas para enmascaramiento de información personalmente identificable identificadas como SHARED-HIGH-02 FIX. La función mask_email transforma direcciones como user@example.com en us***@example.com, preservando suficiente información para identificar aproximadamente al usuario durante debugging mientras protege su identidad completa en logs que podrían ser accesibles a personal de operaciones. La función mask_jti trunca identificadores JWT a sus primeros ocho caracteres, suficientes para correlacionar logs sin exponer el identificador completo que podría ser utilizado para impersonación si los logs se filtraran. La función mask_user_id oculta parcialmente identificadores numéricos de usuario mostrando solo los primeros dígitos.
 
-Los tokens de mesa evolucionaron de un formato HMAC propietario a JWT estándar en la Fase 5 del proyecto. La función `sign_table_token()` genera tokens JWT con issuer y audience específicos (`integrador:table`, `integrador:diner`) que los distinguen de tokens de staff. La función `verify_table_token()` mantiene retrocompatibilidad, detectando el formato del token (JWT tiene 3 partes separadas por puntos) y delegando a la función apropiada.
+Las funciones de auditoría de seguridad implementadas bajo SEC-LOW-03 FIX proporcionan un trail estructurado para eventos críticos que requieren retención extendida y potencial análisis forense. La función audit_ws_connection registra conexiones y desconexiones WebSocket con detalles como user_id, session_id, origen de la conexión y razón de cierre. La función audit_auth_event captura intentos de login exitosos o fallidos con dirección IP y user agent. La función audit_rate_limit_event documenta cuando un cliente excede límites de rate limiting. La función audit_token_event registra emisión, verificación y revocación de tokens. Todas estas funciones utilizan un logger dedicado security.audit que puede configurarse independientemente para persistencia especializada.
 
-### Hashing de Contraseñas
-
-El módulo `password.py` implementa hashing seguro mediante bcrypt directo, evitando la librería passlib que presentaba problemas de compatibilidad con Python 3.14. La función `hash_password()` genera hashes con 12 rondas de bcrypt, un balance entre seguridad y rendimiento que produce hashes verificables en aproximadamente 250ms.
-
-El artefacto CRIT-AUTH-03 eliminó el soporte para contraseñas en texto plano que existía para compatibilidad legacy. La función `verify_password()` ahora rechaza explícitamente cualquier hash que no comience con los prefijos bcrypt estándar ($2a$, $2b$, $2y$), generando un log de seguridad si detecta intentos de autenticación con formatos no soportados.
-
-### Revocación de Tokens
-
-El servicio `token_blacklist.py` proporciona dos mecanismos de revocación complementarios. La revocación individual agrega el `jti` del token a una clave Redis con TTL igual al tiempo restante de validez del token. La revocación por usuario almacena un timestamp, invalidando todos los tokens emitidos antes de ese momento.
-
-La función `blacklist_token()` calcula el TTL correcto antes de almacenar, evitando entries innecesarios para tokens ya expirados. La función `is_token_blacklisted()` implementa el patrón fail-closed: si Redis no responde, asume que el token está blacklisteado y deniega acceso.
-
-La función `revoke_all_user_tokens()` se utiliza durante logout y cambio de contraseña. Almacena el timestamp actual con TTL igual a la vida máxima de tokens de refresco (7 días), garantizando que cualquier token emitido previamente sea rechazado.
-
-La función optimizada `check_token_validity()` utiliza Redis PIPELINE (PERF-CRIT-01) para verificar tanto blacklist individual como revocación por usuario en un solo round-trip, reduciendo la latencia de verificación a la mitad.
-
-Las variantes síncronas (`*_sync`) utilizan el pool de conexiones síncronas de Redis, evitando problemas de event loop cuando se llaman desde contextos síncronos como middleware de autenticación.
-
-### Rate Limiting
-
-El módulo `rate_limit.py` implementa protección contra abuso combinando la librería slowapi con lógica personalizada basada en Redis. Slowapi proporciona rate limiting por IP para endpoints REST estándar, mientras que la lógica Redis maneja casos especiales como limitación por email en intentos de login.
-
-El rate limiting por email utiliza un script Lua atómico (REDIS-HIGH-06) que garantiza la atomicidad de INCR y EXPIRE. Sin esta atomicidad, una race condition podría dejar keys sin TTL, causando bloqueos permanentes.
-
-```lua
-local count = redis.call('INCR', key)
-if count == 1 then
-    redis.call('EXPIRE', key, window)
-end
-```
-
-El patrón fail-closed (REDIS-CRIT-01) gobierna el comportamiento ante errores de Redis: si no es posible verificar el rate limit, el sistema deniega la request con HTTP 503 en lugar de permitirla. Este comportamiento, aunque impacta disponibilidad, previene ataques de fuerza bruta cuando el sistema de rate limiting está comprometido.
-
-La función `check_email_rate_limit_sync()` (CRIT-LOCK-03) fue completamente reescrita para usar el cliente Redis síncrono directamente, evitando conflictos de event loop que ocurrían al usar `asyncio.run()` con pools creados en loops diferentes.
+El módulo proporciona loggers preconfigurados para cada dominio funcional del sistema. Los loggers rest_api_logger y ws_gateway_logger sirven como loggers de nivel superior para cada servicio. Los loggers billing_logger, kitchen_logger y diner_logger proporcionan contexto específico de dominio. El security_audit_logger especializado mantiene el trail de eventos de seguridad separado del logging operacional normal.
 
 ---
 
-## Capítulo 3: Infraestructura de Datos y Mensajería
+## Capítulo 3: Constantes de Dominio y Validación de Estados
 
-### Gestión de Base de Datos
+El archivo constants.py con aproximadamente cuatrocientas ochenta y seis líneas de código centraliza absolutamente todas las constantes de dominio del sistema, eliminando los denominados magic strings y magic numbers dispersos que dificultaban el mantenimiento y generaban inconsistencias sutiles entre diferentes partes del código.
 
-El módulo `db.py` configura SQLAlchemy para operación eficiente en producción. El engine utiliza connection pooling con parámetros cuidadosamente seleccionados:
+La clase Roles define los cuatro roles fundamentales del sistema como strings inmutables: ADMIN con acceso completo al sistema, MANAGER para gestión de sucursales, KITCHEN para operaciones de cocina, y WAITER para gestión de mesas y pedidos. Más allá de definir valores individuales, la clase incluye agrupaciones semánticas que simplifican dramáticamente las verificaciones de permisos. El conjunto MANAGEMENT_ROLES agrupa ADMIN y MANAGER permitiendo verificaciones simplificadas en código que requiere cualquier rol de gestión. El conjunto STAFF_ROLES incluye todos los roles que representan personal del restaurante. El conjunto KITCHEN_ACCESS_ROLES agrupa los roles que pueden acceder a funcionalidad de cocina.
 
-- `pool_pre_ping=True`: Verifica conexiones antes de usar, detectando conexiones muertas
-- `pool_size=5`: Conexiones permanentes en el pool
-- `max_overflow=10`: Conexiones adicionales bajo carga
-- `pool_timeout=30`: Tiempo máximo de espera por conexión
-- `pool_recycle=1800`: Recicla conexiones cada 30 minutos, evitando timeouts de servidor
+Las clases de estado definen no solo los valores posibles para cada entidad sino también agrupaciones semánticas que encapsulan reglas de negocio complejas. La clase RoundStatus incluye los estados PENDING cuando el comensal crea el pedido y el mozo debe verificarlo, CONFIRMED cuando el mozo verificó en la mesa, SUBMITTED cuando administración envió a cocina, IN_KITCHEN cuando cocina está preparando, READY cuando cocina terminó, SERVED cuando fue entregado al comensal, y CANCELED para pedidos cancelados. El conjunto ACTIVE agrupa todos los estados donde un pedido está en proceso activo excluyendo los estados terminales SERVED y CANCELED. El conjunto KITCHEN_VISIBLE indica qué estados deben aparecer en la pantalla de cocina, específicamente SUBMITTED e IN_KITCHEN ya que cocina no debe ver pedidos hasta que administración los envíe. El conjunto DINER_VISIBLE lista los estados que deben comunicarse a los comensales vía WebSocket.
 
-La función `get_db()` proporciona un generador para FastAPI Depends, garantizando que cada request reciba una sesión limpia y que ésta se cierre correctamente incluso ante excepciones. El context manager `get_db_context()` ofrece la misma funcionalidad para código fuera de endpoints FastAPI.
+La clase TableStatus define LIBRE para mesas disponibles, ACTIVE para sesiones en progreso, PAYING cuando se solicitó la cuenta, y OUT_OF_SERVICE para mesas cerradas o reservadas. La clase SessionStatus define OPEN, PAYING y CLOSED para el ciclo de vida de sesiones de mesa. La clase CheckStatus define OPEN, REQUESTED, IN_PAYMENT y PAID para el ciclo de facturación. Las clases TicketStatus, TicketItemStatus y ServiceCallStatus implementadas bajo HIGH-07 FIX definen estados para tickets de cocina, items individuales de ticket, y llamadas de servicio respectivamente.
 
-La función `safe_commit()` (HIGH-01) encapsula el patrón de commit con rollback automático ante fallos. Esta simple abstracción previene estados inconsistentes cuando una operación de base de datos falla parcialmente.
+El diccionario ROUND_TRANSITIONS codifica la máquina de estados completa de pedidos, definiendo transiciones válidas como pares de estado origen a conjunto de estados destino. Desde PENDING las transiciones válidas son a CONFIRMED o CANCELED ya que el mozo debe verificar o cancelar. Desde CONFIRMED se puede transicionar a SUBMITTED o CANCELED ya que solo administración envía a cocina. Desde SUBMITTED a IN_KITCHEN o CANCELED. Esta codificación explícita previene transiciones inválidas que podrían corromper el estado del sistema.
 
-### El Sistema de Eventos
+El diccionario ROUND_TRANSITION_ROLES agrega restricciones de rol a cada transición implementando control de acceso basado en el flujo de trabajo del restaurante. La transición de PENDING a CONFIRMED solo puede ser ejecutada por WAITER, ADMIN o MANAGER reflejando que un mesero debe verificar físicamente el pedido en la mesa. La transición de CONFIRMED a SUBMITTED requiere ADMIN o MANAGER ya que solo ellos pueden enviar pedidos a cocina. La transición de IN_KITCHEN a READY solo puede ser ejecutada por KITCHEN ya que solo el personal de cocina sabe cuándo un plato está terminado.
 
-El paquete `events/` representa la evolución más significativa de la arquitectura, habiendo sido refactorizado desde un archivo monolítico de 1087 líneas a una estructura modular de 9 archivos especializados. Esta refactorización, documentada como ARCHITECTURE, mejora la mantenibilidad y testabilidad del sistema.
+Las funciones de validación proporcionan una API declarativa para verificar estados y transiciones implementada bajo HIGH-07 FIX. La función validate_round_status verifica si un string representa un estado válido de RoundStatus. La función validate_ticket_status hace lo mismo para tickets. La función validate_round_transition verifica si la transición de un estado a otro es válida según ROUND_TRANSITIONS. La función get_allowed_round_transitions retorna el conjunto de estados destino permitidos desde un estado origen para un conjunto de roles dado, combinando la máquina de estados con las restricciones de rol.
 
-#### Circuit Breaker
+La clase ErrorMessages centraliza mensajes de error en español garantizando consistencia lingüística en toda la API. Mensajes como Categoría no encontrada, Permisos insuficientes, Transición de estado inválida, y Token expirado se definen una sola vez y se referencian consistentemente en todo el código, facilitando localización futura y mantenimiento del tono de comunicación con usuarios.
 
-El módulo `circuit_breaker.py` implementa el patrón Circuit Breaker para proteger el sistema de cascading failures cuando Redis no está disponible. El breaker mantiene tres estados:
-
-- **CLOSED**: Operación normal, las llamadas proceden
-- **OPEN**: Fallo detectado, las llamadas se rechazan inmediatamente (fail-fast)
-- **HALF_OPEN**: Período de prueba, se permiten llamadas limitadas para detectar recuperación
-
-El breaker se abre después de 5 fallos consecutivos y permanece abierto por 30 segundos antes de transicionar a half-open. En half-open, se permiten máximo 3 llamadas de prueba; si alguna falla, vuelve a OPEN, si todas tienen éxito, transiciona a CLOSED.
-
-La función `calculate_retry_delay_with_jitter()` implementa backoff exponencial con jitter decorrelacionado, previniendo el problema de "thundering herd" donde múltiples clientes reconectan simultáneamente.
-
-#### Schema de Eventos
-
-El dataclass `Event` define la estructura unificada para todos los eventos del sistema:
-
-```python
-@dataclass
-class Event:
-    type: str           # Tipo de evento (ROUND_SUBMITTED, etc.)
-    tenant_id: int      # ID del tenant (multi-tenancy)
-    branch_id: int      # ID de sucursal
-    table_id: int | None
-    session_id: int | None
-    sector_id: int | None  # Para notificaciones filtradas por sector
-    entity: dict        # Datos específicos del evento
-    actor: dict         # Quién generó el evento
-    ts: str            # Timestamp ISO
-    v: int = 1         # Versión del schema
-```
-
-El método `__post_init__()` (SHARED-HIGH-06) valida todos los campos al momento de creación, rechazando eventos malformados antes de que lleguen a Redis. Validaciones incluyen: type no vacío, tenant_id positivo, branch_id no negativo (0 es válido para entidades tenant-wide).
-
-#### Channels
-
-El módulo `channels.py` centraliza la nomenclatura de canales Redis:
-
-- `branch:{id}:waiters` - Notificaciones a meseros de una sucursal
-- `branch:{id}:kitchen` - Notificaciones a cocina
-- `branch:{id}:admin` - Notificaciones al dashboard
-- `sector:{id}:waiters` - Notificaciones filtradas por sector
-- `session:{id}` - Notificaciones a comensales de una sesión
-- `user:{id}` - Notificaciones directas a un usuario
-- `tenant:{id}:admin` - Notificaciones tenant-wide para admin
-
-Cada función de canal valida que los IDs sean enteros positivos antes de construir el nombre, previniendo channels inválidos.
-
-#### Redis Pool Management
-
-El módulo `redis_pool.py` gestiona dos pools de conexiones Redis: uno asíncrono para operaciones de pub/sub y eventos, otro síncrono para operaciones bloqueantes como verificación de tokens.
-
-El pool asíncrono utiliza el patrón singleton con double-check locking para thread safety. La inicialización lazy evita crear conexiones hasta que sean necesarias, mientras que el lock garantiza que sólo se cree una instancia incluso bajo carga concurrente.
-
-El pool síncrono (LOAD-LEVEL2) utiliza `redis.ConnectionPool` que permite múltiples clientes compartir un pool de conexiones. Cada llamada a `get_redis_sync_client()` obtiene un cliente que automáticamente adquiere y libera conexiones del pool, soportando operaciones concurrentes sin contención.
-
-Ambos pools configuran `health_check_interval=30` (PERF-MED-02) para auto-detectar conexiones muertas y reciclarlas antes de que causen errores.
-
-#### Publishing
-
-El módulo `publisher.py` implementa la publicación de eventos con resiliencia:
-
-1. Valida tamaño del evento (máximo 64KB para prevenir mensajes enormes)
-2. Consulta circuit breaker antes de intentar
-3. Ejecuta publish con retry configurable (default 3 intentos)
-4. Aplica backoff exponencial con jitter entre reintentos
-5. Registra éxito o fallo en el circuit breaker
-
-La función `publish_to_stream()` utiliza Redis Streams (XADD) en lugar de pub/sub para eventos críticos. Streams proporcionan persistencia y la capacidad de "catch-up" si el Gateway se reinicia, garantizando que ningún evento crítico se pierda.
-
-#### Domain Publishers
-
-El módulo `domain_publishers.py` proporciona funciones de alto nivel para publicar eventos de dominio:
-
-- `publish_round_event()`: Eventos del ciclo de vida de pedidos
-- `publish_service_call_event()`: Llamadas de servicio (mesero, ayuda de pago)
-- `publish_check_event()`: Eventos de cuenta y pago
-- `publish_table_event()`: Eventos de sesión de mesa
-- `publish_admin_crud_event()`: Cambios de entidades para sync del Dashboard
-
-Estas funciones encapsulan la lógica de routing, determinando a qué canales enviar según el tipo de evento. Por ejemplo, eventos de pedido se envían a waiters, kitchen (para ciertos estados), admin, y session (para estados visibles al comensal).
-
-La migración a Redis Streams (CRIT-ARCH-01) para eventos críticos garantiza entrega confiable. Los eventos se publican al stream `events:critical` que el Gateway consume mediante Consumer Groups, permitiendo procesamiento distribuido y recovery ante fallos.
-
-#### Constantes Redis
-
-El archivo `redis/constants.py` centraliza prefijos de keys y TTLs:
-
-```python
-PREFIX_AUTH_BLACKLIST = "auth:token:blacklist:"
-PREFIX_AUTH_USER_REVOKE = "auth:user:revoked:"
-PREFIX_CACHE_PRODUCT = "cache:product:"
-PREFIX_RATELIMIT_LOGIN = "ratelimit:login:"
-STREAM_EVENTS_CRITICAL = "events:critical"
-CONSUMER_GROUP_WS_GATEWAY = "ws_gateway_group"
-```
-
-Esta centralización previene typos en nombres de keys y facilita auditoría de uso de Redis.
+La clase Limits centraliza los límites de validación numéricos. Los límites de cantidad van de uno a noventa y nueve para items de carrito. Los precios van de cero a cien mil en centavos. Las longitudes de string tienen doscientos caracteres para nombres, dos mil para descripciones, y dos mil cuarenta y ocho para URLs. La paginación tiene límite por defecto de cincuenta y máximo de doscientos. Los comensales por mesa van de uno a veinte.
 
 ---
 
-## Capítulo 4: Utilidades y Schemas
+## Capítulo 4: Autenticación JWT y Tokens de Mesa
 
-### Excepciones Centralizadas
+El archivo auth.py con aproximadamente quinientas sesenta y una líneas de código implementa un sistema de autenticación dual que soporta tanto personal del restaurante mediante tokens JWT estándar como comensales en mesa mediante tokens específicos de sesión. Esta dualidad refleja los dos flujos de autenticación fundamentales del sistema: empleados que inician sesión con credenciales permanentes, y clientes efímeros que escanean códigos QR para una experiencia sin fricción.
 
-El módulo `exceptions.py` define una jerarquía de excepciones HTTP que combina logging automático con respuestas estandarizadas. La clase base `AppException` extiende `HTTPException` de FastAPI, agregando logging estructurado al momento de creación.
+La función sign_jwt genera tokens firmados utilizando el algoritmo HS256, incluyendo tanto claims estándar definidos por la especificación JWT como claims personalizados del dominio de negocio. Los claims estándar incluyen iss como issuer configurado como integrador, aud como audience integrador:staff, iat como timestamp de creación, y exp como expiración calculada sumando el tiempo de vida configurado al momento de emisión. Los claims de dominio incluyen sub con el identificador de usuario como string, tenant_id con el identificador del tenant para multi-tenancy, branch_ids con la lista de sucursales accesibles, roles con la lista de roles del usuario, email para auditoría, y type indicando si es token access o refresh.
 
-Las excepciones específicas proporcionan constructores semánticos:
+El artefacto CRIT-AUTH-04 FIX documenta la adición del claim jti como JWT ID a cada token, un identificador único generado mediante UUID versión cuatro que habilita la revocación individual de tokens. Antes de esta implementación revocar un token significaba invalidar toda la sesión del usuario; ahora es posible revocar tokens específicos mientras otros tokens del mismo usuario permanecen válidos, habilitando escenarios como cierre de sesión selectivo desde dispositivos específicos.
 
-```python
-raise NotFoundError("Producto", product_id, tenant_id=tenant_id)
-# Produce: 404 "Producto con ID 123 no encontrado"
-# Log: {"level": "WARNING", "entity": "Producto", "entity_id": 123, ...}
-```
+La función verify_jwt implementa múltiples capas de validación que deben superarse secuencialmente. Primero la librería PyJWT valida la firma criptográfica del token verificando que no ha sido alterado desde su emisión. Luego valida la expiración rechazando tokens cuyo timestamp exp es anterior al momento actual. Después verifica issuer y audience rechazando tokens emitidos por otros sistemas o dirigidos a otras audiencias. Las validaciones adicionales documentadas como SHARED-HIGH-03 FIX verifican presencia y formato de claims requeridos: sub debe ser un string que represente un entero válido, tenant_id debe ser un entero positivo, type debe ser exactamente access o refresh, roles debe ser una lista no vacía, y branch_ids debe ser una lista de enteros. Finalmente si todas las validaciones estructurales pasan la función consulta la blacklist de Redis para verificar que el token no ha sido explícitamente revocado.
 
-Las clases `ForbiddenError`, `BranchAccessError`, e `InsufficientRoleError` manejan errores de autorización con mensajes apropiados. La clase `ValidationError` y sus derivadas (`InvalidStateError`, `InvalidTransitionError`, `DuplicateEntityError`) cubren errores de validación de negocio.
+El patrón fail-closed documentado como SHARED-HIGH-01 FIX gobierna el manejo de errores durante la verificación. Si Redis no está disponible para verificar la blacklist ya sea por fallo de red, timeout, o cualquier otra razón, el sistema deniega acceso en lugar de asumirlo. Esta decisión prioriza explícitamente seguridad sobre disponibilidad, aceptando que algunos usuarios legítimos podrían ser temporalmente rechazados durante una falla de Redis a cambio de garantizar que tokens potencialmente revocados nunca obtengan acceso.
 
-La clase `ExternalServiceError` distingue entre servicios no disponibles (503) y errores de gateway (502), incluyendo el header `Retry-After` cuando es aplicable.
+Los tokens de mesa evolucionaron significativamente durante el desarrollo del proyecto. Originalmente utilizaban un formato HMAC propietario, pero en la Fase cinco migraron a JWT estándar por consistencia y para aprovechar toda la infraestructura de verificación existente. La función sign_table_token genera tokens JWT con issuer integrador:table y audience integrador:diner que los distinguen claramente de tokens de staff. Los claims incluyen table_id, session_id, branch_id, y tenant_id necesarios para autorizar operaciones en contexto de mesa. La función verify_table_token mantiene retrocompatibilidad detectando el formato del token: si contiene tres partes separadas por puntos es JWT y se procesa como tal, de lo contrario se intenta verificación HMAC legacy permitiendo migración sin downtime.
 
-### Validadores de Seguridad
-
-El módulo `validators.py` implementa validaciones críticas de seguridad, particularmente para prevención de XSS y SSRF.
-
-La función `validate_image_url()` implementa múltiples capas de defensa:
-
-1. **Scheme validation**: Rechaza javascript:, data:, file:, y otros schemes peligrosos
-2. **SSRF prevention**: Bloquea hosts internos (localhost, 127.0.0.1, rangos privados 10.x, 172.16-31.x, 192.168.x) y endpoints de metadata cloud (169.254.169.254)
-3. **Domain whitelist** (modo estricto): En producción puede limitarse a CDNs autorizados
-4. **Length limit**: Rechaza URLs mayores a 2048 caracteres
-
-La función `escape_like_pattern()` (HIGH-01) escapa caracteres especiales de SQL LIKE (% y _) previniendo ataques de pattern injection que podrían causar full table scans.
-
-La función `sanitize_search_term()` normaliza términos de búsqueda, removiendo caracteres de control y limitando longitud.
-
-### Health Checks
-
-El módulo `health.py` (ARCH-OPP-03) proporciona decoradores para implementar health checks con timeout consistente:
-
-```python
-@health_check_with_timeout(timeout=3.0, component="redis")
-async def check_redis_health():
-    await redis.ping()
-    return {"pool_size": 10}
-```
-
-El decorador envuelve la función en timeout protection, captura excepciones, mide latencia, y retorna un `HealthCheckResult` estructurado que incluye status, componente, latencia_ms, error (si aplica), y details opcionales.
-
-La función `aggregate_health_checks()` ejecuta múltiples checks en paralelo y agrega resultados, determinando el status global (healthy si todos healthy, degraded si alguno falla).
-
-### Schemas Pydantic
-
-El archivo `schemas.py` contiene los schemas Pydantic utilizados por la API pública y endpoints de operación. Incluye:
-
-- **Autenticación**: `LoginRequest`, `LoginResponse`, `UserInfo`, `RefreshTokenRequest`
-- **Mesa y Sesión**: `TableCard`, `TableSessionResponse`, `TableSessionDetail`
-- **Pedidos**: `SubmitRoundRequest`, `RoundOutput`, `RoundItemOutput`, `UpdateRoundStatusRequest`
-- **Facturación**: `RequestCheckResponse`, `CashPaymentRequest`, `PaymentResponse`, `CheckDetailOutput`
-- **Catálogo**: `ProductOutput`, `CategoryOutput`, `MenuOutput`, y schemas de perfil dietético/alérgenos
-- **Fidelización**: `DeviceHistoryOutput`, `ImplicitPreferencesData`, `CustomerOutput`, `CustomerSuggestionsOutput`
-- **Flujo Mesero**: `WaiterActivateTableRequest`, `WaiterSubmitRoundRequest`, `ManualPaymentRequest`
-
-El archivo `admin_schemas.py` contiene schemas específicos para el Dashboard administrativo, separados por Clean Architecture (los servicios no deben importar de la capa de routers):
-
-- **Entidades**: `TenantOutput`, `BranchOutput`, `CategoryOutput`, `ProductOutput`, `AllergenOutput`, `TableOutput`, `StaffOutput`
-- **Creación/Actualización**: Schemas `*Create` y `*Update` para cada entidad con validadores Pydantic
-- **Operaciones Bulk**: `TableBulkCreate`, `WaiterSectorBulkAssignment`
-- **Reportes**: `DailySalesOutput`, `TopProductOutput`, `SalesReportOutput`
-
-Los schemas de creación y actualización incluyen validadores de imagen (`@field_validator("image")`) que invocan `validate_image_url()` para prevenir XSS/SSRF en datos ingresados por usuarios.
+El dependency current_user_context proporciona integración directa con FastAPI para extraer y validar el usuario actual desde el header Authorization. Este dependency extrae el token JWT, lo verifica completamente, y retorna el payload decodificado como diccionario que contiene sub con el user_id como string, tenant_id como entero, branch_ids como lista de enteros, roles como lista de strings, y email. Las funciones auxiliares require_roles y require_branch validan que el usuario tenga los roles necesarios o acceso a la sucursal requerida, lanzando HTTPException 403 en caso contrario.
 
 ---
 
-## Capítulo 5: Patrones de Integración
+## Capítulo 5: Hashing Seguro de Contraseñas
 
-### Imports Canónicos
+El módulo password.py con aproximadamente ochenta y dos líneas de código concentrado en funcionalidad crítica implementa hashing seguro mediante bcrypt directo. La decisión de usar bcrypt directamente en lugar de la librería passlib que era la opción original responde a problemas de compatibilidad descubiertos durante la migración a Python 3.14 donde passlib generaba warnings de deprecación y en algunos casos errores de runtime.
 
-El sistema establece paths de importación estándar que deben usarse consistentemente:
+La función hash_password genera hashes utilizando doce rondas de bcrypt, un balance cuidadosamente calculado entre seguridad y rendimiento. Con doce rondas el hashing de una contraseña requiere aproximadamente doscientos cincuenta milisegundos en hardware típico, suficiente para hacer inviables ataques de fuerza bruta pero no tanto como para degradar perceptiblemente la experiencia de login del usuario. El incremento de una ronda duplica aproximadamente el tiempo de cómputo, por lo que la diferencia entre diez y doce rondas es sustancial sin ser excesiva. El resultado es un string de sesenta caracteres comenzando con el prefijo $2b$ que identifica el algoritmo y la versión.
 
-```python
-# Configuración
-from shared.config.settings import settings, REDIS_URL, DATABASE_URL
-from shared.config.logging import get_logger, mask_email, security_audit_logger
-from shared.config.constants import Roles, RoundStatus, MANAGEMENT_ROLES
-
-# Seguridad
-from shared.security.auth import current_user_context, verify_jwt, sign_table_token
-from shared.security.password import hash_password, verify_password
-from shared.security.token_blacklist import revoke_all_user_tokens, is_token_blacklisted_sync
-from shared.security.rate_limit import check_email_rate_limit_sync
-
-# Infraestructura
-from shared.infrastructure.db import get_db, safe_commit
-from shared.infrastructure.events import (
-    get_redis_pool, publish_event, Event,
-    channel_branch_waiters, publish_round_event
-)
-
-# Utilidades
-from shared.utils.exceptions import NotFoundError, ForbiddenError, ValidationError
-from shared.utils.validators import validate_image_url, escape_like_pattern
-from shared.utils.health import health_check_with_timeout, HealthCheckResult
-from shared.utils.schemas import LoginResponse, TableCard, RoundOutput
-from shared.utils.admin_schemas import ProductOutput, CategoryCreate
-```
-
-### Patrones de Uso Común
-
-**Autenticación en Routers:**
-```python
-@router.get("/protected")
-def protected_endpoint(
-    db: Session = Depends(get_db),
-    ctx: dict = Depends(current_user_context)
-):
-    user_id = int(ctx["sub"])
-    tenant_id = ctx["tenant_id"]
-    roles = ctx["roles"]
-```
-
-**Publicación de Eventos:**
-```python
-redis = await get_redis_pool()
-await publish_round_event(
-    redis_client=redis,
-    event_type=ROUND_SUBMITTED,
-    tenant_id=tenant_id,
-    branch_id=branch_id,
-    table_id=table_id,
-    session_id=session_id,
-    round_id=round.id,
-    round_number=round.round_number,
-    actor_user_id=user_id,
-    actor_role="WAITER",
-    sector_id=table.sector_id,
-)
-```
-
-**Manejo de Errores:**
-```python
-# Búsqueda con 404
-product = db.scalar(select(Product).where(Product.id == product_id))
-if not product:
-    raise NotFoundError("Producto", product_id, tenant_id=tenant_id)
-
-# Validación de permisos
-if user["branch_ids"] and branch_id not in ctx["branch_ids"]:
-    raise BranchAccessError(branch_id=branch_id, user_id=user_id)
-
-# Validación de transición
-if not validate_round_transition(round.status, new_status):
-    raise InvalidTransitionError("Round", round.status, new_status)
-```
+El artefacto CRIT-AUTH-03 FIX documenta la eliminación del soporte para contraseñas en texto plano que existía para compatibilidad con datos legacy de versiones anteriores del sistema. La función verify_password ahora rechaza explícitamente cualquier hash que no comience con los prefijos bcrypt estándar $2a$, $2b$ o $2y$, generando un log de seguridad nivel WARNING si detecta intentos de autenticación con formatos no soportados. Este log permite identificar cuentas que aún tendrían contraseñas en formato legacy, situación que debería ser imposible en producción pero que podría ocurrir en ambientes de desarrollo o testing con datos antiguos. La verificación utiliza comparación en tiempo constante para prevenir ataques de timing que podrían revelar información sobre la contraseña.
 
 ---
 
-## Capítulo 6: Consideraciones de Producción
+## Capítulo 6: Revocación de Tokens en Tiempo Real
 
-### Checklist de Seguridad
+El servicio token_blacklist.py con aproximadamente trescientas treinta y cuatro líneas de código proporciona dos mecanismos complementarios de revocación que cubren diferentes escenarios de uso, utilizando Redis como almacén de estado distribuido que permite que cualquier instancia del servidor reconozca tokens revocados instantáneamente.
 
-Antes de desplegar a producción, verificar:
+La revocación individual mediante la función blacklist_token permite invalidar un token específico identificado por su jti, útil para cierre de sesión desde un dispositivo particular o revocación de emergencia de un token comprometido. La función recibe el payload decodificado del token a revocar y calcula el TTL apropiado antes de almacenar en Redis. Si el token expira en treinta minutos no tiene sentido almacenar su jti por siete días; en cambio el TTL de la entrada Redis se configura para coincidir con el tiempo restante de validez del token más un pequeño margen de seguridad. Una vez que el token habría expirado naturalmente la entrada Redis se elimina automáticamente, previniendo crecimiento indefinido de la blacklist. La key utiliza el prefijo auth:blacklist: seguido del jti.
 
-1. **Secretos**: `JWT_SECRET` y `TABLE_TOKEN_SECRET` deben ser strings aleatorios de al menos 32 caracteres
-2. **CORS**: `ALLOWED_ORIGINS` debe listar explícitamente los dominios permitidos
-3. **Cookies**: `COOKIE_SECURE=true` para requerir HTTPS
-4. **Debug**: `DEBUG=false` y `ENVIRONMENT=production`
-5. **Rate Limiting**: Verificar que los límites son apropiados para el tráfico esperado
+La revocación por usuario mediante revoke_all_user_tokens se utiliza durante logout y cambio de contraseña para invalidar cualquier token existente del usuario. En lugar de enumerar y blacklistear cada token individualmente lo cual sería costoso y propenso a race conditions, esta función almacena el timestamp actual asociado al user_id bajo la key auth:user:revoke: seguida del user_id. Cualquier token con iat anterior a este timestamp se considera inválido sin importar su jti individual. El TTL de esta entrada es igual a la vida máxima de tokens de refresco de siete días, garantizando que cualquier token existente haya expirado naturalmente antes de que la marca de revocación desaparezca.
 
-### Observabilidad
+La función is_token_blacklisted implementa el patrón fail-closed con particular rigor utilizando el cliente Redis síncrono para verificación ya que esta función se invoca desde el middleware de autenticación que opera síncronamente. Si la conexión Redis falla, si ocurre un timeout, o si cualquier excepción se genera durante la verificación, la función retorna True indicando que el token está blacklisteado. Esta decisión significa que una falla de Redis causa denial of service temporal en lugar de bypass de seguridad.
 
-El sistema produce logs estructurados en JSON que pueden ser ingestados por:
-- ELK Stack (Elasticsearch, Logstash, Kibana)
-- CloudWatch Logs
-- Datadog
-- Cualquier sistema que soporte JSON logs
+La función optimizada check_token_validity documentada como PERF-CRIT-01 FIX utiliza Redis PIPELINE para verificar tanto blacklist individual como revocación por usuario en un solo round-trip de red. Sin esta optimización cada verificación de token requería dos llamadas Redis secuenciales; con el pipeline ambas verificaciones se envían juntas y las respuestas se reciben juntas, reduciendo la latencia de verificación aproximadamente a la mitad lo cual es crítico dado que esta verificación ocurre en cada request autenticado.
 
-Los logs de seguridad (`security.audit`) deben configurarse para retención extendida y alertas en patrones sospechosos.
+Las variantes síncronas de todas estas funciones identificadas por el sufijo _sync utilizan el pool de conexiones síncronas de Redis separado. Esta separación es necesaria porque el middleware de autenticación de FastAPI donde se invoca la verificación de tokens opera en contexto síncrono mientras que el resto de la aplicación es predominantemente asíncrono. Mezclar operaciones síncronas y asíncronas en el mismo pool Redis generaba deadlocks y errores de event loop documentados en CRIT-LOCK-02.
 
-### Escalabilidad
+---
 
-La configuración de pools Redis soporta hasta ~500 conexiones WebSocket concurrentes con la configuración por defecto. Para escalar más allá:
+## Capítulo 7: Protección contra Abuso mediante Rate Limiting
 
-1. Aumentar `redis_pool_max_connections` y `redis_sync_pool_max_connections`
-2. Considerar Redis Cluster para sharding
-3. Implementar múltiples instancias del Gateway con load balancing
+El módulo rate_limit.py con aproximadamente trescientas sesenta y seis líneas de código implementa protección multicapa contra abuso combinando la librería slowapi para endpoints REST estándar con lógica personalizada basada en Redis para casos especiales que requieren mayor control, particularmente el endpoint de login que es objetivo frecuente de ataques de fuerza bruta.
 
-### Resiliencia
+Slowapi proporciona rate limiting por dirección IP para la mayoría de endpoints utilizando sliding window algorithm para distribución uniforme de requests permitidos. La configuración permite especificar límites como diez requests por minuto o cien requests por hora, con headers estándar que informan al cliente cuántos requests le quedan y cuándo se resetea su ventana.
 
-El circuit breaker previene cascading failures, pero requiere monitoreo:
-- Alertar cuando el breaker se abre (indica problemas de conectividad Redis)
-- Monitorear métricas de `rejected_count` para detectar degradación prolongada
+El rate limiting por email utiliza lógica Redis personalizada para el endpoint de login donde limitar por IP no es suficiente ya que atacantes pueden rotar IPs pero usualmente atacan un email específico. El límite configurado mediante LOGIN_RATE_LIMIT permite cinco intentos por defecto, con una ventana de tiempo de sesenta segundos configurada en LOGIN_RATE_WINDOW. Estos valores son configurables mediante settings permitiendo ajuste según las necesidades operativas.
+
+El script Lua que implementa esta lógica documentado como REDIS-HIGH-06 FIX garantiza atomicidad de las operaciones INCR y EXPIRE que de otra manera sufrirían race conditions. El script primero ejecuta INCR sobre la key de rate limit incrementando el contador atómicamente y retornando el nuevo valor. Si el valor retornado es uno significa que la key no existía previamente y acaba de ser creada, por lo que una llamada EXPIRE establece el tiempo de vida de la ventana. Si el valor es mayor que uno la key ya existía con su TTL configurado y no requiere modificación. Este patrón garantiza que nunca exista una key sin TTL situación que causaría bloqueos permanentes del email afectado.
+
+El patrón fail-closed documentado como REDIS-CRIT-01 FIX gobierna el comportamiento cuando Redis no está disponible. Si la verificación de rate limit falla por cualquier razón ya sea error de conexión, timeout, o excepción inesperada, el sistema rechaza la request con HTTP 503 Service Unavailable en lugar de permitirla. Esta decisión aunque impacta disponibilidad durante fallas de Redis previene ataques de fuerza bruta que podrían aprovechar momentos de inestabilidad del sistema de rate limiting.
+
+La función check_email_rate_limit_sync implementada bajo CRIT-LOCK-02 FIX utiliza el cliente Redis síncrono directamente. La implementación anterior utilizaba asyncio.run para ejecutar código asíncrono desde contexto síncrono pero esto generaba conflictos cuando el event loop ya estaba corriendo, situación común durante request handling en FastAPI. La nueva implementación usa ThreadPoolExecutor para ejecutar la verificación en un thread separado evitando completamente conflictos de event loop. El executor utiliza un máximo de dos worker threads y tiene un timeout de cinco segundos para prevenir bloqueos indefinidos.
+
+---
+
+## Capítulo 8: Gestión de Base de Datos
+
+El módulo db.py con aproximadamente noventa y seis líneas de código altamente optimizado configura SQLAlchemy para operación eficiente en ambientes de producción con alta concurrencia. El engine se crea con parámetros cuidadosamente seleccionados que balancean rendimiento, resiliencia y uso de recursos.
+
+El parámetro pool_pre_ping activo instruye a SQLAlchemy a verificar cada conexión antes de usarla ejecutando un simple SELECT 1 para confirmar que la conexión sigue viva. Esta verificación detecta conexiones muertas ya sea por timeout del servidor PostgreSQL, por reinicio de la base de datos, o por problemas de red, antes de que causen errores durante queries reales. El overhead es mínimo comparado con el costo de manejar errores de conexión muerta a mitad de transacción.
+
+El tamaño del pool se calcula dinámicamente mediante la función _calculate_pool_size implementada bajo DEFECTO-05 FIX. La fórmula utiliza dos veces el número de cores de CPU más uno, con un máximo de veinte conexiones. Esta adaptación automática permite que el sistema funcione correctamente tanto en máquinas de desarrollo pequeñas como en servidores de producción potentes. El parámetro max_overflow de quince permite crear hasta treinta y cinco conexiones totales bajo carga, las veinte permanentes más quince adicionales que se cierran después de un período de inactividad.
+
+El parámetro pool_timeout de treinta segundos define cuánto tiempo una request esperará por una conexión disponible antes de fallar con timeout. El parámetro pool_recycle de mil ochocientos segundos equivalente a treinta minutos instruye al pool a cerrar y recrear conexiones que han estado abiertas por más de ese tiempo, previniendo problemas con servidores PostgreSQL configurados para cerrar conexiones idle.
+
+La función get_db proporciona un generador compatible con FastAPI Depends garantizando que cada request HTTP reciba una sesión de base de datos limpia y que ésta se cierre correctamente incluso si la request termina con excepción. El patrón try/finally asegura que session.close siempre se ejecute. La función get_db_context ofrece la misma funcionalidad como context manager para código fuera de endpoints FastAPI permitiendo uso con la sintaxis with.
+
+La función safe_commit documentada como HIGH-01 FIX encapsula el patrón de commit con rollback automático ante fallos. Sin esta abstracción cada lugar que hace commit debería manejar excepciones y ejecutar rollback manualmente, un patrón repetitivo propenso a olvidos que podrían dejar transacciones en estados inconsistentes. Con safe_commit el código simplemente llama a la función y confía en que cualquier fallo dejará la sesión en estado limpio con rollback automático.
+
+---
+
+## Capítulo 9: El Sistema de Eventos y Mensajería
+
+El paquete events/ representa la evolución arquitectónica más significativa de la capa compartida, habiendo sido refactorizado desde un archivo monolítico de más de mil líneas a una estructura modular de once archivos especializados que suman aproximadamente mil ochocientas veinte líneas. Esta refactorización mejora dramáticamente la mantenibilidad, testabilidad y comprensibilidad del sistema de eventos en tiempo real.
+
+El módulo redis_pool.py gestiona dos pools de conexiones Redis separados que sirven propósitos distintos y nunca deben mezclarse. El pool asíncrono obtenido mediante get_redis_pool soporta las operaciones de publicación/suscripción y eventos en tiempo real donde la naturaleza no bloqueante es absolutamente esencial. El pool síncrono obtenido mediante get_redis_sync_client atiende operaciones inherentemente bloqueantes como verificación de blacklist y rate limiting que deben completarse antes de continuar la ejecución.
+
+El pool asíncrono utiliza el patrón singleton con double-check locking para garantizar thread safety durante inicialización. Una variable global almacena la instancia del pool inicialmente como None. La función get_redis_pool primero verifica si el pool ya existe sin adquirir lock retornándolo inmediatamente si es así. Si no existe adquiere un lock asíncrono y vuelve a verificar ya que otro coroutine podría haber creado el pool mientras se esperaba el lock. Solo si después de adquirir el lock el pool sigue sin existir se procede a crearlo con cincuenta conexiones máximas, timeout de socket de cinco segundos, y health check interval de treinta segundos.
+
+El dataclass Event en event_schema.py define la estructura unificada para absolutamente todos los eventos del sistema garantizando consistencia y facilitando el procesamiento downstream. Cada evento contiene un type que lo identifica como ROUND_SUBMITTED o TABLE_CLEARED. El campo tenant_id soporta multi-tenancy asegurando que eventos de un restaurante nunca se mezclen con eventos de otro. El campo branch_id identifica la sucursal específica donde ocurrió el evento. Los campos opcionales table_id, session_id y sector_id proporcionan contexto adicional cuando es aplicable. El campo entity contiene los datos específicos del evento como diccionario JSON. El método __post_init__ documentado como SHARED-HIGH-06 FIX valida todos los campos inmediatamente después de la creación de la instancia rechazando eventos malformados antes de que lleguen a Redis.
+
+El archivo event_types.py centraliza las constantes de tipo de evento utilizadas en todo el sistema. Los eventos de ciclo de vida de pedidos incluyen ROUND_PENDING, ROUND_CONFIRMED, ROUND_SUBMITTED, ROUND_IN_KITCHEN, ROUND_READY, ROUND_SERVED, ROUND_CANCELED y ROUND_ITEM_DELETED. Los eventos de carrito compartido introducidos para sincronización en tiempo real entre dispositivos incluyen CART_ITEM_ADDED, CART_ITEM_UPDATED, CART_ITEM_REMOVED, CART_CLEARED y CART_SYNC. Los eventos de facturación incluyen CHECK_REQUESTED, CHECK_PAID, PAYMENT_APPROVED, PAYMENT_REJECTED y PAYMENT_FAILED. Los eventos de administración para sincronización del Dashboard incluyen ENTITY_CREATED, ENTITY_UPDATED, ENTITY_DELETED y CASCADE_DELETE.
+
+El módulo channels.py centraliza la construcción de nombres de canales Redis eliminando la posibilidad de typos o inconsistencias que podrían causar que eventos no lleguen a sus destinatarios. La función channel_branch_waiters recibe un branch_id y retorna el string branch:{id}:waiters para notificaciones a meseros de esa sucursal. La función channel_branch_kitchen construye branch:{id}:kitchen para personal de cocina. La función channel_sector_waiters recibe un sector_id y construye sector:{id}:waiters para notificaciones filtradas por sector. La función channel_session construye session:{id} para notificaciones a todos los comensales de una sesión de mesa particular. Cada función valida que el ID recibido sea un entero positivo antes de construir el nombre del canal bajo REDIS-MED-07 FIX.
+
+---
+
+## Capítulo 10: Publicación de Eventos con Resiliencia
+
+El módulo publisher.py implementa la publicación de eventos con múltiples capas de resiliencia que garantizan entrega confiable incluso en condiciones adversas. Antes de intentar publicar la función publish_event verifica el tamaño del evento serializado contra un límite máximo de sesenta y cuatro kilobytes bajo REDIS-HIGH-07 FIX, rechazando eventos anormalmente grandes que podrían indicar bugs o intentos de abuso.
+
+Luego consulta el circuit breaker para verificar si Redis está disponible. Si el breaker está abierto la función retorna inmediatamente sin intentar la publicación evitando esperas inútiles que degradarían el rendimiento. Si el breaker permite la operación se procede con el intento de publicación utilizando retry configurable con tres intentos por defecto bajo REDIS-HIGH-03 FIX. Si el primer intento falla se espera un tiempo calculado mediante backoff exponencial con jitter bajo REDIS-MED-01 FIX antes de reintentar. Cada intento subsecuente espera aproximadamente el doble del anterior más o menos variabilidad del jitter que previene thundering herd cuando múltiples instancias reintentan simultáneamente. Después de cada intento fallido se registra el fallo en el circuit breaker; después de un intento exitoso se registra el éxito.
+
+La función publish_to_stream utiliza Redis Streams mediante el comando XADD en lugar de pub/sub tradicional para eventos clasificados como críticos. La diferencia fundamental es que Streams persisten los eventos y permiten que consumidores que estaban offline hagan catch-up cuando reconectan. En contraste pub/sub es fire-and-forget: si nadie está escuchando cuando se publica un evento ese evento se pierde permanentemente. Para eventos críticos como cambios de estado de pedidos y pagos la persistencia de Streams garantiza que ningún evento se pierda aunque el Gateway se reinicie.
+
+El módulo circuit_breaker.py implementa el patrón Circuit Breaker para proteger al sistema de cascading failures cuando Redis experimenta problemas de disponibilidad. El breaker opera en tres estados claramente definidos. En estado CLOSED que es el estado normal de operación todas las llamadas a Redis proceden normalmente. Cada fallo incrementa un contador interno y cuando este contador alcanza el umbral configurado de cinco fallos consecutivos el breaker transiciona a estado OPEN. En estado OPEN el breaker rechaza inmediatamente todas las llamadas a Redis sin siquiera intentar la conexión retornando un error específico. El breaker permanece en OPEN por treinta segundos durante el cual el sistema opera en modo degradado pero estable. Transcurrido el tiempo el breaker transiciona a estado HALF_OPEN donde permite un número limitado de llamadas de prueba. Si estas pruebas tienen éxito el breaker transiciona de vuelta a CLOSED; si alguna falla vuelve a OPEN por otro período de espera.
+
+El módulo domain_publishers.py proporciona funciones de alto nivel que encapsulan la lógica de routing de eventos determinando automáticamente a qué canales enviar según el tipo de evento y el contexto. La función publish_round_event determina los canales destino según el tipo de evento: ROUND_PENDING y ROUND_CONFIRMED se envían a waiters y admin ya que cocina no debe ver pedidos hasta que management los envíe, ROUND_SUBMITTED se envía adicionalmente a kitchen, y ROUND_IN_KITCHEN, ROUND_READY y ROUND_SERVED se envían también al canal de session para que los comensales vean el progreso de su pedido.
+
+---
+
+## Capítulo 11: Excepciones HTTP Centralizadas
+
+El módulo exceptions.py con aproximadamente trescientas diecisiete líneas de código define una jerarquía de excepciones HTTP que combina logging automático con respuestas estandarizadas. Esta centralización garantiza que errores similares produzcan respuestas idénticas en toda la API facilitando el debugging y mejorando la experiencia del desarrollador que consume la API.
+
+La clase base AppException extiende HTTPException de FastAPI agregando logging estructurado al momento de instanciación. Cada excepción derivada registra automáticamente su creación con nivel apropiado: warning para errores de cliente como 404 o 403, y error para problemas de servidor como 500. El log incluye contexto relevante como entity_type, entity_id, user_id, y cualquier otro keyword argument pasado al constructor facilitando correlación y diagnóstico.
+
+La clase NotFoundError proporciona un constructor semántico para errores 404. Una llamada como NotFoundError con argumentos Producto y product_id produce una respuesta HTTP 404 con body conteniendo detail igual a Producto con ID 123 no encontrado y un log estructurado que incluye entity type, ID, y tenant para facilitar debugging. Las clases derivadas SessionNotFoundError, CheckNotFoundError y RoundNotFoundError proporcionan mensajes específicos para cada tipo de entidad.
+
+La clase ForbiddenError maneja errores 403 de autorización con mensaje que indica qué acción estaba prohibida. Las clases derivadas BranchAccessError indica No autorizado para acceder a esta sucursal, e InsufficientRoleError lista los roles requeridos para la operación.
+
+La clase ValidationError y sus derivadas manejan errores 400 de validación de negocio. InvalidStateError indica que una entidad está en un estado que no permite la operación solicitada incluyendo el estado actual y los estados esperados. InvalidTransitionError indica que la transición de estado solicitada no es válida incluyendo estados origen y destino. DuplicateEntityError indica que ya existe una entidad con el identificador proporcionado. PaymentAmountError valida montos de pago.
+
+La clase ExternalServiceError distingue entre servicios externos no disponibles que retornan 503 Service Unavailable, y errores de comunicación con gateways externos que retornan 502 Bad Gateway. Cuando es aplicable la respuesta incluye el header Retry-After indicando cuándo el cliente debería reintentar. La clase RateLimitError para errores 429 incluye automáticamente el header Retry-After con el tiempo de espera en segundos.
+
+---
+
+## Capítulo 12: Validadores de Seguridad
+
+El módulo validators.py con aproximadamente doscientas catorce líneas de código implementa validaciones críticas de seguridad particularmente para prevención de ataques XSS y SSRF que podrían ocurrir a través de URLs proporcionadas por usuarios.
+
+La función validate_image_url implementa múltiples capas de defensa contra URLs maliciosas identificada como CRIT-02 FIX. La primera capa valida el scheme rechazando javascript: que podría ejecutar código, data: que podría contener payloads maliciosos, file: que podría acceder al filesystem del servidor, y cualquier otro scheme que no sea http o https. La segunda capa previene SSRF verificando que el host destino no sea interno. La lista de hosts bloqueados incluye localhost y 127.0.0.1 para la máquina local, los rangos de IP privadas 10.0.0.0/8, 172.16.0.0/12 y 192.168.0.0/16, la IP de link-local 169.254.169.254 que es el endpoint de metadata en clouds como AWS y GCP, y strings como metadata.google para acceso a metadata de instancia en Google Cloud. Esta validación previene que un atacante use el servidor como proxy para acceder a servicios internos. La tercera capa valida extensiones de imagen permitiendo solo jpg, png, gif, webp y svg. La cuarta capa limita la longitud de la URL a dos mil cuarenta y ocho caracteres previniendo ataques de buffer overflow.
+
+La función escape_like_pattern documentada como HIGH-01 FIX escapa los caracteres especiales porcentaje y guión bajo que tienen significado especial en cláusulas SQL LIKE. Sin este escape un atacante podría proporcionar un término de búsqueda como porcentaje que matchearía todos los registros potencialmente causando un full table scan costoso y exfiltrando datos. El porcentaje se escapa como backslash porcentaje y el guión bajo como backslash guión bajo.
+
+La función validate_quantity proporciona validación de rango para cantidades de items de carrito verificando que el valor esté dentro del rango configurado de uno a noventa y nueve por defecto. La función sanitize_search_term normaliza términos de búsqueda removiendo caracteres de control como null bytes, espacios excesivos, y limitando la longitud máxima a cien caracteres para prevenir queries sobredimensionados.
+
+---
+
+## Capítulo 13: Health Checks con Timeout
+
+El módulo health.py documentado como ARCH-OPP-03 FIX con aproximadamente doscientas sesenta y ocho líneas de código proporciona decoradores y utilidades para implementar health checks robustos con comportamiento consistente y protección contra timeouts.
+
+El decorador health_check_with_timeout envuelve una función de health check asíncrona con protección de timeout y manejo estructurado de resultados. El decorador recibe el timeout en segundos y el nombre del componente como parámetros. La función decorada se ejecuta con asyncio.wait_for que cancela la operación si excede el timeout. La latencia se mide mediante time.perf_counter para precisión de nanosegundos. Si la función completa exitosamente se retorna un HealthCheckResult con status HEALTHY incluyendo la latencia medida y cualquier detail retornado por la función como tamaño de pool o conteo de conexiones. Si ocurre timeout se retorna status UNHEALTHY con error indicando timeout after N seconds. Si ocurre cualquier otra excepción se retorna status UNHEALTHY con el mensaje de error capturado.
+
+La clase HealthCheckResult es un dataclass frozen que encapsula el resultado de un health check. Incluye status como enum HealthStatus con valores HEALTHY, DEGRADED o UNHEALTHY. Incluye component como string identificando qué componente se verificó. Incluye latency_ms como float indicando cuánto tardó la verificación en milisegundos. Incluye error opcional como string si hubo fallo. Incluye details opcional como diccionario con información adicional específica del componente.
+
+La función aggregate_health_checks recibe una lista de coroutines de health check y las ejecuta en paralelo mediante asyncio.gather. Los resultados se agregan en un diccionario donde la key es el nombre del componente y el value es su HealthCheckResult. El status global se calcula como HEALTHY si todos los componentes están healthy, DEGRADED si alguno está unhealthy pero la mayoría están healthy, y UNHEALTHY si la mayoría están unhealthy o si componentes críticos específicos como base de datos o Redis fallaron.
+
+---
+
+## Capítulo 14: Schemas Pydantic Compartidos
+
+El archivo schemas.py con aproximadamente novecientas cuarenta y ocho líneas de código contiene los schemas Pydantic utilizados por endpoints públicos y operacionales de la API. Estos schemas definen el contrato de comunicación entre frontend y backend garantizando que ambos lados acuerden en la estructura de datos intercambiados con validación automática.
+
+Los schemas de autenticación incluyen LoginRequest con campos email y password ambos requeridos como strings, LoginResponse con access_token, refresh_token, token_type siempre como Bearer, expires_in indicando segundos hasta expiración, y UserInfo anidado con datos del usuario. RefreshTokenRequest contiene solo el token de refresco a renovar. TokenPayload representa el contenido decodificado de un JWT con todos los claims tipados.
+
+Los schemas de mesa y sesión incluyen TableCard con información resumida de una mesa para listados incluyendo id, código, capacidad, estado y datos de sesión activa si existe. TableSessionResponse contiene los datos retornados al crear o obtener una sesión incluyendo session_id, table_token para autenticación de comensal, y datos de la mesa. TableSessionDetail proporciona toda la información de una sesión activa incluyendo lista de diners, rounds con sus items, y service calls pendientes.
+
+Los schemas de pedidos incluyen SubmitRoundRequest con la estructura de un pedido a enviar conteniendo lista de CartItem donde cada uno tiene product_id, quantity entre uno y noventa y nueve, y notes opcional de hasta quinientos caracteres. RoundOutput contiene los datos de un round creado incluyendo id, status, items con sus detalles, y timestamps de creación y actualización.
+
+Los schemas de facturación incluyen RequestCheckResponse retornado cuando se solicita la cuenta conteniendo check_id y total en centavos. CashPaymentRequest contiene amount_cents y método de pago. PaymentResponse incluye payment_id, status, y detalles del cambio si corresponde. CheckDetailOutput proporciona el detalle completo de una cuenta incluyendo charges por diner, payments recibidos, y allocations mostrando cómo se asignó cada pago.
+
+El archivo admin_schemas.py con aproximadamente ochocientas diez líneas adicionales contiene schemas específicos para el Dashboard administrativo. Siguiendo Clean Architecture estos schemas residen en la capa compartida para que los Domain Services puedan usarlos sin depender de la capa de routers. Los schemas siguen un patrón consistente donde EntityOutput contiene todos los campos para lectura con Config from_attributes=True para conversión automática desde modelos SQLAlchemy, EntityCreate contiene campos requeridos para creación con validadores para campos especiales como URLs de imagen, y EntityUpdate contiene campos opcionales para actualización parcial.
+
+---
+
+## Capítulo 15: Correlación de Requests y Telemetría
+
+El módulo correlation.py con aproximadamente cien líneas de código proporciona tracking de requests distribuidos mediante context variables permitiendo que todos los logs generados durante el procesamiento de una request compartan el mismo identificador único facilitando correlación en sistemas de log management.
+
+El sistema utiliza ContextVar de Python para almacenar el request_id de manera thread-safe y compatible con código asíncrono. El CorrelationIdMiddleware instalado en la aplicación FastAPI genera o extrae el identificador: si el cliente envía un header X-Request-ID se utiliza ese valor permitiendo trazabilidad end-to-end; si no se genera un UUID nuevo. El identificador se almacena en la context variable y se incluye en el header de respuesta permitiendo al cliente correlacionar sus logs con los del servidor.
+
+El CorrelationIdFilter se instala en todos los handlers de logging agregando automáticamente el campo request_id a cada log record. Cuando se utiliza StructuredFormatter este campo aparece como campo JSON independiente; con DevelopmentFormatter aparece como prefijo entre corchetes. La función setup_correlation_logging instala el filtro en todos los handlers existentes durante el startup de la aplicación.
+
+El módulo telemetry.py con aproximadamente ciento treinta y nueve líneas proporciona hooks de observabilidad adicionales para integración con sistemas de distributed tracing cuando es necesario instrumentación más detallada que simple correlación por request ID.
+
+---
+
+## Capítulo 16: Thread Safety y Patrones de Concurrencia
+
+El sistema implementa múltiples instancias del patrón double-check locking para inicialización lazy de recursos compartidos identificado en múltiples artefactos CRIT-LOCK. Este patrón evita tanto la creación múltiple de recursos como la contención innecesaria de locks en el camino común donde el recurso ya existe.
+
+Para el pool Redis asíncrono una variable global _redis_pool comienza como None. La función get_redis_pool primero verifica si el pool existe sin adquirir lock retornando inmediatamente si ya está inicializado evitando cualquier overhead de sincronización en el caso común. Si no existe adquiere un asyncio.Lock y vuelve a verificar dentro del lock ya que otro coroutine podría haber inicializado el pool mientras se esperaba. Solo si después de adquirir el lock el pool sigue siendo None se procede a crearlo. Este segundo check dentro del lock es lo que hace double-check al patrón y previene creación duplicada que desperdiciaría recursos y podría causar inconsistencias.
+
+Para recursos síncronos como el pool de conexiones Redis síncrono y el ThreadPoolExecutor de rate limiting el patrón utiliza threading.Lock en lugar de asyncio.Lock ya que opera en contexto síncrono. El artefacto CRIT-LOCK-02 FIX documenta específicamente que usar asyncio.Lock desde código síncrono causa errores de event loop porque asyncio.Lock requiere un event loop activo que no existe cuando se ejecuta código síncrono puro.
+
+El sistema utiliza un patrón de cleanup en dos fases para estructuras de datos compartidas evitando el error dictionary changed size during iteration. La primera fase toma un snapshot de los items bajo el lock. La segunda fase itera sobre el snapshot identificando entries a eliminar sin modificar la estructura original. La tercera fase adquiere nuevamente el lock y aplica las eliminaciones verificando que cada key todavía existe antes de eliminar ya que otra operación podría haberla eliminado mientras no se sostenía el lock.
 
 ---
 
 ## Conclusión
 
-La capa `shared/` representa más que una simple colección de utilidades compartidas. Es el corazón arquitectónico del sistema Integrador, donde convergen las decisiones fundamentales de seguridad, configuración, y comunicación. Su diseño modular, documentado mediante artefactos de auditoría (CRIT-*, HIGH-*, etc.), refleja una evolución continua hacia mayor robustez y mantenibilidad.
+La capa shared/ representa mucho más que una colección de utilidades compartidas entre componentes. Es el verdadero corazón arquitectónico del sistema Integrador donde convergen las decisiones fundamentales de seguridad, configuración, comunicación y resiliencia que definen el comportamiento del sistema completo.
 
-La separación clara de responsabilidades (config, security, infrastructure, utils) permite que equipos trabajen independientemente en diferentes aspectos del sistema. Los patrones establecidos (fail-closed, circuit breaker, structured logging) garantizan comportamiento predecible incluso en condiciones de fallo.
+La evolución de esta capa documentada meticulosamente mediante más de novecientos artefactos de auditoría con prefijos CRIT, HIGH, MED y LOW refleja un proceso continuo de hardening y refinamiento. Desde la migración de tokens de mesa a formato JWT estándar pasando por la implementación de circuit breakers para resiliencia Redis hasta la refactorización del sistema de eventos en módulos especializados, cada cambio respondió a necesidades reales descubiertas durante operación y testing.
 
-Para cualquier desarrollador trabajando en el proyecto, comprender esta capa es fundamental. Aquí se definen los contratos que todas las demás capas deben respetar, desde cómo se validan tokens hasta cómo se publican eventos. Es, en el sentido más literal, el fundamento sobre el cual se construye todo lo demás.
+La separación clara de responsabilidades en cuatro módulos principales permite que equipos trabajen independientemente en diferentes aspectos del sistema. Un ingeniero de seguridad puede modificar la lógica de verificación de tokens sin afectar el sistema de eventos. Un especialista en infraestructura puede optimizar pools de conexiones sin tocar la lógica de negocio. Un desarrollador de producto puede agregar nuevos schemas sin preocuparse por autenticación.
+
+Los patrones establecidos garantizan comportamiento predecible incluso en las condiciones más adversas. El patrón fail-closed para seguridad asegura que fallas de infraestructura resulten en denial of service temporal en lugar de bypass de controles. El circuit breaker para resiliencia previene cascadas de fallos cuando Redis experimenta problemas. El double-check locking para concurrencia garantiza inicialización correcta de recursos compartidos sin contención innecesaria. El structured logging para observabilidad facilita diagnóstico y correlación de eventos distribuidos.
+
+Para cualquier desarrollador que se incorpore al proyecto comprender profundamente esta capa es requisito fundamental. Aquí se definen los contratos que todas las demás capas deben respetar. Aquí se establecen los invariantes de seguridad que nunca deben violarse. Aquí reside en el sentido más literal el fundamento sobre el cual se construye absolutamente todo lo demás del ecosistema Integrador.
