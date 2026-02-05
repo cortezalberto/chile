@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cp backend/.env.example backend/.env
 cp Dashboard/.env.example Dashboard/.env
 cp pwaMenu/.env.example pwaMenu/.env
+cp pwaWaiter/.env.example pwaWaiter/.env
 
 # 2. Start all backend services (PostgreSQL, Redis, REST API, WebSocket Gateway)
 cd devOps && docker compose up -d --build
@@ -122,6 +123,7 @@ Each project has its own documentation:
 cp backend/.env.example backend/.env                  # Backend config
 cp Dashboard/.env.example Dashboard/.env              # Dashboard config
 cp pwaMenu/.env.example pwaMenu/.env                  # pwaMenu config
+cp pwaWaiter/.env.example pwaWaiter/.env              # pwaWaiter config
 
 # =============================================================================
 # Backend with Docker (RECOMMENDED - includes all services)
